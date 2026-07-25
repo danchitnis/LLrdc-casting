@@ -1,0 +1,13 @@
+{
+  "name": "rock5c-webtransport-client",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Minimal Node.js WebTransport QUIC client for sending H.264 video frames to Rock 5C+",
+  "main": "client.mjs",
+  "scripts": {
+    "start": "node client.mjs"
+  },
+  "dependencies": {
+    "@sublime-art/webtransport": "^0.2.0"
+  }
+}

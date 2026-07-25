@@ -1,6 +1,6 @@
 /*
- * Radxa Rock 5C+ V4L2 DMA-BUF DRM Atomic Display Pipeline
- * Modular Safe Rust Entry Point
+ * Radxa Rock 5C+ WebTransport QUIC UDP Remote Screen Sharing Server
+ * Safe Rust V4L2 DMA-BUF DRM Atomic Display Pipeline
  */
 
 mod drm_kms;
@@ -8,15 +8,19 @@ mod gfx;
 mod net;
 mod text;
 mod v4l2;
+mod v4l2_decoder;
+mod webtransport_server;
 
 use std::os::fd::AsFd;
 use std::os::unix::io::AsRawFd;
 use std::thread;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=====================================================");
-    println!(" Safe Rust Pipeline: V4L2 -> DMA-BUF -> DRM");
+    println!(" Safe Rust Pipeline: WebTransport -> V4L2 -> DRM");
     println!(" Radxa Rock 5C+ / Rockchip RK3588 DRM Display");
     println!("=====================================================\n");
 
@@ -104,26 +108,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -------------------------------------------------------------
-    // Step 3: Import DMA-BUF fd into DRM Framebuffer
+    // Step 3: Import DMA-BUF fd into DRM Framebuffer & Commit Modeset
     // -------------------------------------------------------------
     println!("\n[STEP 3] Importing DMA-BUF fd ({}) into DRM Framebuffer...", dmabuf_fd);
     let fb_handle = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, dmabuf_fd, fb_w, fb_h, pitch, pixel_format)?;
 
-    // -------------------------------------------------------------
-    // Step 4: Display Framebuffer directly via DRM CRTC & Modeset
-    // -------------------------------------------------------------
     println!("\n[STEP 4] Executing DRM KMS Modeset & Display on CRTC {:?}...", crtc_handle);
     drm_kms::set_display_mode(&card, crtc_handle, fb_handle, conn_handle, mode)?;
 
+    // -------------------------------------------------------------
+    // Step 5: Display IP Dashboard for EXACTLY 1 second
+    // -------------------------------------------------------------
     println!("\n=====================================================");
-    println!(" [SUCCESS] DRM KMS Display Commit Successful!");
-    println!(" Screen Resolution: {}x{} @ {}Hz", screen_w, screen_h, mode.vrefresh());
-    println!(" Frame Buffer Size: {}x{}", fb_w, fb_h);
+    println!(" [SUCCESS] DRM KMS Display Active!");
+    println!(" [TIMING] Displaying IPv4 Address Dashboard on HDMI for 1 second...");
     println!("=====================================================");
+    thread::sleep(Duration::from_secs(1));
 
-    println!("\nDisplaying active device IP addresses on HDMI screen for 10 seconds...");
-    thread::sleep(Duration::from_secs(10));
+    // -------------------------------------------------------------
+    // Step 6: Start WebTransport Server & Video Stream Decoder Loop
+    // -------------------------------------------------------------
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(32);
 
-    println!("Done.");
+    // Spawn WebTransport QUIC UDP server on 0.0.0.0:4433
+    tokio::spawn(async move {
+        if let Err(e) = webtransport_server::run_server(frame_tx).await {
+            eprintln!("[SERVER ERROR] WebTransport QUIC server error: {}", e);
+        }
+    });
+
+    println!("\n[SERVER READY] WebTransport QUIC UDP Server running on port 4433.");
+    println!(" Waiting for incoming H.264 video streams from remote client...");
+
+    // Continuously process and display incoming H.264 video frames
+    while let Some(h264_payload) = frame_rx.recv().await {
+        if let Err(e) = v4l2_decoder::process_and_render_h264_frame(
+            &h264_payload,
+            _buf_map,
+            _buf_size,
+            fb_w,
+            fb_h,
+            pixel_format,
+        ) {
+            eprintln!("[DECODER ERROR] Failed to decode/render H.264 frame: {}", e);
+        } else {
+            // Refresh DRM KMS display commit
+            let _ = drm_kms::set_display_mode(&card, crtc_handle, fb_handle, conn_handle, mode);
+        }
+    }
+
     Ok(())
 }

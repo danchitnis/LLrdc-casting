@@ -1,4 +1,7 @@
-FROM rust:1.80-slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS builder
+
+# Limit parallel Cargo compilation jobs to 2 to prevent power surges & memory spikes on RK3588
+ENV CARGO_BUILD_JOBS=2
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -35,5 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/rock5c-v4l2-drm ./rock5c-v4l2-drm
+
+EXPOSE 4433/udp
 
 CMD ["./rock5c-v4l2-drm"]
