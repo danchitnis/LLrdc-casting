@@ -1,6 +1,6 @@
-FROM debian:bookworm-slim
+FROM rust:1.80-slim-bookworm AS builder
 
-# Install compilation dependencies and libraries
+# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
@@ -8,14 +8,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libv4l-dev \
     v4l-utils \
     libdrm-tests \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY Cargo.toml ./
+COPY src/ ./src/
+
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libdrm2 \
+    libv4l-0 \
+    v4l-utils \
+    libdrm-tests \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY Makefile ./
-COPY src/ ./src/
+COPY --from=builder /app/target/release/rock5c-v4l2-drm ./rock5c-v4l2-drm
 
-RUN make clean && make
-
-CMD ["./v4l2_dmabuf_drm"]
+CMD ["./rock5c-v4l2-drm"]

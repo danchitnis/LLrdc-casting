@@ -1,0 +1,14 @@
+[package]
+name = "rock5c-v4l2-drm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+drm = "0.14"
+nix = { version = "0.29", features = ["mman", "fs", "ioctl"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
