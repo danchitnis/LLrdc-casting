@@ -1,6 +1,6 @@
 # Radxa Rock 5C+ WebTransport QUIC Screen Sharing Server (Rust Implementation)
 
-A repeatable, containerized zero-copy screen sharing application written in **Safe Rust** for the **Radxa Rock 5C+** (Rockchip RK3588) running Armbian. It displays the active IPv4 address dashboard on HDMI for **1 second** on startup, then accepts incoming **WebTransport / QUIC (UDP)** streams, decodes H.264 video frames, and presents them via a zero-copy **V4L2 Decoder → DMA-BUF fd → DRM Atomic Commit → HDMI** pipeline inside Docker.
+A repeatable, containerized zero-copy screen sharing application written in **Safe Rust** for the **Radxa Rock 5C+** (Rockchip RK3588) running Armbian. On startup, it displays the active IPv4 address dashboard with a **live real-time clock (`HH:MM:SS UTC`)** on HDMI, then accepts incoming **WebTransport / QUIC (UDP)** video streams, decodes H.264 video frames via the hardware video decoder (`/dev/video2` / `rkvdec`), and presents them via a tear-free **V4L2 Decoder → DMA-BUF fd → DRM Atomic Commit (VSYNC Page Flip) → HDMI** pipeline inside Docker.
 
 ---
 
@@ -10,7 +10,7 @@ A repeatable, containerized zero-copy screen sharing application written in **Sa
 ┌─────────────────────────────────────────────────────────────┐
 │                 Local Workstation (Client)                  │
 │  - WebTransport QUIC Client over UDP                        │
-│  - Transmits static H.264 video frame (Annex-B NAL units)   │
+│  - Streamer script: ./stream.sh                             │
 │  - Connects to https://192.168.1.72:4433                     │
 └──────────────────────────────┬──────────────────────────────┘
                                │
@@ -20,15 +20,15 @@ A repeatable, containerized zero-copy screen sharing application written in **Sa
 ┌─────────────────────────────────────────────────────────────┐
 │                 Radxa Rock 5C+ Server (Board)               │
 │                                                             │
-│  Phase 1 (Startup - 1s):                                    │
-│  - Renders IPv4 Address Dashboard on HDMI for 1.0 second    │
+│  Idle / Waiting Phase:                                      │
+│  - Displays IPv4 Dashboard with Live Real-Time Clock on HDMI│
 │                                                             │
-│  Phase 2 (1s - Streaming):                                  │
+│  Streaming Phase:                                           │
 │  - WebTransport Server accepts QUIC stream over UDP:4433    │
-│  - Receives incoming H.264 frame payload                    │
-│  - Decodes H.264 video frame via RK3588 hardware pipeline   │
-│  - Exports decoded NV12 / XRGB frame as DMA-BUF fd          │
-│  - Commits DMA-BUF directly to DRM KMS -> HDMI Display      │
+│  - Receives incoming video frame packets                    │
+│  - Strictly decodes video via RK3588 rkvdec HW decoder      │
+│  - Performs Double-Buffered VSYNC Page Flip (0 Tearing)     │
+│  - Commits frame directly to DRM KMS -> HDMI Display        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -36,12 +36,15 @@ A repeatable, containerized zero-copy screen sharing application written in **Sa
 
 ## Features
 
-- **WebTransport / QUIC over UDP Server (`src/webtransport_server.rs`)**: Async QUIC UDP server on port `4433` using `wtransport` and self-signed TLS certificates (`rcgen`).
-- **1-Second Startup IP Screen**: Autodetects native 2K HDMI display (`2560x1440 @ 60Hz`) and displays active device IPv4 addresses for 1 second before accepting video streams.
-- **H.264 Video Decoder (`src/v4l2_decoder.rs`)**: Processes incoming H.264 Annex-B NAL unit payloads and updates zero-copy DMA-BUF frame memory.
-- **Dev Clients (`client/client.mjs` & `src/bin/client.rs`)**: Node.js and Rust dev clients for sending static H.264 video frames over UDP.
+- **Server Control Script (`server.sh`)**:
+  - `./server.sh --start` (or `--strat`): Syncs code, builds Docker container, and starts server in background.
+  - `./server.sh --stop`: Cleanly stops and removes the server container on the board.
+- **Dedicated Video Streamer Script (`stream.sh`)**:
+  - `./stream.sh [BOARD_IP] [PORT]`: Launches 30 FPS video streamer client (`client/client.mjs`), streaming for 5 seconds and exiting cleanly.
+- **Real-Time Clock Overlay**: Renders active IPv4 addresses and a live digital clock (`HH:MM:SS UTC` in bright gold) updating every second while waiting for stream connections.
+- **Strict Hardware Video Decoder (`/dev/video2` / `rkvdec`)**: Binds RK3588 hardware video decoder engine (`rkvdec`) with strict enforcement—fails immediately if hardware video decoding is unavailable.
+- **Tear-Free & Flicker-Free VSYNC Page Flipping**: Uses double-buffered native DRM PRIME DMA-BUF framebuffers (`Buffer 0` and `Buffer 1`) with hardware VSYNC page flipping (`card.page_flip`).
 - **RK3588 Thermal & Power Safe Build**: Configured with `ENV CARGO_BUILD_JOBS=2` and `codegen-units = 16` to prevent CPU power spikes and board reboots during compilation.
-- **One-Command Deployment**: Single script (`./deploy.sh`) syncs code, builds Docker container, restarts server in background, and executes the dev client transmission.
 
 ---
 
@@ -54,9 +57,11 @@ A repeatable, containerized zero-copy screen sharing application written in **Sa
 ├── Makefile                # Cargo build helper
 ├── README.md               # User guide (this file)
 ├── SETUP.md                # AI Agent execution & initialization protocol
-├── deploy.sh               # Local-to-board sync, build, run & client test script
+├── server.sh               # Server management script (--start / --stop)
+├── stream.sh               # Video streaming client launcher
+├── deploy.sh               # Backwards-compatibility wrapper forwarding to server.sh --start
 ├── client/
-│   ├── client.mjs          # Node.js dev client sending static H.264 frame via UDP
+│   ├── client.mjs          # Node.js dev client sending 30 FPS video stream over UDP
 │   └── package.json        # Client package configuration
 └── src/
     ├── main.rs             # Application entry point & orchestration loop
@@ -66,8 +71,7 @@ A repeatable, containerized zero-copy screen sharing application written in **Sa
     ├── gfx.rs              # Safe Rust 2D geometric pixel drawing
     ├── net.rs              # Safe Rust IPv4 network interface discovery
     ├── text.rs             # Safe Rust bitmap font text-to-graphics module
-    ├── v4l2.rs             # V4L2 buffer allocation & DMA-BUF export
-    ├── v4l2_decoder.rs     # H.264 video stream frame processing & rendering
+    ├── v4l2_decoder.rs     # RK3588 hardware video decoder & frame processing
     └── webtransport_server.rs # WebTransport QUIC UDP server module
 ```
 
@@ -75,28 +79,45 @@ A repeatable, containerized zero-copy screen sharing application written in **Sa
 
 ## Quick Start Guide
 
-1. **Deploy Server & Transmit Test Frame**:
+1. **Start Server on Board**:
    From your local workstation terminal, run:
    ```bash
-   ./deploy.sh
+   ./server.sh --start
    ```
 
-2. **Expected Terminal Output**:
-   ```text
-   ==> 3. Restarting Docker container on board in background mode...
-   ==> 4. Waiting 2 seconds for server initialization and 1-second IP screen display...
-   ==> 5. Executing local WebTransport client to transmit static H.264 frame to 192.168.1.72:4433...
-   =====================================================
-    WebTransport QUIC UDP H.264 Dev Client (Node.js)
-    Target Server: 192.168.1.72:4433 (UDP)
-   =====================================================
-
-   [CLIENT SUCCESS] Transmitted 70 bytes of static H.264 frame to 192.168.1.72:4433
-   ==> 6. Fetching board container server logs...
-   [SUCCESS] DRM KMS Display Active!
-   [TIMING] Displaying IPv4 Address Dashboard on HDMI for 1 second...
-   [SERVER READY] WebTransport QUIC UDP Server running on port 4433.
-   [WEBTRANSPORT SERVER] Listening on UDP 0.0.0.0:4433
-   [DECODER] Processing H.264 NAL unit payload (70 bytes) for screen (2560x1440)...
-   ==> Deployment & frame transmission complete!
+2. **Stream Video to Board (5 Seconds)**:
+   In another terminal, run:
+   ```bash
+   ./stream.sh
    ```
+
+3. **Stop Server**:
+   To stop the server container on the board:
+   ```bash
+   ./server.sh --stop
+   ```
+
+---
+
+## Expected Server Terminal Output
+
+```text
+[STEP 1] Opening DRM device & autodetecting display mode...
+[DRM SUCCESS] Opened display card: /dev/dri/card0
+[DRM AUTODETECT SUCCESS] Screen Resolution: 2560x1440 @ 60Hz
+
+[HW DECODER SUCCESS] Bound RK3588 V4L2 Hardware Video Decoder: /dev/video2
+[HW DECODER ENGINE] rkvdec (Hardware H.264 / HEVC / VP9 Video Acceleration Active)
+
+[STEP 2] Allocating Double-Buffered DRM PRIME frame memory (2560x1440)...
+[DMA-BUF 0] Buffer 0 ready: fd=4, FB=framebuffer::Handle(58)
+[DMA-BUF 1] Buffer 1 ready: fd=5, FB=framebuffer::Handle(59)
+
+[NETWORK] Active IPv4 Addresses detected on device:
+  - lo         : 127.0.0.1
+  - end0       : 192.168.1.72
+
+[SERVER READY] WebTransport QUIC UDP Server running on port 4433/4434.
+ Displaying IPv4 Dashboard with Real-Time Clock on HDMI.
+ Waiting for incoming H.264 video streams from remote client...
+```

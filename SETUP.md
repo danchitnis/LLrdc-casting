@@ -1,14 +1,14 @@
 # Agent Setup Instructions: Radxa Rock 5C+ V4L2 DRM Pipeline Initialization (Rust)
 
-This document outlines the step-by-step workflow for an **AI Agent** or automated system initializing and deploying the safe Rust V4L2 DMA-BUF DRM Atomic pipeline on a fresh/blank Armbian installation upon acquiring SSH access.
+This document outlines the step-by-step workflow for an **AI Agent** or automated system initializing and deploying the safe Rust WebTransport V4L2 DMA-BUF DRM Atomic pipeline on a fresh/blank Armbian installation upon acquiring SSH access.
 
 ---
 
 ## Agent Operational Rules
 
-1. **Local Files First**: All project source files (`src/main.rs`, `Cargo.toml`, `Dockerfile`, `Makefile`, `deploy.sh`) must be maintained locally in the host workstation Git repository.
+1. **Local Files First**: All project source files (`src/main.rs`, `Cargo.toml`, `Dockerfile`, `Makefile`, `server.sh`, `stream.sh`) must be maintained locally in the host workstation Git repository.
 2. **No Sudo Workarounds**: If `sudo` privileges are required on the remote target board, request them from the user rather than bypassing security mechanisms.
-3. **Container Isolation**: Compile and run all rendering applications inside a Docker container (`--privileged -v /dev:/dev`) to keep the host Armbian system clean.
+3. **Container Isolation**: Compile and run all rendering applications inside a Docker container (`--net=host --privileged -v /dev:/dev`) to keep the host Armbian system clean.
 4. **No Git Commits Without Explicit User Permission**: Only stage/commit when explicitly requested by the user.
 
 ---
@@ -25,8 +25,8 @@ ssh <BOARD_IP> "uname -a"
 
 ---
 
-### Step 2: Inspect Display Subsystem, V4L2 Devices & DRM Modes (`modetest`)
-Inspect available DRM graphics cards, V4L2 video nodes, and display connectors using `modetest`:
+### Step 2: Inspect Display Subsystem, V4L2 Hardware Decoders & DRM Modes (`modetest`)
+Inspect available DRM graphics cards, V4L2 hardware video nodes (`rkvdec`), and display connectors:
 
 ```bash
 # 1. Query DRM card devices and driver paths
@@ -35,106 +35,61 @@ ssh <BOARD_IP> "ls -l /dev/dri/card* /dev/dri/render*"
 # 2. Query active connectors, EDIDs, and supported screen modes (e.g., 2560x1440 2K)
 ssh <BOARD_IP> "docker run --rm --privileged -v /dev:/dev rock5c-v4l2-drm modetest -M rockchip -c"
 
-# 3. Query active CRTCs and Primary/Overlay Plane IDs
-ssh <BOARD_IP> "docker run --rm --privileged -v /dev:/dev rock5c-v4l2-drm modetest -M rockchip -p"
-
-# 4. List V4L2 hardware video nodes
-ssh <BOARD_IP> "ls -l /dev/video*"
+# 3. List V4L2 hardware video nodes
+ssh <BOARD_IP> "ssh <BOARD_IP> ls -l /dev/video*"
 ```
 
 *Target Drivers & Output*:
 - DRM display card: `/dev/dri/card0` (Driver: `rockchip`)
-- Active HDMI Connector ID: e.g. `54` (`HDMI-A-1`, preferred mode `2560x1440 @ 59.95Hz`)
-- Primary Plane ID: e.g. `33` or `17` bound to CRTC `39`
-- V4L2 nodes: `/dev/video0` (`rockchip-rga` / `iep`), `/dev/video2` (`rkvdec`)
+- Active HDMI Connector ID: e.g. `54` (`HDMI-A-1`, preferred mode `2560x1440 @ 60Hz`)
+- RK3588 Hardware Video Decoder Node: `/dev/video2` (`rkvdec`)
 
 ---
 
-### Step 3: Verify & Initialize Docker Environment on Remote Target
-
-1. **Check Docker Status**:
-   ```bash
-   ssh <BOARD_IP> "docker --version && systemctl is-active docker"
-   ```
-
-2. **If Docker or `rsync` is Missing**:
-   Ask user for permissions or execute:
-   ```bash
-   ssh <BOARD_IP> "sudo apt update && sudo apt install -y docker.io rsync v4l-utils libdrm-tests && sudo systemctl enable --now docker"
-   ```
-
-3. **Ensure Group Membership**:
-   Confirm current remote user belongs to `docker`, `video`, and `render` groups:
-   ```bash
-   ssh <BOARD_IP> "sudo usermod -aG docker,video,render \$USER"
-   ```
-
----
-
-### Step 4: Synchronize Repository to Remote Board
-Sync the local repository workspace to the remote target directory `~/rock5c-v4l2-drm`:
+### Step 3: Launch WebTransport Screen Sharing Server
+To sync repository workspace, build Docker image, and start the server on board in background mode:
 
 ```bash
-rsync -avz --exclude '.git' . <BOARD_IP>:~/rock5c-v4l2-drm
+./server.sh --start
+```
+
+To stop the server container on the board:
+
+```bash
+./server.sh --stop
 ```
 
 ---
 
-### Step 5: Build Container Image Remotely
-Build the multi-stage Rust Docker image on the board containing `libdrm-dev` and `libv4l-dev`:
+### Step 4: Execute Video Streamer Test Client
+To stream 30 FPS video to the board for 5 seconds:
 
 ```bash
-ssh <BOARD_IP> "cd ~/rock5c-v4l2-drm && docker build -t rock5c-v4l2-drm ."
+./stream.sh
 ```
 
 ---
 
-### Step 6: Run Container & Execute Hardware Pipeline
-Execute the containerized Rust pipeline with hardware device access:
-
-```bash
-ssh <BOARD_IP> "docker run --rm --privileged -v /dev:/dev rock5c-v4l2-drm"
-```
-
----
-
-### Step 7: Verify Pipeline Execution Logs
-Verify that the output logs report success across all four pipeline stages and list active IPv4 addresses:
+### Step 5: Verify Pipeline Execution Logs
+Verify that the output logs report success across all server stages:
 
 ```text
-=====================================================
- Safe Rust Pipeline: V4L2 -> DMA-BUF -> DRM
- Radxa Rock 5C+ / Rockchip RK3588 DRM Display
-=====================================================
-
 [STEP 1] Opening DRM device & autodetecting display mode...
 [DRM SUCCESS] Opened display card: /dev/dri/card0
-[DRM] Found connected HDMI connector: connector::Handle(54)
-[DRM] Found PREFERRED mode: 2560x1440 @ 60Hz
-[DRM AUTODETECT SUCCESS] Screen Resolution: 2560x1440 @ 60Hz (Connector: connector::Handle(54), CRTC: crtc::Handle(39))
+[DRM AUTODETECT SUCCESS] Screen Resolution: 2560x1440 @ 60Hz
 
-[STEP 2] Allocating & exporting V4L2 DMA-BUF frame memory...
-[V4L2] Driver: rockchip-rga, Card: rockchip-rga
-[V4L2] Negotiated format: XRGB8888 (2560x1440), pitch: 10240
-[DMA-BUF SUCCESS] Created native DMA-BUF fd = 4 (2560x1440) via PRIME export
+[HW DECODER SUCCESS] Bound RK3588 V4L2 Hardware Video Decoder: /dev/video2
+[HW DECODER ENGINE] rkvdec (Hardware H.264 / HEVC / VP9 Video Acceleration Active)
+
+[STEP 2] Allocating Double-Buffered DRM PRIME frame memory (2560x1440)...
+[DMA-BUF 0] Buffer 0 ready: fd=4, FB=framebuffer::Handle(58)
+[DMA-BUF 1] Buffer 1 ready: fd=5, FB=framebuffer::Handle(59)
 
 [NETWORK] Active IPv4 Addresses detected on device:
   - lo         : 127.0.0.1
   - end0       : 192.168.1.72
-  - docker0    : 172.17.0.1
 
-[STEP 3] Importing DMA-BUF fd (4) into DRM Framebuffer...
-[DRM SUCCESS] Converted DMA-BUF fd (4) -> GEM Handle (1)
-[DRM SUCCESS] Created DRM Framebuffer Handle = framebuffer::Handle(60) (2560x1440)
-
-[STEP 4] Executing DRM KMS Modeset & Display on CRTC crtc::Handle(39)...
-
-=====================================================
- [SUCCESS] DRM KMS Display Commit Successful!
- Screen Resolution: 2560x1440 @ 60Hz
- Frame Buffer Size: 2560x1440
-=====================================================
-
-Displaying active device IP addresses on HDMI screen for 10 seconds...
-Done.
+[SERVER READY] WebTransport QUIC UDP Server running on port 4433/4434.
+ Displaying IPv4 Dashboard with Real-Time Clock on HDMI.
+ Waiting for incoming H.264 video streams from remote client...
 ```

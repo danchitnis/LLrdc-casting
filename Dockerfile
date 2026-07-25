@@ -40,5 +40,6 @@ WORKDIR /app
 COPY --from=builder /app/target/release/rock5c-v4l2-drm ./rock5c-v4l2-drm
 
 EXPOSE 4433/udp
+EXPOSE 4434/udp
 
 CMD ["./rock5c-v4l2-drm"]

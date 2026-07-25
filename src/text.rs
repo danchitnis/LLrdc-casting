@@ -178,7 +178,7 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, ips: &[(
     }
 
     // Header Title
-    let title = "RADXA ROCK 5C+ // ACTIVE DEVICE IP ADDRESSES";
+    let title = "RADXA ROCK 5C+ // DEVICE IPS";
     draw_string_argb(
         buf,
         width,
@@ -187,6 +187,30 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, ips: &[(
         box_y + (header_h - 8 * scale) / 2,
         title,
         0xFFFFFFFF,
+        scale,
+    );
+
+    // Real-Time Clock in Corner
+    let time_str = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(dur) => {
+            let secs = dur.as_secs();
+            let hours = (secs / 3600 % 24) as u32;
+            let mins = (secs / 60 % 60) as u32;
+            let s = (secs % 60) as u32;
+            format!("{:02}:{:02}:{:02} UTC", hours, mins, s)
+        }
+        Err(_) => "00:00:00 UTC".to_string(),
+    };
+
+    let clock_x = box_x + box_w - (time_str.len() * 8 * scale) - 20 * scale / 2;
+    draw_string_argb(
+        buf,
+        width,
+        height,
+        clock_x,
+        box_y + (header_h - 8 * scale) / 2,
+        &time_str,
+        0xFFFFCC00, // Bright Gold Clock
         scale,
     );
 
@@ -254,45 +278,4 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, ips: &[(
         0xFF8899A6,
         footer_scale.max(1),
     );
-}
-
-/// Render IP Dashboard onto NV12 YUV buffer
-pub fn draw_ip_dashboard_nv12(buf: &mut [u8], width: u32, height: u32, ips: &[(String, String)]) {
-    let w = width as usize;
-    let h = height as usize;
-    let y_size = w * h;
-
-    if buf.len() < y_size + y_size / 2 {
-        return;
-    }
-
-    // Convert dashboard to ARGB first, then translate into NV12 Y UV planes
-    let mut argb_buf = vec![0u32; w * h];
-    draw_ip_dashboard_argb(&mut argb_buf, width, height, ips);
-
-    let (y_plane, uv_plane) = buf.split_at_mut(y_size);
-
-    for r in 0..h {
-        for c in 0..w {
-            let argb = argb_buf[r * w + c];
-            let red = ((argb >> 16) & 0xFF) as i32;
-            let green = ((argb >> 8) & 0xFF) as i32;
-            let blue = (argb & 0xFF) as i32;
-
-            // BT.601 RGB to YUV Conversion
-            let y_val = ((66 * red + 129 * green + 25 * blue + 128) >> 8) + 16;
-            y_plane[r * w + c] = y_val.clamp(0, 255) as u8;
-
-            if r % 2 == 0 && c % 2 == 0 {
-                let u_val = ((-38 * red - 74 * green + 112 * blue + 128) >> 8) + 128;
-                let v_val = ((112 * red - 94 * green - 18 * blue + 128) >> 8) + 128;
-
-                let uv_idx = (r / 2) * w + (c & !1);
-                if uv_idx + 1 < uv_plane.len() {
-                    uv_plane[uv_idx] = u_val.clamp(0, 255) as u8;
-                    uv_plane[uv_idx + 1] = v_val.clamp(0, 255) as u8;
-                }
-            }
-        }
-    }
 }
