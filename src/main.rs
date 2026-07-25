@@ -37,16 +37,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let drm_raw_fd = card.as_fd().as_raw_fd();
 
     // -------------------------------------------------------------
-    // Step 2: Allocate DOUBLE-BUFFERED Native DRM PRIME DMA-BUF Buffers (2560x1440)
+    // Step 2: Allocate DOUBLE-BUFFERED Native DRM PRIME DMA-BUF Buffers
     // -------------------------------------------------------------
+    let active_format = if screen_w >= 3840 {
+        drm_kms::DRM_FORMAT_NV12
+    } else {
+        drm_kms::DRM_FORMAT_XRGB8888
+    };
+
     println!("\n[STEP 2] Allocating Double-Buffered DRM PRIME frame memory ({}x{})...", screen_w, screen_h);
 
     let (fd_0, pitch_0, size_0, ptr_0) = drm_kms::allocate_prime_dmabuf(drm_raw_fd, screen_w, screen_h)?;
-    let fb_handle_0 = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, fd_0, screen_w, screen_h, pitch_0, drm_kms::DRM_FORMAT_XRGB8888)?;
+    let fb_handle_0 = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, fd_0, screen_w, screen_h, pitch_0, active_format)?;
     println!("[DMA-BUF 0] Buffer 0 ready: fd={}, FB={:?}", fd_0, fb_handle_0);
 
     let (fd_1, pitch_1, size_1, ptr_1) = drm_kms::allocate_prime_dmabuf(drm_raw_fd, screen_w, screen_h)?;
-    let fb_handle_1 = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, fd_1, screen_w, screen_h, pitch_1, drm_kms::DRM_FORMAT_XRGB8888)?;
+    let fb_handle_1 = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, fd_1, screen_w, screen_h, pitch_1, active_format)?;
     println!("[DMA-BUF 1] Buffer 1 ready: fd={}, FB={:?}", fd_1, fb_handle_1);
 
     // -------------------------------------------------------------
@@ -59,12 +65,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !ptr_0.is_null() && size_0 > 0 {
-        let slice_0 = unsafe { std::slice::from_raw_parts_mut(ptr_0 as *mut u32, size_0 / 4) };
-        text::draw_ip_dashboard_argb(slice_0, screen_w, screen_h, &active_ips);
+        if active_format == drm_kms::DRM_FORMAT_NV12 {
+            let slice_0 = unsafe { std::slice::from_raw_parts_mut(ptr_0 as *mut u8, size_0) };
+            text::draw_ip_dashboard_nv12(slice_0, screen_w, screen_h, &active_ips);
+        } else {
+            let slice_0 = unsafe { std::slice::from_raw_parts_mut(ptr_0 as *mut u32, size_0 / 4) };
+            text::draw_ip_dashboard_argb(slice_0, screen_w, screen_h, &active_ips);
+        }
     }
     if !ptr_1.is_null() && size_1 > 0 {
-        let slice_1 = unsafe { std::slice::from_raw_parts_mut(ptr_1 as *mut u32, size_1 / 4) };
-        text::draw_ip_dashboard_argb(slice_1, screen_w, screen_h, &active_ips);
+        if active_format == drm_kms::DRM_FORMAT_NV12 {
+            let slice_1 = unsafe { std::slice::from_raw_parts_mut(ptr_1 as *mut u8, size_1) };
+            text::draw_ip_dashboard_nv12(slice_1, screen_w, screen_h, &active_ips);
+        } else {
+            let slice_1 = unsafe { std::slice::from_raw_parts_mut(ptr_1 as *mut u32, size_1 / 4) };
+            text::draw_ip_dashboard_argb(slice_1, screen_w, screen_h, &active_ips);
+        }
     }
 
     // -------------------------------------------------------------
@@ -109,15 +125,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
 
                     if !back_ptr.is_null() && back_size > 0 {
-                        let slice = unsafe { std::slice::from_raw_parts_mut(back_ptr as *mut u32, back_size / 4) };
-                        text::draw_ip_dashboard_argb(slice, screen_w, screen_h, &active_ips);
+                        if active_format == drm_kms::DRM_FORMAT_NV12 {
+                            let slice = unsafe { std::slice::from_raw_parts_mut(back_ptr as *mut u8, back_size) };
+                            text::draw_ip_dashboard_nv12(slice, screen_w, screen_h, &active_ips);
+                        } else {
+                            let slice = unsafe { std::slice::from_raw_parts_mut(back_ptr as *mut u32, back_size / 4) };
+                            text::draw_ip_dashboard_argb(slice, screen_w, screen_h, &active_ips);
+                        }
                         let _ = card.page_flip(crtc_handle, back_fb, drm::control::PageFlipFlags::empty(), None);
                         current_buf_idx = 1 - current_buf_idx;
                     }
                 }
             }
 
-            // Immediately render every fully reassembled video frame as it arrives
+            // Immediately render every fully reassembled video frame in strict FIFO sequence
             Some(video_frame) = frame_rx.recv() => {
                 let now = Instant::now();
                 let delta_ms = now.duration_since(last_render_time).as_secs_f32() * 1000.0;
@@ -150,17 +171,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     back_size,
                     screen_w,
                     screen_h,
-                    drm_kms::DRM_FORMAT_XRGB8888,
+                    active_format,
                     &active_ips,
                     measured_fps,
                     jitter_ms,
                 ) {
-                    if card.page_flip(
+                    let mut res = card.page_flip(
                         crtc_handle,
                         back_fb,
-                        drm::control::PageFlipFlags::empty(),
+                        drm::control::PageFlipFlags::ASYNC,
                         None,
-                    ).is_ok() {
+                    ).or_else(|_| {
+                        card.page_flip(
+                            crtc_handle,
+                            back_fb,
+                            drm::control::PageFlipFlags::empty(),
+                            None,
+                        )
+                    });
+
+                    if res.is_err() {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                        res = card.page_flip(
+                            crtc_handle,
+                            back_fb,
+                            drm::control::PageFlipFlags::empty(),
+                            None,
+                        );
+                    }
+
+                    if res.is_ok() {
                         current_buf_idx = 1 - current_buf_idx;
                     }
                 }

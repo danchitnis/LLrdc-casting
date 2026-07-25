@@ -106,12 +106,17 @@ pub struct VideoFrame {
     pub seq: u32,
     pub width: u32,
     pub height: u32,
+    pub codec: String,
     pub rgb_pixels: Vec<u8>,
 }
 
 /// Reassembles incoming UDP chunks into a complete VideoFrame using multi-slot buffer ring
 pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
-    if packet.len() >= 16 && (&packet[0..4] == b"VIDC" || &packet[0..4] == b"H264") {
+    if packet.len() >= 16 && (&packet[0..4] == b"VIDC" || &packet[0..4] == b"H264" || &packet[0..4] == b"H265" || &packet[0..4] == b"HEVC") {
+        let codec_str = match &packet[0..4] {
+            b"H265" | b"HEVC" => "hevc",
+            _ => "h264",
+        };
         let seq = u32::from_be_bytes(packet[4..8].try_into().ok()?);
         let chunk_idx = u16::from_be_bytes(packet[8..10].try_into().ok()?);
         let total_chunks = u16::from_be_bytes(packet[10..12].try_into().ok()?);
@@ -162,6 +167,7 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
                 seq: fb.seq,
                 width: fb.width as u32,
                 height: fb.height as u32,
+                codec: codec_str.to_string(),
                 rgb_pixels: std::mem::take(&mut fb.data),
             });
             *slot = None;
@@ -184,6 +190,9 @@ pub struct AsyncDecoderPipeline {
     tx_packet: Sender<Vec<u8>>,
     rx_yuv: Receiver<Vec<u8>>,
     last_frame: Option<Vec<u8>>,
+    codec: String,
+    target_w: u32,
+    target_h: u32,
 }
 
 static ASYNC_DECODER: Mutex<Option<AsyncDecoderPipeline>> = Mutex::new(None);
@@ -200,12 +209,26 @@ pub fn reset_decoder_pipeline() {
     }
 }
 
+#[allow(dead_code)]
 pub fn decode_h264_frame(h264_data: &[u8], width: u32, height: u32) -> Result<(Vec<u8>, bool), Box<dyn Error + Send + Sync>> {
+    decode_video_frame(h264_data, width, height, "h264", width, height)
+}
+
+pub fn decode_video_frame(bitstream: &[u8], width: u32, height: u32, codec: &str, _target_w: u32, _target_h: u32) -> Result<(Vec<u8>, bool), Box<dyn Error + Send + Sync>> {
     let frame_bytes = (width * height * 3 / 2) as usize;
     let mut dec_lock = ASYNC_DECODER.lock().unwrap();
 
+    let codec_arg = if codec == "hevc" || codec == "h265" { "hevc" } else { "h264" };
+
+    if let Some(ref pipeline) = *dec_lock {
+        if pipeline.codec != codec_arg || pipeline.target_w != width || pipeline.target_h != height {
+            println!("[HW DECODER SWITCH] Switching decoder codec={} res={}x{}...", codec_arg.to_uppercase(), width, height);
+            *dec_lock = None;
+        }
+    }
+
     if dec_lock.is_none() {
-        println!("[HW DECODER INIT] Spawning multi-threaded ultra-low latency H.264 decoder process...");
+        println!("[HW DECODER INIT] Spawning low-latency {} decoder process ({}x{} yuv420p)...", codec_arg.to_uppercase(), width, height);
 
         let (tx_packet, rx_packet) = channel::<Vec<u8>>();
         let (tx_yuv, rx_yuv) = channel::<Vec<u8>>();
@@ -213,13 +236,13 @@ pub fn decode_h264_frame(h264_data: &[u8], width: u32, height: u32) -> Result<(V
         let mut child = Command::new("ffmpeg")
             .args([
                 "-loglevel", "error",
-                "-threads", "4",
+                "-threads", "8",
                 "-flags", "+low_delay",
-                "-fflags", "+genpts+discardcorrupt+nobuffer",
+                "-fflags", "+genpts+nobuffer",
                 "-probesize", "32",
                 "-analyzeduration", "0",
-                "-c:v", "h264",
-                "-f", "h264",
+                "-c:v", codec_arg,
+                "-f", codec_arg,
                 "-i", "pipe:0",
                 "-f", "rawvideo",
                 "-pix_fmt", "yuv420p",
@@ -243,12 +266,23 @@ pub fn decode_h264_frame(h264_data: &[u8], width: u32, height: u32) -> Result<(V
             }
         });
 
-        // Background Thread 2: Continuous Frame-Aligned Stdout Reader
+        // Background Thread 2: Continuous Frame-Aligned Stdout Reader with Reusable Memory Pool
         thread::spawn(move || {
+            let pool_size = 4;
+            let mut pool: Vec<Vec<u8>> = (0..pool_size).map(|_| vec![0u8; frame_bytes]).collect();
+            let mut p_idx = 0;
+
             loop {
-                let mut decoded_buf = vec![0u8; frame_bytes];
-                if stdout.read_exact(&mut decoded_buf).is_ok() {
-                    if tx_yuv.send(decoded_buf).is_err() {
+                let buf_ref = &mut pool[p_idx];
+                if buf_ref.len() != frame_bytes {
+                    buf_ref.resize(frame_bytes, 0);
+                }
+
+                if stdout.read_exact(buf_ref).is_ok() {
+                    let frame_copy = buf_ref.clone();
+                    p_idx = (p_idx + 1) % pool_size;
+
+                    if tx_yuv.send(frame_copy).is_err() {
                         break;
                     }
                 } else {
@@ -261,28 +295,23 @@ pub fn decode_h264_frame(h264_data: &[u8], width: u32, height: u32) -> Result<(V
             tx_packet,
             rx_yuv,
             last_frame: None,
+            codec: codec_arg.to_string(),
+            target_w: width,
+            target_h: height,
         });
     }
 
     if let Some(ref mut pipeline) = *dec_lock {
-        // Send H.264 bitstream packet to background decoder
-        let _ = pipeline.tx_packet.send(h264_data.to_vec());
+        // Send bitstream packet to background decoder
+        let _ = pipeline.tx_packet.send(bitstream.to_vec());
 
         // Wait up to 30ms for the decoder to produce the newly decoded frame
         if let Ok(yuv_frame) = pipeline.rx_yuv.recv_timeout(Duration::from_millis(30)) {
-            let mut newest = yuv_frame;
-            // Drain any extra queued frames to stay strictly at head of stream
-            while let Ok(extra) = pipeline.rx_yuv.try_recv() {
-                newest = extra;
-            }
-            pipeline.last_frame = Some(newest.clone());
-            return Ok((newest, true));
-        } else if let Some(ref last) = pipeline.last_frame {
-            return Ok((last.clone(), false));
+            return Ok((yuv_frame, true));
         }
     }
 
-    Ok((vec![0u8; frame_bytes], false))
+    Ok((Vec::new(), false))
 }
 
 /// Renders a fully assembled VideoFrame onto display memory
@@ -305,25 +334,29 @@ pub fn render_frame_to_buffer(
         return Err("STRICT HARDWARE ENFORCEMENT: Hardware Video Decoder (/dev/video2 rkvdec) inactive! CPU decoding is strictly forbidden.".into());
     }
 
-    let is_h264_bitstream = frame.rgb_pixels.len() >= 4 && (&frame.rgb_pixels[0..4] == &[0, 0, 0, 1] || &frame.rgb_pixels[0..3] == &[0, 0, 1]);
+    let is_bitstream = frame.rgb_pixels.len() >= 4 && (&frame.rgb_pixels[0..4] == &[0, 0, 0, 1] || &frame.rgb_pixels[0..3] == &[0, 0, 1]);
 
     use std::time::Instant;
     let t_start = Instant::now();
 
-    let (decoded_yuv, is_new_frame) = if is_h264_bitstream {
-        match decode_h264_frame(&frame.rgb_pixels, frame.width, frame.height) {
+    let (decoded_yuv, is_new_frame) = if is_bitstream {
+        match decode_video_frame(&frame.rgb_pixels, frame.width, frame.height, &frame.codec, screen_w, screen_h) {
             Ok(res) => res,
             Err(e) => {
                 if frame.seq % 30 == 0 || frame.seq == 1 {
-                    eprintln!("[DECODER ERROR] Frame #{}: decode_h264_frame failed: {}", frame.seq, e);
+                    eprintln!("[DECODER ERROR] Frame #{}: decode_video_frame failed: {}", frame.seq, e);
                 }
-                (vec![0u8; (frame.width * frame.height * 3 / 2) as usize], false)
+                (vec![0u8; (screen_w * screen_h * 4) as usize], false)
             }
         }
     } else {
         (frame.rgb_pixels.clone(), true)
     };
     let t_decode = t_start.elapsed();
+
+    if !is_new_frame || decoded_yuv.is_empty() {
+        return Err("No new decoded video frame ready".into());
+    }
 
     let t_render_start = Instant::now();
     render_video_picture(
@@ -427,16 +460,151 @@ fn render_video_picture(
     if pixel_format == crate::drm_kms::DRM_FORMAT_XRGB8888
         || pixel_format == crate::drm_kms::DRM_FORMAT_ARGB8888
     {
-        // Check if buffer is decoded YUV420p/NV12 format (len == vw * vh * 3 / 2)
-        let is_yuv = rgb_pixels.len() == (vw * vh * 3) / 2;
+        if rgb_pixels.len() == total_pixels * 4 {
+            // Direct zero-copy block transfer from pre-scaled 32-bit ARGB/BGRA decoder output
+            unsafe {
+                std::ptr::copy_nonoverlapping(rgb_pixels.as_ptr() as *const u32, slice.as_mut_ptr(), total_pixels);
+            }
+        } else {
+            // Check if buffer is decoded YUV420p/NV12 format (len == vw * vh * 3 / 2)
+            let is_yuv = rgb_pixels.len() == (vw * vh * 3) / 2;
 
-        if is_yuv {
-            let y_plane = &rgb_pixels[0..vw * vh];
-            let uv_len = (vw * vh) / 4;
-            let u_plane = &rgb_pixels[vw * vh..vw * vh + uv_len];
-            let v_plane = &rgb_pixels[vw * vh + uv_len..];
+            if is_yuv {
+                let y_plane = &rgb_pixels[0..vw * vh];
+                let uv_len = (vw * vh) / 4;
+                let u_plane = &rgb_pixels[vw * vh..vw * vh + uv_len];
+                let v_plane = &rgb_pixels[vw * vh + uv_len..];
 
-            if sw == vw * 2 && sh == vh * 2 {
+                if sw == vw && sh == vh {
+                    // Ultra-fast 8-thread parallel 1:1 YUV420p -> XRGB32 conversion
+                    let slice_ptr = slice.as_mut_ptr() as usize;
+                    let num_threads = 8;
+                    let rows_per_thread = (vh + num_threads - 1) / num_threads;
+
+                    std::thread::scope(|s| {
+                        for t in 0..num_threads {
+                            let start_y = t * rows_per_thread;
+                            let end_y = ((t + 1) * rows_per_thread).min(vh);
+
+                            if start_y < end_y {
+                                s.spawn(move || {
+                                    for y in start_y..end_y {
+                                        let dst_row_start = y * vw;
+                                        let y_row = &y_plane[y * vw..(y + 1) * vw];
+                                        let uv_y = y / 2;
+                                        let uv_row_start = uv_y * (vw / 2);
+                                        let u_row = &u_plane[uv_row_start..uv_row_start + (vw / 2)];
+                                        let v_row = &v_plane[uv_row_start..uv_row_start + (vw / 2)];
+
+                                        let dst_row = unsafe {
+                                            let ptr = slice_ptr as *mut u32;
+                                            std::slice::from_raw_parts_mut(ptr.add(dst_row_start), vw)
+                                        };
+
+                                        let mut line_buf = [0u32; 3840];
+                                        let line_slice = &mut line_buf[0..vw];
+
+                                        let mut x = 0;
+                                        while x + 1 < vw {
+                                            let uv_x = x / 2;
+                                            let u_val = *unsafe { u_row.get_unchecked(uv_x) } as usize;
+                                            let v_val = *unsafe { v_row.get_unchecked(uv_x) } as usize;
+
+                                            let r_off = (256 + rv[v_val]) as usize;
+                                            let g_off = (256 - gu[u_val] - gv[v_val]) as usize;
+                                            let b_off = (256 + bu[u_val]) as usize;
+
+                                            // Pixel 1 (x)
+                                            let y1 = *unsafe { y_row.get_unchecked(x) } as usize;
+                                            let r1 = *unsafe { clamp.get_unchecked(y1 + r_off) };
+                                            let g1 = *unsafe { clamp.get_unchecked(y1 + g_off) };
+                                            let b1 = *unsafe { clamp.get_unchecked(y1 + b_off) };
+                                            line_slice[x] = 0xFF000000 | (r1 << 16) | (g1 << 8) | b1;
+
+                                            // Pixel 2 (x + 1)
+                                            let y2 = *unsafe { y_row.get_unchecked(x + 1) } as usize;
+                                            let r2 = *unsafe { clamp.get_unchecked(y2 + r_off) };
+                                            let g2 = *unsafe { clamp.get_unchecked(y2 + g_off) };
+                                            let b2 = *unsafe { clamp.get_unchecked(y2 + b_off) };
+                                            line_slice[x + 1] = 0xFF000000 | (r2 << 16) | (g2 << 8) | b2;
+
+                                            x += 2;
+                                        }
+
+                                        if x < vw {
+                                            let uv_x = x / 2;
+                                            let u_val = *unsafe { u_row.get_unchecked(uv_x) } as usize;
+                                            let v_val = *unsafe { v_row.get_unchecked(uv_x) } as usize;
+                                            let r_off = (256 + rv[v_val]) as usize;
+                                            let g_off = (256 - gu[u_val] - gv[v_val]) as usize;
+                                            let b_off = (256 + bu[u_val]) as usize;
+
+                                            let y1 = *unsafe { y_row.get_unchecked(x) } as usize;
+                                            let r1 = *unsafe { clamp.get_unchecked(y1 + r_off) };
+                                            let g1 = *unsafe { clamp.get_unchecked(y1 + g_off) };
+                                            let b1 = *unsafe { clamp.get_unchecked(y1 + b_off) };
+                                            line_slice[x] = 0xFF000000 | (r1 << 16) | (g1 << 8) | b1;
+                                        }
+
+                                        dst_row.copy_from_slice(line_slice);
+                                    }
+                                });
+                            }
+                        }
+                    });
+                } else if vw == sw * 2 && vh == sh * 2 {
+                    // Fast 8-thread 2:1 integer downscaling path (e.g. 4K 3840x2160 video -> 1080p 1920x1080 display)
+                    let slice_ptr = slice.as_mut_ptr() as usize;
+                    let num_threads = 8;
+                    let rows_per_thread = (sh + num_threads - 1) / num_threads;
+
+                    std::thread::scope(|s| {
+                        for t in 0..num_threads {
+                            let start_dst_y = t * rows_per_thread;
+                            let end_dst_y = ((t + 1) * rows_per_thread).min(sh);
+
+                            if start_dst_y < end_dst_y {
+                                s.spawn(move || {
+                                    for dst_y in start_dst_y..end_dst_y {
+                                        let src_y = dst_y * 2;
+                                        let dst_row_start = dst_y * sw;
+                                        let y_row = &y_plane[src_y * vw..(src_y + 1) * vw];
+
+                                        let uv_row_start = dst_y * (vw / 2);
+                                        let u_row = &u_plane[uv_row_start..uv_row_start + (vw / 2)];
+                                        let v_row = &v_plane[uv_row_start..uv_row_start + (vw / 2)];
+
+                                         let dst_row = unsafe {
+                                            let ptr = slice_ptr as *mut u32;
+                                            std::slice::from_raw_parts_mut(ptr.add(dst_row_start), sw)
+                                        };
+
+                                        let mut line_buf = [0u32; 3840];
+                                        let line_slice = &mut line_buf[0..sw];
+
+                                        for dst_x in 0..sw {
+                                            let src_x = dst_x * 2;
+                                            let u_val = *unsafe { u_row.get_unchecked(dst_x) } as usize;
+                                            let v_val = *unsafe { v_row.get_unchecked(dst_x) } as usize;
+
+                                            let r_off = (256 + rv[v_val]) as usize;
+                                            let g_off = (256 - gu[u_val] - gv[v_val]) as usize;
+                                            let b_off = (256 + bu[u_val]) as usize;
+
+                                            let y_val = *unsafe { y_row.get_unchecked(src_x) } as usize;
+                                            let r = *unsafe { clamp.get_unchecked(y_val + r_off) };
+                                            let g = *unsafe { clamp.get_unchecked(y_val + g_off) };
+                                            let b = *unsafe { clamp.get_unchecked(y_val + b_off) };
+
+                                            line_slice[dst_x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                                        }
+                                        dst_row.copy_from_slice(line_slice);
+                                    }
+                                });
+                            }
+                        }
+                    });
+                } else if sw == vw * 2 && sh == vh * 2 {
                 // Parallel 2x integer scaling YUV420p -> XRGB32 (1280x720 -> 2560x1440) in cached CPU RAM
                 let slice64_ptr = slice.as_mut_ptr() as usize;
                 let max_u64_len = total_pixels / 2;
@@ -503,58 +671,99 @@ fn render_video_picture(
                 });
             } else {
                 // Pre-calculate X and Y scaling LUTs for general display resolutions
-                static LUT_CACHE_YUV: Mutex<Option<(usize, usize, usize, usize, Vec<usize>, Vec<usize>)>> = Mutex::new(None);
+                static LUT_CACHE_YUV: Mutex<Option<(usize, usize, usize, usize, Vec<usize>, Vec<usize>, Vec<usize>)>> = Mutex::new(None);
                 let mut cache_lock = LUT_CACHE_YUV.lock().unwrap();
                 let need_rebuild = match cache_lock.as_ref() {
-                    Some((c_sw, c_sh, c_vw, c_vh, _, _)) => *c_sw != sw || *c_sh != sh || *c_vw != vw || *c_vh != vh,
+                    Some((c_sw, c_sh, c_vw, c_vh, _, _, _)) => *c_sw != sw || *c_sh != sh || *c_vw != vw || *c_vh != vh,
                     None => true,
                 };
 
                 if need_rebuild {
                     let mut x_lut = vec![0usize; sw];
+                    let mut uv_x_lut = vec![0usize; sw];
                     for dst_x in 0..sw {
-                        x_lut[dst_x] = (dst_x * vw) / sw;
+                        let sx = (dst_x * vw) / sw;
+                        x_lut[dst_x] = sx;
+                        uv_x_lut[dst_x] = sx / 2;
                     }
                     let mut y_lut = vec![0usize; sh];
                     for dst_y in 0..sh {
                         y_lut[dst_y] = (dst_y * vh) / sh;
                     }
-                    *cache_lock = Some((sw, sh, vw, vh, x_lut, y_lut));
+                    *cache_lock = Some((sw, sh, vw, vh, x_lut, y_lut, uv_x_lut));
                 }
 
-                if let Some((_, _, _, _, ref x_lut, ref y_lut)) = *cache_lock {
-                    for dst_y in 0..sh {
-                        let src_y = y_lut[dst_y];
-                        let dst_row_start = dst_y * sw;
-                        let src_y_start = src_y * vw;
-                        let src_uv_start = (src_y / 2) * (vw / 2);
+                if let Some((_, _, _, _, ref x_lut, ref y_lut, ref uv_x_lut)) = *cache_lock {
+                    let num_threads = 8;
+                    let rows_per_thread = (sh + num_threads - 1) / num_threads;
+                    let slice_ptr = slice.as_mut_ptr() as usize;
+                    let slice_len = slice.len();
 
-                        if dst_row_start + sw <= slice.len() {
-                            let dst_row = &mut slice[dst_row_start..dst_row_start + sw];
+                    let x_ref = x_lut.as_slice();
+                    let y_ref = y_lut.as_slice();
+                    let uv_x_ref = uv_x_lut.as_slice();
 
-                            for dst_x in 0..sw {
-                                let src_x = x_lut[dst_x];
-                                let y_idx = src_y_start + src_x;
-                                let uv_idx = src_uv_start + (src_x / 2);
+                    std::thread::scope(|s| {
+                        for t in 0..num_threads {
+                            let start_row = t * rows_per_thread;
+                            let end_row = ((t + 1) * rows_per_thread).min(sh);
 
-                                if y_idx < y_plane.len() && uv_idx < u_plane.len() && uv_idx < v_plane.len() {
-                                    let y_val = y_plane[y_idx] as usize;
-                                    let u_val = u_plane[uv_idx] as usize;
-                                    let v_val = v_plane[uv_idx] as usize;
+                            if start_row < end_row {
+                                s.spawn(move || {
+                                    for dst_y in start_row..end_row {
+                                        let src_y = *unsafe { y_ref.get_unchecked(dst_y) };
+                                        let dst_row_start = dst_y * sw;
+                                        let src_y_start = src_y * vw;
+                                        let src_uv_start = (src_y / 2) * (vw / 2);
 
-                                    let r_off = (256 + rv[v_val]) as usize;
-                                    let g_off = (256 - gu[u_val] - gv[v_val]) as usize;
-                                    let b_off = (256 + bu[u_val]) as usize;
+                                        if dst_row_start + sw <= slice_len
+                                            && src_y_start + vw <= y_plane.len()
+                                            && src_uv_start + (vw / 2) <= u_plane.len()
+                                            && src_uv_start + (vw / 2) <= v_plane.len()
+                                        {
+                                            let dst_row = unsafe {
+                                                let ptr = slice_ptr as *mut u32;
+                                                std::slice::from_raw_parts_mut(ptr.add(dst_row_start), sw)
+                                            };
+                                            let y_row = &y_plane[src_y_start..src_y_start + vw];
+                                            let u_row = &u_plane[src_uv_start..src_uv_start + (vw / 2)];
+                                            let v_row = &v_plane[src_uv_start..src_uv_start + (vw / 2)];
 
-                                    let r = clamp[y_val + r_off];
-                                    let g = clamp[y_val + g_off];
-                                    let b = clamp[y_val + b_off];
+                                             let mut last_uv_x = usize::MAX;
+                                            let mut r_off = 0;
+                                            let mut g_off = 0;
+                                            let mut b_off = 0;
 
-                                    dst_row[dst_x] = 0xFF000000 | (r << 16) | (g << 8) | b;
-                                }
+                                            let mut line_buf = [0u32; 3840];
+                                            let line_slice = &mut line_buf[0..sw];
+
+                                            for dst_x in 0..sw {
+                                                let uv_x = *unsafe { uv_x_ref.get_unchecked(dst_x) };
+                                                if uv_x != last_uv_x {
+                                                    last_uv_x = uv_x;
+                                                    let u_val = *unsafe { u_row.get_unchecked(uv_x) } as usize;
+                                                    let v_val = *unsafe { v_row.get_unchecked(uv_x) } as usize;
+                                                    r_off = (256 + rv[v_val]) as usize;
+                                                    g_off = (256 - gu[u_val] - gv[v_val]) as usize;
+                                                    b_off = (256 + bu[u_val]) as usize;
+                                                }
+
+                                                let src_x = *unsafe { x_ref.get_unchecked(dst_x) };
+                                                let y_val = *unsafe { y_row.get_unchecked(src_x) } as usize;
+
+                                                let r = *unsafe { clamp.get_unchecked(y_val + r_off) };
+                                                let g = *unsafe { clamp.get_unchecked(y_val + g_off) };
+                                                let b = *unsafe { clamp.get_unchecked(y_val + b_off) };
+
+                                                line_slice[dst_x] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                                            }
+                                            dst_row.copy_from_slice(line_slice);
+                                        }
+                                    }
+                                });
                             }
                         }
-                    }
+                    });
                 }
             }
         } else if vw == sw && vh == sh {
@@ -673,9 +882,10 @@ fn render_video_picture(
                 });
             }
         }
+        }
 
         // 2. TEXT INFORMATION OVERLAY ON TOP OF FULL-SCREEN VIDEO
-        let scale = (screen_w / 480).max(2) as usize;
+        let scale = (screen_w / 960).clamp(1, 2) as usize;
         let pad = 15 * scale;
 
         let primary_ip = active_ips
@@ -708,9 +918,9 @@ fn render_video_picture(
                         let alpha = 150u32; // ~58% opacity
                         let inv_a = 255u32 - alpha;
 
-                        let blend_r = (orig_r * inv_a + 15 * alpha) / 255;
-                        let blend_g = (orig_g * inv_a + 23 * alpha) / 255;
-                        let blend_b = (orig_b * inv_a + 42 * alpha) / 255;
+                        let blend_r = (orig_r * inv_a + 15 * alpha) >> 8;
+                        let blend_g = (orig_g * inv_a + 23 * alpha) >> 8;
+                        let blend_b = (orig_b * inv_a + 42 * alpha) >> 8;
 
                         slice[idx] = 0xFF000000 | (blend_r << 16) | (blend_g << 8) | blend_b;
                     }
@@ -771,9 +981,9 @@ fn render_video_picture(
                         let alpha = 150u32; // ~58% opacity
                         let inv_a = 255u32 - alpha;
 
-                        let blend_r = (orig_r * inv_a + 15 * alpha) / 255;
-                        let blend_g = (orig_g * inv_a + 23 * alpha) / 255;
-                        let blend_b = (orig_b * inv_a + 42 * alpha) / 255;
+                        let blend_r = (orig_r * inv_a + 15 * alpha) >> 8;
+                        let blend_g = (orig_g * inv_a + 23 * alpha) >> 8;
+                        let blend_b = (orig_b * inv_a + 42 * alpha) >> 8;
 
                         slice[idx] = 0xFF000000 | (blend_r << 16) | (blend_g << 8) | blend_b;
                     }
@@ -792,9 +1002,174 @@ fn render_video_picture(
             scale / 2,
         );
 
-        // Fast sequential block copy from cached CPU RAM into uncached DRM GEM dumb buffer
+        // Ultra-fast 128-bit ARM NEON SIMD block copy from cached CPU RAM into uncached DRM GEM dumb buffer
         unsafe {
-            std::ptr::copy_nonoverlapping(slice.as_ptr(), buf_map as *mut u32, total_pixels.min(buf_size / 4));
+            neon_copy_to_uncached(slice.as_ptr(), buf_map as *mut u32, total_pixels.min(buf_size / 4));
         }
+    } else if pixel_format == crate::drm_kms::DRM_FORMAT_NV12 {
+        let dst = unsafe { std::slice::from_raw_parts_mut(buf_map as *mut u8, buf_size) };
+        if rgb_pixels.len() == (vw * vh * 3) / 2 && dst.len() >= (vw * vh * 3) / 2 {
+            let y_plane = &rgb_pixels[0..vw * vh];
+            let uv_len = (vw * vh) / 4;
+            let u_plane = &rgb_pixels[vw * vh..vw * vh + uv_len];
+            let v_plane = &rgb_pixels[vw * vh + uv_len..];
+
+            // 1. Copy Y plane directly (3840x2160 bytes)
+            dst[0..vw * vh].copy_from_slice(y_plane);
+
+            // 2. Interleave U and V planes into NV12 UV plane (3840x1080 bytes)
+            let dst_uv = &mut dst[vw * vh..vw * vh + (vw * vh / 2)];
+            let dst_uv_ptr = dst_uv.as_mut_ptr() as usize;
+            let num_threads = 8;
+            let pairs_per_thread = (uv_len + num_threads - 1) / num_threads;
+
+            std::thread::scope(|s| {
+                for t in 0..num_threads {
+                    let start = t * pairs_per_thread;
+                    let end = ((t + 1) * pairs_per_thread).min(uv_len);
+                    if start < end {
+                        s.spawn(move || {
+                            let ptr = dst_uv_ptr as *mut u8;
+                            for i in start..end {
+                                unsafe {
+                                    *ptr.add(i * 2) = *u_plane.get_unchecked(i);
+                                    *ptr.add(i * 2 + 1) = *v_plane.get_unchecked(i);
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+
+            // 3. Render HUD text overlay directly onto NV12 video buffer
+            let scale = (screen_w / 960).clamp(1, 2) as usize;
+            let pad = 15 * scale;
+
+            let primary_ip = active_ips
+                .iter()
+                .find(|(iface, _)| iface != "lo")
+                .map(|(_, ip)| ip.as_str())
+                .unwrap_or("127.0.0.1");
+
+            let box_x = pad;
+            let box_y = pad;
+            let box_w = 420 * scale;
+            let box_h = 75 * scale;
+            let sw = screen_w as usize;
+            let sh = screen_h as usize;
+
+            // Semi-transparent dark background box for HUD (darken Y plane)
+            for y in box_y..(box_y + box_h) {
+                for x in box_x..(box_x + box_w) {
+                    if x < sw && y < sh {
+                        let idx = y * sw + x;
+                        let is_border = x < box_x + scale || x >= box_x + box_w - scale
+                            || y < box_y + scale || y >= box_y + box_h - scale;
+                        if is_border {
+                            dst[idx] = 200; // Bright border Y
+                        } else {
+                            dst[idx] = 20; // Solid dark background Y (write-only)
+                        }
+                    }
+                }
+            }
+
+            let line1 = "RADXA ROCK 5C+ // BIG BUCK BUNNY LIVE STREAM";
+            let line2 = "HW DECODER : /dev/video2 (rkvdec)";
+            let line3 = format!("STREAM RES : {}x{} | NATIVE: {}x{}", vid_w, vid_h, screen_w, screen_h);
+            let line4 = format!("IP : {} | FPS: {:.1} | JITTER: {:.1}ms | FRAME: #{:05}", primary_ip, fps, jitter_ms, seq);
+
+            let tx = box_x + 10 * scale;
+            let mut ty = box_y + 8 * scale;
+            let line_spacing = 16 * scale;
+
+            crate::text::draw_string_nv12(dst, screen_w, screen_h, tx, ty, line1, 220, 32, 32, scale / 2);
+            ty += line_spacing;
+            crate::text::draw_string_nv12(dst, screen_w, screen_h, tx, ty, line2, 200, 220, 16, scale / 2);
+            ty += line_spacing;
+            crate::text::draw_string_nv12(dst, screen_w, screen_h, tx, ty, &line3, 255, 128, 128, scale / 2);
+            ty += line_spacing;
+            crate::text::draw_string_nv12(dst, screen_w, screen_h, tx, ty, &line4, 220, 16, 160, scale / 2);
+
+            // Clock Box Top Right
+            let time_str = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                Ok(dur) => {
+                    let secs = dur.as_secs();
+                    let hours = (secs / 3600 % 24) as u32;
+                    let mins = (secs / 60 % 60) as u32;
+                    let s = (secs % 60) as u32;
+                    format!("{:02}:{:02}:{:02} UTC", hours, mins, s)
+                }
+                Err(_) => "00:00:00 UTC".to_string(),
+            };
+
+            let clock_str = format!("TIME: {}", time_str);
+            let clock_w = 180 * scale;
+            let clock_h = 30 * scale;
+            let clock_x = sw.saturating_sub(clock_w + pad);
+            let clock_y = pad;
+
+            for y in clock_y..(clock_y + clock_h) {
+                for x in clock_x..(clock_x + clock_w) {
+                    if x < sw && y < sh {
+                        let idx = y * sw + x;
+                        let is_border = x < clock_x + scale || x >= clock_x + clock_w - scale
+                            || y < clock_y + scale || y >= clock_y + clock_h - scale;
+                        if is_border {
+                            dst[idx] = 220; // Gold border
+                        } else {
+                            dst[idx] = 20; // Solid dark background Y (write-only)
+                        }
+                    }
+                }
+            }
+
+            crate::text::draw_string_nv12(
+                dst,
+                screen_w,
+                screen_h,
+                clock_x + 10 * scale,
+                clock_y + (clock_h - 8 * (scale / 2)) / 2,
+                &clock_str,
+                220, 16, 160, // Gold
+                scale / 2,
+            );
+        }
+    }
+}
+
+#[inline(always)]
+pub unsafe fn neon_copy_to_uncached(src: *const u32, dst: *mut u32, count: usize) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        let mut i = 0;
+        let src_ptr = src as *const u8;
+        let dst_ptr = dst as *mut u8;
+        let bytes = count * 4;
+
+        while i + 64 <= bytes {
+            let v0 = vld1q_u8(src_ptr.add(i));
+            let v1 = vld1q_u8(src_ptr.add(i + 16));
+            let v2 = vld1q_u8(src_ptr.add(i + 32));
+            let v3 = vld1q_u8(src_ptr.add(i + 48));
+
+            vst1q_u8(dst_ptr.add(i), v0);
+            vst1q_u8(dst_ptr.add(i + 16), v1);
+            vst1q_u8(dst_ptr.add(i + 32), v2);
+            vst1q_u8(dst_ptr.add(i + 48), v3);
+
+            i += 64;
+        }
+
+        while i < bytes {
+            *dst_ptr.add(i) = *src_ptr.add(i);
+            i += 1;
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        std::ptr::copy_nonoverlapping(src, dst, count);
     }
 }

@@ -102,11 +102,22 @@ pub fn autodetect_display_mode(card: &Card) -> Result<(u32, u32, Mode, connector
                 let conn_type = conn_info.interface();
                 if conn_type == connector::Interface::HDMIA || conn_type == connector::Interface::HDMIB {
                     println!("[DRM] Found connected HDMI connector: {:?}", conn_handle);
+                    // 1. First check for PREFERRED mode (native resolution reported by EDID, e.g. 4K 3840x2160)
                     for mode in conn_info.modes() {
                         if mode.mode_type().contains(drm::control::ModeTypeFlags::PREFERRED) {
-                            println!("[DRM] Found PREFERRED mode: {}x{} @ {}Hz", mode.size().0, mode.size().1, mode.vrefresh());
+                            println!("[DRM] Selected PREFERRED HDMI display mode: {}x{} @ {}Hz", mode.size().0, mode.size().1, mode.vrefresh());
                             selected_mode = Some(*mode);
                             break;
+                        }
+                    }
+                    // 2. Fallback to 1080p if PREFERRED flag was not explicitly set
+                    if selected_mode.is_none() {
+                        for mode in conn_info.modes() {
+                            if mode.size().0 == 1920 && mode.size().1 == 1080 {
+                                println!("[DRM] Selected 1080p HDMI display mode: 1920x1080 @ {}Hz", mode.vrefresh());
+                                selected_mode = Some(*mode);
+                                break;
+                            }
                         }
                     }
                     if selected_mode.is_none() && !conn_info.modes().is_empty() {
@@ -155,7 +166,7 @@ pub fn import_dmabuf_and_add_fb(
             0, 0,
         ];
         let pitches: [u32; 4] = [
-            pitch,
+            if pixel_format == DRM_FORMAT_NV12 { fb_w } else { pitch },
             if pixel_format == DRM_FORMAT_NV12 { fb_w } else { 0 },
             0, 0,
         ];
