@@ -12,10 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# 1. Copy Cargo manifest first to cache dependency compilation layer
 COPY Cargo.toml ./
-COPY src/ ./src/
 
-RUN cargo build --release
+# 2. Pre-build Cargo dependencies using a dummy main.rs
+RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
+
+# 3. Copy actual Rust source code (subsequent edits recompile in ~1 second!)
+COPY src/ ./src/
+RUN touch src/main.rs && cargo build --release
 
 FROM debian:bookworm-slim
 

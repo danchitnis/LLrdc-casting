@@ -48,13 +48,16 @@ A repeatable, containerized zero-copy rendering application written in **Safe Ru
 ```
 .
 ├── Cargo.toml              # Rust crate manifest (`drm`, `nix`, `libc`)
-├── Dockerfile              # Multi-stage Dockerfile (Rust 1.80 builder -> Debian slim with libdrm-tests)
+├── Dockerfile              # Multi-stage Dockerfile with Cargo dependency caching
 ├── Makefile                # Cargo build helper
 ├── README.md               # User guide (this file)
 ├── SETUP.md                # AI Agent execution & initialization protocol
 ├── deploy.sh               # Local-to-board sync, build, and run script
 └── src/
-    └── main.rs             # Safe Rust application implementing V4L2 -> DMA-BUF -> DRM pipeline
+    ├── main.rs             # Application entry point & orchestration
+    ├── drm_kms.rs          # DRM card opening, mode detection & KMS display
+    ├── gfx.rs              # Safe Rust 2D geometric pixel drawing
+    └── v4l2.rs             # V4L2 buffer allocation & DMA-BUF export
 ```
 
 ---
