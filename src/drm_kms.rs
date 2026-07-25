@@ -15,6 +15,7 @@ use drm::Device as DrmDevice;
 use libc::{c_int, O_CLOEXEC, O_RDWR, MAP_SHARED, PROT_READ, PROT_WRITE, MAP_FAILED};
 
 pub const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
+pub const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
 pub const DRM_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
 
 const DRM_IOCTL_MODE_CREATE_DUMB: u64 = 0xc02064b2;

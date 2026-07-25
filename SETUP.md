@@ -99,32 +99,33 @@ ssh <BOARD_IP> "docker run --rm --privileged -v /dev:/dev rock5c-v4l2-drm"
 ---
 
 ### Step 7: Verify Pipeline Execution Logs
-Verify that the output logs report success across all four pipeline stages:
+Verify that the output logs report success across all four pipeline stages and list active IPv4 addresses:
 
 ```text
 =====================================================
- Safe Rust Pipeline: V4L2 -> DMA-BUF fd -> DRM Atomic Commit -> HDMI
+ Safe Rust Pipeline: V4L2 -> DMA-BUF -> DRM
  Radxa Rock 5C+ / Rockchip RK3588 DRM Display
- Dynamic Resolution Autodetection
 =====================================================
 
-[STEP 1] Opening DRM device via safe `drm` crate...
+[STEP 1] Opening DRM device & autodetecting display mode...
 [DRM SUCCESS] Opened display card: /dev/dri/card0
 [DRM] Found connected HDMI connector: connector::Handle(54)
 [DRM] Found PREFERRED mode: 2560x1440 @ 60Hz
-[DRM AUTODETECT SUCCESS] Screen Resolution: 2560x1440 @ 60Hz (Connector: connector::Handle(54))
-[DRM] Selected CRTC: crtc::Handle(39)
+[DRM AUTODETECT SUCCESS] Screen Resolution: 2560x1440 @ 60Hz (Connector: connector::Handle(54), CRTC: crtc::Handle(39))
 
-[STEP 2] Opening V4L2 device and setting target 2560x1440 resolution...
-[V4L2] Target device node: /dev/video0
+[STEP 2] Allocating & exporting V4L2 DMA-BUF frame memory...
 [V4L2] Driver: rockchip-rga, Card: rockchip-rga
 [V4L2] Negotiated format: XRGB8888 (2560x1440), pitch: 10240
-[INFO] Allocating native DRM PRIME DMA-BUF buffer (2560x1440)...
 [DMA-BUF SUCCESS] Created native DMA-BUF fd = 4 (2560x1440) via PRIME export
+
+[NETWORK] Active IPv4 Addresses detected on device:
+  - lo         : 127.0.0.1
+  - end0       : 192.168.1.72
+  - docker0    : 172.17.0.1
 
 [STEP 3] Importing DMA-BUF fd (4) into DRM Framebuffer...
 [DRM SUCCESS] Converted DMA-BUF fd (4) -> GEM Handle (1)
-[DRM SUCCESS] Created DRM Framebuffer ID = 56 (2560x1440)
+[DRM SUCCESS] Created DRM Framebuffer Handle = framebuffer::Handle(60) (2560x1440)
 
 [STEP 4] Executing DRM KMS Modeset & Display on CRTC crtc::Handle(39)...
 
@@ -134,6 +135,6 @@ Verify that the output logs report success across all four pipeline stages:
  Frame Buffer Size: 2560x1440
 =====================================================
 
-Displaying rectangle on HDMI screen for 10 seconds...
+Displaying active device IP addresses on HDMI screen for 10 seconds...
 Done.
 ```

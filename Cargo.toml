@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 drm = "0.14"
-nix = { version = "0.29", features = ["mman", "fs", "ioctl"] }
+nix = { version = "0.29", features = ["mman", "fs", "ioctl", "net"] }
 libc = "0.2"
 
 [profile.release]

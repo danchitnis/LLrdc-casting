@@ -11,6 +11,6 @@ echo "==> 2. Building Docker image on board..."
 ssh "$BOARD_IP" "cd $TARGET_DIR && docker build -t rock5c-v4l2-drm ."
 
 echo "==> 3. Running Docker container on board with DRM and V4L2 device access..."
-ssh "$BOARD_IP" "docker run --rm --privileged -v /dev:/dev rock5c-v4l2-drm"
+ssh "$BOARD_IP" "docker run --rm --net=host --privileged -v /dev:/dev rock5c-v4l2-drm"
 
 echo "==> Deployment complete!"

@@ -5,6 +5,8 @@
 
 mod drm_kms;
 mod gfx;
+mod net;
+mod text;
 mod v4l2;
 
 use std::os::fd::AsFd;
@@ -83,6 +85,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -------------------------------------------------------------
+    // Step 2b: Query Active Network IPv4 Addresses & Render to Framebuffer Memory
+    // -------------------------------------------------------------
+    let active_ips = net::get_active_ipv4_addresses();
+    println!("\n[NETWORK] Active IPv4 Addresses detected on device:");
+    for (iface, ip) in &active_ips {
+        println!("  - {:<10} : {}", iface, ip);
+    }
+
+    if !_buf_map.is_null() && _buf_size > 0 {
+        if pixel_format == drm_kms::DRM_FORMAT_XRGB8888 || pixel_format == drm_kms::DRM_FORMAT_ARGB8888 {
+            let slice = unsafe { std::slice::from_raw_parts_mut(_buf_map as *mut u32, _buf_size / 4) };
+            text::draw_ip_dashboard_argb(slice, fb_w, fb_h, &active_ips);
+        } else if pixel_format == drm_kms::DRM_FORMAT_NV12 {
+            let slice = unsafe { std::slice::from_raw_parts_mut(_buf_map as *mut u8, _buf_size) };
+            text::draw_ip_dashboard_nv12(slice, fb_w, fb_h, &active_ips);
+        }
+    }
+
+    // -------------------------------------------------------------
     // Step 3: Import DMA-BUF fd into DRM Framebuffer
     // -------------------------------------------------------------
     println!("\n[STEP 3] Importing DMA-BUF fd ({}) into DRM Framebuffer...", dmabuf_fd);
@@ -100,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(" Frame Buffer Size: {}x{}", fb_w, fb_h);
     println!("=====================================================");
 
-    println!("\nDisplaying rectangle on HDMI screen for 10 seconds...");
+    println!("\nDisplaying active device IP addresses on HDMI screen for 10 seconds...");
     thread::sleep(Duration::from_secs(10));
 
     println!("Done.");
