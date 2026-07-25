@@ -21,7 +21,8 @@ COPY Cargo.toml ./
 # 2. Pre-build Cargo dependencies using a dummy main.rs
 RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
 
-# 3. Copy actual Rust source code (subsequent edits recompile in ~1 second!)
+# 3. Copy actual Rust source code
+ARG BUILD_DATE
 COPY src/ ./src/
 RUN touch src/main.rs && cargo build --release
 
@@ -33,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     v4l-utils \
     libdrm-tests \
     ca-certificates \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

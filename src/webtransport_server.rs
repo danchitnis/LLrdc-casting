@@ -7,9 +7,11 @@ use std::error::Error;
 use tokio::sync::mpsc;
 use wtransport::{Endpoint, Identity, ServerConfig};
 
+use crate::v4l2_decoder::VideoFrame;
+
 /// Start WebTransport QUIC UDP server on 0.0.0.0:4433
 pub async fn run_server(
-    frame_tx: mpsc::Sender<Vec<u8>>,
+    frame_tx: mpsc::Sender<VideoFrame>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let identity = Identity::self_signed(["localhost", "127.0.0.1", "192.168.1.72", "0.0.0.0"])?;
     
@@ -24,15 +26,31 @@ pub async fn run_server(
     println!(" Ready for incoming WebTransport QUIC screen sharing!");
     println!("=====================================================\n");
 
-    // Spawn companion UDP listener on 0.0.0.0:4434 for dev testing & UDP frames
+    // Spawn companion UDP listener on 0.0.0.0:4434 for direct UDP video frame packets
     let frame_tx_udp = frame_tx.clone();
     tokio::spawn(async move {
         if let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:4434").await {
-            println!("[UDP RECEIVER] Listening on 0.0.0.0:4434 for direct H.264 UDP frame packets");
+            println!("[UDP RECEIVER] Listening on 0.0.0.0:4434 for direct UDP video stream packets");
+
+            // Set socket receive buffer to 8MB using nix/libc socket options
+            use std::os::unix::io::AsRawFd;
+            let raw_fd = socket.as_raw_fd();
+            let buf_size: libc::c_int = 8 * 1024 * 1024; // 8MB socket buffer
+            unsafe {
+                libc::setsockopt(
+                    raw_fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &buf_size as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+
             let mut buf = [0u8; 65536];
-            while let Ok((len, addr)) = socket.recv_from(&mut buf).await {
-                println!("[UDP RECEIVER] Received {} bytes of H.264 frame from {}", len, addr);
-                let _ = frame_tx_udp.send(buf[..len].to_vec()).await;
+            while let Ok((len, _addr)) = socket.recv_from(&mut buf).await {
+                if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&buf[..len]) {
+                    let _ = frame_tx_udp.send(video_frame).await;
+                }
             }
         }
     });
@@ -52,7 +70,7 @@ pub async fn run_server(
 
 async fn handle_connection(
     incoming_session: wtransport::endpoint::IncomingSession,
-    frame_tx: mpsc::Sender<Vec<u8>>,
+    frame_tx: mpsc::Sender<VideoFrame>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let session_request = incoming_session.await?;
     println!(
@@ -76,8 +94,9 @@ async fn handle_connection(
                             buffer.extend_from_slice(&temp[..n]);
                         }
                         if !buffer.is_empty() {
-                            println!("[WEBTRANSPORT] Received H.264 stream packet ({} bytes)", buffer.len());
-                            let _ = frame_tx.send(buffer).await;
+                            if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&buffer) {
+                                let _ = frame_tx.send(video_frame).await;
+                            }
                         }
                     }
                     Err(e) => {
@@ -92,8 +111,9 @@ async fn handle_connection(
                     Ok(dgram) => {
                         let payload = dgram.payload().to_vec();
                         if !payload.is_empty() {
-                            println!("[WEBTRANSPORT] Received H.264 datagram packet ({} bytes)", payload.len());
-                            let _ = frame_tx.send(payload).await;
+                            if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&payload) {
+                                let _ = frame_tx.send(video_frame).await;
+                            }
                         }
                     }
                     Err(e) => {

@@ -23,7 +23,9 @@ case "$ACTION" in
     rsync -avz --exclude '.git' . "$BOARD_IP:$TARGET_DIR"
 
     echo "==> 2. Building Docker image on board..."
-    ssh "$BOARD_IP" "cd $TARGET_DIR && docker build -t rock5c-v4l2-drm ."
+    ssh "$BOARD_IP" "docker image prune -f 2>/dev/null || true"
+    ssh "$BOARD_IP" "cd $TARGET_DIR && docker build --build-arg BUILD_DATE=\$(date +%s) -t rock5c-v4l2-drm ."
+    ssh "$BOARD_IP" "docker image prune -f 2>/dev/null || true"
 
     echo "==> 3. Restarting Docker container on board in background mode..."
     ssh "$BOARD_IP" "docker stop rock5c-v4l2-drm 2>/dev/null || true"

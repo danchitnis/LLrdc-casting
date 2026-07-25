@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let drm_raw_fd = card.as_fd().as_raw_fd();
 
     // -------------------------------------------------------------
-    // Step 2: Allocate DOUBLE-BUFFERED Native DRM PRIME DMA-BUF Buffers
+    // Step 2: Allocate DOUBLE-BUFFERED Native DRM PRIME DMA-BUF Buffers (2560x1440)
     // -------------------------------------------------------------
     println!("\n[STEP 2] Allocating Double-Buffered DRM PRIME frame memory ({}x{})...", screen_w, screen_h);
 
@@ -45,8 +45,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fb_handle_0 = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, fd_0, screen_w, screen_h, pitch_0, drm_kms::DRM_FORMAT_XRGB8888)?;
     println!("[DMA-BUF 0] Buffer 0 ready: fd={}, FB={:?}", fd_0, fb_handle_0);
 
-    let (fd_1, _pitch_1, size_1, ptr_1) = drm_kms::allocate_prime_dmabuf(drm_raw_fd, screen_w, screen_h)?;
-    let fb_handle_1 = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, fd_1, screen_w, screen_h, pitch_0, drm_kms::DRM_FORMAT_XRGB8888)?;
+    let (fd_1, pitch_1, size_1, ptr_1) = drm_kms::allocate_prime_dmabuf(drm_raw_fd, screen_w, screen_h)?;
+    let fb_handle_1 = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, fd_1, screen_w, screen_h, pitch_1, drm_kms::DRM_FORMAT_XRGB8888)?;
     println!("[DMA-BUF 1] Buffer 1 ready: fd={}, FB={:?}", fd_1, fb_handle_1);
 
     // -------------------------------------------------------------
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -------------------------------------------------------------
     // Step 4: Start WebTransport Server & Video Stream Receiver
     // -------------------------------------------------------------
-    let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(32);
+    let (frame_tx, mut frame_rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(32);
 
     tokio::spawn(async move {
         if let Err(e) = webtransport_server::run_server(frame_tx).await {
@@ -86,9 +86,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n[SERVER READY] WebTransport QUIC UDP Server running on port 4433/4434.");
     println!(" Displaying IPv4 Dashboard with Real-Time Clock on HDMI.");
-    println!(" Waiting for incoming H.264 video streams from remote client...");
+    println!(" Waiting for incoming video streams from remote client...");
+
+    use std::time::Instant;
 
     let mut clock_interval = tokio::time::interval(Duration::from_secs(1));
+    let mut last_render_time = Instant::now();
+    let mut frame_time_deltas: Vec<f32> = Vec::with_capacity(30);
+
     let mut current_buf_idx = 0;
     let mut is_streaming_active = false;
 
@@ -106,25 +111,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !back_ptr.is_null() && back_size > 0 {
                         let slice = unsafe { std::slice::from_raw_parts_mut(back_ptr as *mut u32, back_size / 4) };
                         text::draw_ip_dashboard_argb(slice, screen_w, screen_h, &active_ips);
-                        let _ = card.page_flip(crtc_handle, back_fb, drm::control::PageFlipFlags::EVENT, None);
+                        let _ = card.page_flip(crtc_handle, back_fb, drm::control::PageFlipFlags::empty(), None);
                         current_buf_idx = 1 - current_buf_idx;
                     }
                 }
             }
 
-            // Handle incoming video stream frames
-            Some(h264_payload) = frame_rx.recv() => {
-                if !is_streaming_active {
-                    if !ptr_0.is_null() && size_0 > 0 {
-                        let slice_0 = unsafe { std::slice::from_raw_parts_mut(ptr_0 as *mut u32, size_0 / 4) };
-                        v4l2_decoder::init_player_ui(slice_0, screen_w, screen_h);
-                    }
-                    if !ptr_1.is_null() && size_1 > 0 {
-                        let slice_1 = unsafe { std::slice::from_raw_parts_mut(ptr_1 as *mut u32, size_1 / 4) };
-                        v4l2_decoder::init_player_ui(slice_1, screen_w, screen_h);
-                    }
+            // Immediately render every fully reassembled video frame as it arrives
+            Some(video_frame) = frame_rx.recv() => {
+                let now = Instant::now();
+                let delta_ms = now.duration_since(last_render_time).as_secs_f32() * 1000.0;
+                last_render_time = now;
+
+                if !is_streaming_active || delta_ms > 1000.0 {
                     is_streaming_active = true;
+                    frame_time_deltas.clear();
+                    v4l2_decoder::reset_decoder_pipeline();
+                } else if delta_ms > 0.1 && delta_ms < 500.0 {
+                    frame_time_deltas.push(delta_ms);
+                    if frame_time_deltas.len() > 30 {
+                        frame_time_deltas.remove(0);
+                    }
                 }
+
+                let avg_delta = frame_time_deltas.iter().sum::<f32>() / frame_time_deltas.len() as f32;
+                let measured_fps = if avg_delta > 0.0 { 1000.0 / avg_delta } else { 30.0 };
+                let jitter_ms = (frame_time_deltas.iter().map(|&d| (d - avg_delta).powi(2)).sum::<f32>() / frame_time_deltas.len() as f32).sqrt();
 
                 let (back_ptr, back_size, back_fb) = if current_buf_idx == 0 {
                     (ptr_1, size_1, fb_handle_1)
@@ -132,21 +144,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (ptr_0, size_0, fb_handle_0)
                 };
 
-                if let Ok(rendered) = v4l2_decoder::process_and_render_h264_frame(
-                    &h264_payload,
+                if let Ok(_) = v4l2_decoder::render_frame_to_buffer(
+                    &video_frame,
                     back_ptr,
                     back_size,
                     screen_w,
                     screen_h,
                     drm_kms::DRM_FORMAT_XRGB8888,
+                    &active_ips,
+                    measured_fps,
+                    jitter_ms,
                 ) {
-                    if rendered {
-                        let _ = card.page_flip(
-                            crtc_handle,
-                            back_fb,
-                            drm::control::PageFlipFlags::EVENT,
-                            None,
-                        );
+                    if card.page_flip(
+                        crtc_handle,
+                        back_fb,
+                        drm::control::PageFlipFlags::empty(),
+                        None,
+                    ).is_ok() {
                         current_buf_idx = 1 - current_buf_idx;
                     }
                 }
