@@ -1,51 +1,37 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 BOARD_IP="${BOARD_IP:-192.168.1.72}"
-TARGET_DIR="~/rock5c-v4l2-drm"
+IMAGE="rock5c-v4l2-drm"
+CONNECTOR_ID="${DRM_CONNECTOR_ID:-54}"
 
-function usage() {
-  echo "Usage: ./server.sh [--start | --strat] | [--stop]"
-  echo "  --start, --strat  : Build Docker image locally, transfer to board, and launch server"
-  echo "  --stop            : Stop and remove running server container on board"
-  exit 1
+usage() {
+  echo "Usage: $0 --start [--dashboard|--no-dashboard] | --stop"
 }
 
-if [ "$#" -lt 1 ]; then
-  usage
-fi
+action="${1:-}"
+[[ -n "$action" ]] || { usage; exit 2; }
+shift || true
 
-ACTION="$1"
+case "$action" in
+  --start)
+    idle_dashboard=1
+    while (($#)); do
+      case "$1" in
+        --dashboard) idle_dashboard=1 ;;
+        --no-dashboard) idle_dashboard=0 ;;
+        *) usage; exit 2 ;;
+      esac
+      shift
+    done
 
-case "$ACTION" in
-  --start|--strat)
-    echo "==> 1. Building Docker image locally for linux/arm64 target..."
-    docker build --platform linux/arm64 -t rock5c-v4l2-drm .
-
-    echo "==> 2. Fast compressed transfer of Docker image to target board ($BOARD_IP)..."
-    docker save rock5c-v4l2-drm | gzip -1 | ssh "$BOARD_IP" "gunzip | docker load"
-
-    echo "==> 3. Syncing local Git repository to board at $BOARD_IP:$TARGET_DIR..."
-    rsync -avz --exclude '.git' . "$BOARD_IP:$TARGET_DIR"
-
-    echo "==> 4. Restarting Docker container on board in background mode..."
-    ssh "$BOARD_IP" "docker stop rock5c-v4l2-drm 2>/dev/null || true"
-    ssh "$BOARD_IP" "docker rm rock5c-v4l2-drm 2>/dev/null || true"
-    ssh "$BOARD_IP" "docker run -d --name rock5c-v4l2-drm --net=host --privileged -v /dev:/dev rock5c-v4l2-drm"
-
-    echo "==> 5. Display active on HDMI! Showing IP Dashboard & Real-Time Clock..."
-    sleep 1
-    ssh "$BOARD_IP" "docker logs --tail 15 rock5c-v4l2-drm"
+    docker buildx build --platform linux/arm64 -t "$IMAGE" --load .
+    docker save "$IMAGE" | gzip -1 | ssh -o BatchMode=yes "$BOARD_IP" 'gunzip | docker load'
+    ssh -o BatchMode=yes "$BOARD_IP" "docker kill '$IMAGE' 2>/dev/null || true; docker rm -f '$IMAGE' 2>/dev/null || true; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='$CONNECTOR_ID' -e IDLE_DASHBOARD='$idle_dashboard' -v /dev:/dev '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
     ;;
-
   --stop)
-    echo "==> Stopping WebTransport server container on $BOARD_IP..."
-    ssh "$BOARD_IP" "docker stop rock5c-v4l2-drm 2>/dev/null || true"
-    ssh "$BOARD_IP" "docker rm rock5c-v4l2-drm 2>/dev/null || true"
-    echo "==> Server stopped successfully!"
+    (($# == 0)) || { usage; exit 2; }
+    ssh -o BatchMode=yes "$BOARD_IP" "docker kill '$IMAGE' 2>/dev/null || true; docker rm -f '$IMAGE' 2>/dev/null || true"
     ;;
-
-  *)
-    usage
-    ;;
+  *) usage; exit 2 ;;
 esac

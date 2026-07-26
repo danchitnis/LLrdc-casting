@@ -4,7 +4,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::num::NonZeroU32;
-use std::os::unix::io::{AsFd, BorrowedFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::ptr;
 
 use drm::control::{
@@ -62,12 +62,18 @@ struct DrmPrimeHandle {
 
 #[link(name = "drm")]
 extern "C" {
+    fn drmDropMaster(fd: c_int) -> c_int;
     fn drmPrimeFDToHandle(fd: c_int, prime_fd: u32, handle: *mut u32) -> c_int;
     fn drmModeAddFB2(
         fd: c_int, width: u32, height: u32, pixel_format: u32,
         bo_handles: *const u32, pitches: *const u32, offsets: *const u32,
         buf_id: *mut u32, flags: u32,
     ) -> c_int;
+}
+
+/// Explicitly relinquish DRM master before another process takes over KMS.
+pub fn drop_master(card: &Card) {
+    unsafe { let _ = drmDropMaster(card.0.as_raw_fd()); }
 }
 
 /// Open active DRM display card (`/dev/dri/card0`)
@@ -102,26 +108,26 @@ pub fn autodetect_display_mode(card: &Card) -> Result<(u32, u32, Mode, connector
                 let conn_type = conn_info.interface();
                 if conn_type == connector::Interface::HDMIA || conn_type == connector::Interface::HDMIB {
                     println!("[DRM] Found connected HDMI connector: {:?}", conn_handle);
-                    // 1. First check for PREFERRED mode (native resolution reported by EDID, e.g. 4K 3840x2160)
+                    // Select HDMI display mode with maximum resolution & highest refresh rate (e.g. 3840x2160 @ 60Hz)
+                    let mut best_mode: Option<Mode> = None;
                     for mode in conn_info.modes() {
-                        if mode.mode_type().contains(drm::control::ModeTypeFlags::PREFERRED) {
-                            println!("[DRM] Selected PREFERRED HDMI display mode: {}x{} @ {}Hz", mode.size().0, mode.size().1, mode.vrefresh());
-                            selected_mode = Some(*mode);
-                            break;
-                        }
-                    }
-                    // 2. Fallback to 1080p if PREFERRED flag was not explicitly set
-                    if selected_mode.is_none() {
-                        for mode in conn_info.modes() {
-                            if mode.size().0 == 1920 && mode.size().1 == 1080 {
-                                println!("[DRM] Selected 1080p HDMI display mode: 1920x1080 @ {}Hz", mode.vrefresh());
-                                selected_mode = Some(*mode);
-                                break;
+                        if let Some(ref current_best) = best_mode {
+                            let (cw, ch) = (current_best.size().0 as u32, current_best.size().1 as u32);
+                            let (nw, nh) = (mode.size().0 as u32, mode.size().1 as u32);
+                            let current_area = cw * ch;
+                            let new_area = nw * nh;
+
+                            if (new_area > current_area) || (new_area == current_area && mode.vrefresh() > current_best.vrefresh()) {
+                                best_mode = Some(*mode);
                             }
+                        } else {
+                            best_mode = Some(*mode);
                         }
                     }
-                    if selected_mode.is_none() && !conn_info.modes().is_empty() {
-                        selected_mode = Some(conn_info.modes()[0]);
+
+                    if let Some(mode) = best_mode {
+                        println!("[DRM] Selected highest capacity HDMI mode: {}x{} @ {}Hz", mode.size().0, mode.size().1, mode.vrefresh());
+                        selected_mode = Some(mode);
                     }
                     target_connector = Some(conn_handle);
                     break;
@@ -187,6 +193,35 @@ pub fn import_dmabuf_and_add_fb(
 
     println!("[DRM SUCCESS] Created DRM Framebuffer Handle = {:?} ({}x{})", fb_handle, fb_w, fb_h);
     Ok(fb_handle)
+}
+
+/// Import a decoder-owned, linear NV12 DMA-BUF. No mapping or pixel copy occurs.
+/// `v_stride` is used for the UV plane offset because RKMPP buffers are padded.
+pub fn import_mpp_nv12_dmabuf(
+    drm_raw_fd: RawFd,
+    dmabuf_fd: RawFd,
+    width: u32,
+    height: u32,
+    h_stride: u32,
+    v_stride: u32,
+) -> Result<framebuffer::Handle, Box<dyn std::error::Error>> {
+    if dmabuf_fd < 0 || width == 0 || height == 0 || h_stride < width || v_stride < height {
+        return Err("invalid RKMPP NV12 DMA-BUF layout".into());
+    }
+    let mut gem_handle = 0u32;
+    let mut fb_id = 0u32;
+    unsafe {
+        if drmPrimeFDToHandle(drm_raw_fd, dmabuf_fd as u32, &mut gem_handle) < 0 {
+            return Err("DRM could not import RKMPP DMA-BUF".into());
+        }
+        let handles = [gem_handle, gem_handle, 0, 0];
+        let pitches = [h_stride, h_stride, 0, 0];
+        let offsets = [0, h_stride.checked_mul(v_stride).ok_or("NV12 plane offset overflow")?, 0, 0];
+        if drmModeAddFB2(drm_raw_fd, width, height, DRM_FORMAT_NV12, handles.as_ptr(), pitches.as_ptr(), offsets.as_ptr(), &mut fb_id, 0) < 0 {
+            return Err("DRM plane rejected RKMPP NV12 DMA-BUF".into());
+        }
+    }
+    Ok(framebuffer::Handle::from(NonZeroU32::new(fb_id).ok_or("invalid RKMPP framebuffer ID")?))
 }
 
 /// Set CRTC mode and display the framebuffer directly on the HDMI screen

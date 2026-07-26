@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+
 /// Simple embedded 8x8 ASCII font bitmap (ASCII 32..=126)
 mod font {
     pub fn get_glyph(c: char) -> [u8; 8] {
@@ -148,7 +149,7 @@ pub fn draw_string_argb(
 }
 
 /// Render the IP Dashboard onto ARGB8888 buffer
-pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, ips: &[(String, String)]) {
+pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, refresh_hz: u32, ips: &[(String, String)]) {
     let bg_color = 0xFF0E1017; // Midnight dark blue/gray
     buf.fill(bg_color);
 
@@ -163,7 +164,7 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, ips: &[(
     let border_color = 0xFF00E5FF; // Electric Cyan
     let header_bg = 0xFF182232;
 
-    let header_h = 80 * scale / 2;
+    let header_h = 120 * scale / 2;
 
     // Header Fill
     for y in box_y..(box_y + header_h) {
@@ -178,7 +179,7 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, ips: &[(
     }
 
     // Header Title
-    let title = "RADXA ROCK 5C+ // DEVICE IPS";
+    let title = "RADXA ROCK 4C+ // RK3399 // DEVICE IPS";
     draw_string_argb(
         buf,
         width,
@@ -188,6 +189,12 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, ips: &[(
         title,
         0xFFFFFFFF,
         scale,
+    );
+
+    let hdmi_line = format!("HDMI OUTPUT: {}X{} @ {} HZ", width, height, refresh_hz);
+    draw_string_argb(
+        buf, width, height, box_x + 20 * scale / 2,
+        box_y + header_h - 12 * scale, &hdmi_line, 0xFF00E5FF, scale,
     );
 
     // Real-Time Clock in Corner
@@ -266,7 +273,10 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, ips: &[(
     }
 
     // Footer
-    let footer_text = "HARDWARE PIPELINE: V4L2 DECODER -> DMA-BUF FD -> DRM ATOMIC COMMIT";
+    let footer_text = format!(
+        "HDMI: {}X{} // V4L2 HEVC DECODER -> DMA-BUF -> DRM KMS",
+        width, height
+    );
     let footer_scale = (scale * 3) / 4;
     draw_string_argb(
         buf,
@@ -274,7 +284,7 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, ips: &[(
         height,
         box_x + 30 * scale / 2,
         box_y + box_h - 25 * scale,
-        footer_text,
+        &footer_text,
         0xFF8899A6,
         footer_scale.max(1),
     );
@@ -350,7 +360,7 @@ pub fn draw_string_nv12(
 }
 
 /// Render the IP Dashboard onto NV12 buffer
-pub fn draw_ip_dashboard_nv12(buf: &mut [u8], width: u32, height: u32, ips: &[(String, String)]) {
+pub fn draw_ip_dashboard_nv12(buf: &mut [u8], width: u32, height: u32, refresh_hz: u32, ips: &[(String, String)]) {
     let w = width as usize;
     let h = height as usize;
     let uv_offset = w * h;
@@ -376,7 +386,7 @@ pub fn draw_ip_dashboard_nv12(buf: &mut [u8], width: u32, height: u32, ips: &[(S
     let box_w = w.saturating_sub(margin * 2);
     let box_h = h.saturating_sub(margin * 2);
 
-    let header_h = 80 * scale / 2;
+    let header_h = 120 * scale / 2;
 
     // Header Fill (Y = 35)
     for y in box_y..(box_y + header_h) {
@@ -388,7 +398,7 @@ pub fn draw_ip_dashboard_nv12(buf: &mut [u8], width: u32, height: u32, ips: &[(S
     }
 
     // Header Title (White: Y=255, U=128, V=128)
-    let title = "RADXA ROCK 5C+ // DEVICE IPS";
+    let title = "RADXA ROCK 4C+ // RK3399 // DEVICE IPS";
     draw_string_nv12(
         buf,
         width,
@@ -398,6 +408,12 @@ pub fn draw_ip_dashboard_nv12(buf: &mut [u8], width: u32, height: u32, ips: &[(S
         title,
         255, 128, 128,
         scale,
+    );
+
+    let hdmi_line = format!("HDMI OUTPUT: {}X{} @ {} HZ", width, height, refresh_hz);
+    draw_string_nv12(
+        buf, width, height, box_x + 20 * scale / 2,
+        box_y + header_h - 12 * scale, &hdmi_line, 200, 220, 16, scale,
     );
 
     // Real-Time Clock
@@ -478,7 +494,10 @@ pub fn draw_ip_dashboard_nv12(buf: &mut [u8], width: u32, height: u32, ips: &[(S
     }
 
     // Footer
-    let footer_text = "HARDWARE PIPELINE: V4L2 DECODER -> DMA-BUF FD -> DRM ATOMIC COMMIT";
+    let footer_text = format!(
+        "HDMI: {}X{} // V4L2 HEVC DECODER -> DMA-BUF -> DRM KMS",
+        width, height
+    );
     let footer_scale = (scale * 3) / 4;
     draw_string_nv12(
         buf,
@@ -486,7 +505,7 @@ pub fn draw_ip_dashboard_nv12(buf: &mut [u8], width: u32, height: u32, ips: &[(S
         height,
         box_x + 30 * scale / 2,
         box_y + box_h - 25 * scale,
-        footer_text,
+        &footer_text,
         160, 128, 128,
         footer_scale.max(1),
     );

@@ -204,6 +204,15 @@ else
   exit 1
 fi
 
+BITRATE="8M"
+MAXRATE="10M"
+if [ "$WIDTH" -ge 3840 ]; then
+  # Capped LAN bitrate prevents an IDR access unit from consuming the receiver's
+  # fixed compressed-data budget while remaining visually useful at 4K60.
+  BITRATE="24M"
+  MAXRATE="28M"
+fi
+
 if [ "$CODEC_NAME" = "H265" ]; then
   "$FFMPEG_BIN" -y -i "$INPUT_FILE" \
     -vf "scale=${WIDTH}:${HEIGHT}" \
@@ -211,10 +220,9 @@ if [ "$CODEC_NAME" = "H265" ]; then
     -c:v "$FFMPEG_CODEC" \
     -preset ultrafast \
     -tune zerolatency \
-    -x265-params "keyint=${FPS}:min-keyint=${FPS}:no-scenecut=1:aud=1:repeat-headers=1" \
-    -b:v 2M -maxrate 2.5M -bufsize 2M \
-    -aud 1 \
-    -bsf:v "$BSF" \
+    -x265-params "keyint=${FPS}:min-keyint=${FPS}:no-scenecut=1:aud=1:repeat-headers=1:bframes=0:rc-lookahead=0" \
+    -b:v "$BITRATE" -maxrate "$MAXRATE" -bufsize "$MAXRATE" \
+    -bsf:v "${BSF},hevc_metadata=aud=insert" \
     "$OUTPUT_FILE"
 else
   "$FFMPEG_BIN" -y -i "$INPUT_FILE" \
@@ -223,11 +231,10 @@ else
     -c:v "$FFMPEG_CODEC" \
     -preset ultrafast \
     -tune zerolatency \
-    -x264-params "keyint=${FPS}:min-keyint=${FPS}:no-scenecut=1:repeat-headers=1" \
-    -b:v 2M -maxrate 2.5M -bufsize 2M \
+    -x264-params "keyint=${FPS}:min-keyint=${FPS}:no-scenecut=1:repeat-headers=1:bframes=0" \
+    -b:v "$BITRATE" -maxrate "$MAXRATE" -bufsize "$MAXRATE" \
     -g "$FPS" -keyint_min "$FPS" -sc_threshold 0 \
-    -aud 1 \
-    -bsf:v "$BSF" \
+    -bsf:v "${BSF},h264_metadata=aud=insert" \
     "$OUTPUT_FILE"
 fi
 

@@ -2,13 +2,13 @@
 set -e
 
 # WebTransport / UDP Video Streamer Script
-# Supports flags (--h264, --h265, --1080p, --720p, --fps, --ip, --port, --file)
+# Supports HEVC flags (--h265, --4k, --fps, --duration, --ip, --port, --file)
 # as well as positional arguments.
 #
 # Examples:
-#   ./stream.sh --h265
-#   ./stream.sh --h264 --1080p
-#   ./stream.sh --ip 192.168.1.72 --fps 60 --h265
+#   ./stream.sh --4k --fps 60
+#   ./stream.sh --1080p --fps 60 --duration 20
+#   ./stream.sh --ip 192.168.1.72 --4k --fps 60
 #   ./stream.sh 192.168.1.72 4434 1080p 30 H265
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,10 +16,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Default settings
 BOARD_IP="${BOARD_IP:-192.168.1.72}"
 PORT="${BOARD_PORT:-4434}"
-RAW_RES="${BOARD_RES:-1280x720}"
-FPS="${STREAM_FPS:-30}"
-RAW_CODEC="${CODEC:-H264}"
+RAW_RES="${BOARD_RES:-3840x2160}"
+FPS="${STREAM_FPS:-60}"
+RAW_CODEC="${CODEC:-H265}"
 CUSTOM_FILE="${STREAM_FILE:-}"
+DURATION="${STREAM_DURATION:-20}"
 
 POSITIONAL_ARGS=()
 
@@ -29,12 +30,12 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: ./stream.sh [OPTIONS] [BOARD_IP] [PORT] [RES] [FPS] [CODEC] [FILE]"
       echo ""
       echo "Options:"
-      echo "  --h264                 Stream using H.264 video codec"
       echo "  --h265, --hevc         Stream using H.265 / HEVC video codec"
       echo "  --1080p, --720p, --4k  Set resolution preset"
       echo "  -r, --res, --resolution Set resolution (e.g. 1920x1080, 1080p, 1280x720)"
-      echo "  -f, --fps              Set frame rate (default: 30)"
-      echo "  -c, --codec            Set codec (H264 or H265)"
+      echo "  -f, --fps              Set frame rate (default: 60)"
+      echo "  -d, --duration SEC     Stream duration (default: 20)"
+      echo "  -c, --codec            Set codec (H265 or HEVC)"
       echo "  -i, --ip, --board-ip   Set target board IP address (default: 192.168.1.72)"
       echo "  -p, --port             Set target UDP port (default: 4434)"
       echo "  --file, --stream-file  Set custom bitstream file path"
@@ -42,8 +43,8 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --h264)
-      RAW_CODEC="H264"
-      shift
+      echo "[ERROR] This receiver currently supports HEVC/H.265 only." >&2
+      exit 2
       ;;
     --h265|--hevc)
       RAW_CODEC="H265"
@@ -83,6 +84,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --fps=*)
       FPS="${1#*=}"
+      shift
+      ;;
+    -d|--duration)
+      DURATION="$2"
+      shift 2
+      ;;
+    --duration=*)
+      DURATION="${1#*=}"
       shift
       ;;
     -c|--codec)
@@ -176,10 +185,9 @@ esac
 
 # Normalize codec
 CODEC=$(echo "$RAW_CODEC" | tr '[:lower:]' '[:upper:]')
-if [ "$CODEC" = "HEVC" ] || [ "$CODEC" = "H265" ]; then
-  CODEC="H265"
-else
-  CODEC="H264"
+if [ "$CODEC" = "HEVC" ] || [ "$CODEC" = "H265" ]; then CODEC="H265"; else
+  echo "[ERROR] This receiver currently supports HEVC/H.265 only." >&2
+  exit 2
 fi
 
 CODEC_LOWER=$(echo "$CODEC" | tr '[:upper:]' '[:lower:]')
@@ -211,8 +219,9 @@ echo " Launching WebTransport / UDP Video Streamer Client"
 echo " Target Board : ${BOARD_IP}:${PORT}"
 echo " Resolution   : ${RES}"
 echo " Frame Rate   : ${FPS} FPS"
+echo " Duration     : ${DURATION} seconds"
 echo " Codec        : ${CODEC}"
 echo " Video File   : ${STREAM_FILE}"
 echo "====================================================="
 
-node "${SCRIPT_DIR}/client/client.mjs" "$BOARD_IP" "$PORT" "$RES" "$FPS" "$CODEC" "$STREAM_FILE"
+node "${SCRIPT_DIR}/client/client.mjs" "$BOARD_IP" "$PORT" "$RES" "$FPS" "$CODEC" "$STREAM_FILE" --duration "$DURATION"

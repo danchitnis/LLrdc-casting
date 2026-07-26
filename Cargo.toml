@@ -14,3 +14,4 @@ rcgen = "0.13"
 [profile.release]
 opt-level = 2
 codegen-units = 16
+strip = "symbols"

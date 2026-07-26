@@ -11,8 +11,19 @@ const __dirname = path.dirname(__filename);
 // Argument Parsing:
 // Options can be passed in order: HOST PORT RES FPS CODEC STREAM_FILE
 // OR env vars: BOARD_IP, BOARD_PORT, BOARD_WIDTH, BOARD_HEIGHT, STREAM_FPS, CODEC, STREAM_FILE
-const SERVER_HOST = process.argv[2] || process.env.BOARD_IP || '192.168.1.72';
-const SERVER_PORT = parseInt(process.argv[3] || process.env.BOARD_PORT || '4434', 10);
+let DURATION_SEC = parseInt(process.env.STREAM_DURATION || '20', 10);
+const cleanArgs = [];
+for (let i = 0; i < process.argv.length; i++) {
+  if ((process.argv[i] === '-d' || process.argv[i] === '--duration') && process.argv[i + 1]) {
+    DURATION_SEC = parseInt(process.argv[i + 1], 10);
+    i++; // Skip value
+  } else {
+    cleanArgs.push(process.argv[i]);
+  }
+}
+
+const SERVER_HOST = cleanArgs[2] || process.env.BOARD_IP || '192.168.1.72';
+const SERVER_PORT = parseInt(cleanArgs[3] || process.env.BOARD_PORT || '4434', 10);
 
 let VID_W = parseInt(process.env.BOARD_WIDTH || '1280', 10);
 let VID_H = parseInt(process.env.BOARD_HEIGHT || '720', 10);
@@ -21,33 +32,33 @@ let CODEC = (process.env.CODEC || 'H264').toUpperCase();
 let streamFilePath = process.env.STREAM_FILE || null;
 
 let argIdx = 4;
-if (process.argv[argIdx]) {
-  const arg = process.argv[argIdx];
+if (cleanArgs[argIdx]) {
+  const arg = cleanArgs[argIdx];
   if (arg.includes('x')) {
     const parts = arg.split('x');
     VID_W = parseInt(parts[0], 10);
     VID_H = parseInt(parts[1], 10);
     argIdx++;
-  } else if (!isNaN(parseInt(arg, 10)) && process.argv[argIdx + 1] && !isNaN(parseInt(process.argv[argIdx + 1], 10))) {
+  } else if (!isNaN(parseInt(arg, 10)) && cleanArgs[argIdx + 1] && !isNaN(parseInt(cleanArgs[argIdx + 1], 10))) {
     VID_W = parseInt(arg, 10);
-    VID_H = parseInt(process.argv[argIdx + 1], 10);
+    VID_H = parseInt(cleanArgs[argIdx + 1], 10);
     argIdx += 2;
   }
 }
 
-if (process.argv[argIdx] && !isNaN(parseInt(process.argv[argIdx], 10))) {
-  FPS = parseInt(process.argv[argIdx], 10);
+if (cleanArgs[argIdx] && !isNaN(parseInt(cleanArgs[argIdx], 10))) {
+  FPS = parseInt(cleanArgs[argIdx], 10);
   argIdx++;
 }
 
-if (process.argv[argIdx] && (process.argv[argIdx].toUpperCase() === 'H264' || process.argv[argIdx].toUpperCase() === 'H265' || process.argv[argIdx].toUpperCase() === 'HEVC')) {
-  CODEC = process.argv[argIdx].toUpperCase();
+if (cleanArgs[argIdx] && (cleanArgs[argIdx].toUpperCase() === 'H264' || cleanArgs[argIdx].toUpperCase() === 'H265' || cleanArgs[argIdx].toUpperCase() === 'HEVC')) {
+  CODEC = cleanArgs[argIdx].toUpperCase();
   if (CODEC === 'HEVC') CODEC = 'H265';
   argIdx++;
 }
 
-if (process.argv[argIdx]) {
-  streamFilePath = process.argv[argIdx];
+if (cleanArgs[argIdx]) {
+  streamFilePath = cleanArgs[argIdx];
 }
 
 // Default stream file if not specified
@@ -234,8 +245,11 @@ let frameIdx = 0;
 
 const startTime = Date.now();
 const intervalMs = 1000.0 / FPS;
+let nextDeadline = performance.now();
+let stopped = false;
 
-const streamInterval = setInterval(() => {
+function streamNextFrame() {
+  if (stopped) return;
   frameSeq++;
   const frameData = videoFrames[frameIdx % videoFrames.length];
   frameIdx++;
@@ -247,11 +261,14 @@ const streamInterval = setInterval(() => {
     const actualFps = (frameSeq / elapsedSec).toFixed(1);
     console.log(`[${FPS} FPS ${CODEC} STREAM] Frame #${frameSeq}: Transmitted ${VID_W}x${VID_H} Frame (${Math.round(frameData.length / 1024)} KB) -> ${SERVER_HOST}:${SERVER_PORT} (${actualFps} FPS)`);
   }
-}, intervalMs);
+  nextDeadline += intervalMs;
+  setTimeout(streamNextFrame, Math.max(0, nextDeadline - performance.now()));
+}
+streamNextFrame();
 
 // Stop after 10 seconds of streaming
 setTimeout(() => {
-  clearInterval(streamInterval);
+  stopped = true;
   console.log(`\n=====================================================`);
   console.log(` [STREAM COMPLETE] Streamed ${frameSeq} ${CODEC} video frames to board.`);
   console.log(`=====================================================\n`);
@@ -259,7 +276,7 @@ setTimeout(() => {
     udpClient.close();
     process.exit(0);
   }, 200);
-}, 10000);
+}, DURATION_SEC * 1000);
 
 function sendVideoFrame(frameBuf, seq) {
   const CHUNK_SIZE = 1350;

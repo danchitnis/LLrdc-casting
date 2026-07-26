@@ -1,47 +1,17 @@
-FROM rust:1-slim-bookworm AS builder
-
-# Limit parallel Cargo compilation jobs to 2 to prevent power surges & memory spikes on RK3588
-ENV CARGO_BUILD_JOBS=2
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    pkg-config \
-    libdrm-dev \
-    libv4l-dev \
-    v4l-utils \
-    libdrm-tests \
-    && rm -rf /var/lib/apt/lists/*
-
+# The ARM64 binary is compiled locally. The target only loads this runtime image.
+FROM --platform=$TARGETPLATFORM rust:1-slim-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libdrm-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-
-# 1. Copy Cargo manifest first to cache dependency compilation layer
 COPY Cargo.toml ./
+COPY src ./src
+RUN cargo build --release
 
-# 2. Pre-build Cargo dependencies using a dummy main.rs
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
-
-# 3. Copy actual Rust source code
-ARG BUILD_DATE
-COPY src/ ./src/
-RUN touch src/main.rs && cargo build --release
-
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libdrm2 \
-    libv4l-0 \
-    v4l-utils \
-    libdrm-tests \
-    ca-certificates \
-    ffmpeg \
+# GStreamer 1.26 contains v4l2slh265dec, the userspace implementation of the
+# RK3399 rkvdec stateless request API.
+FROM --platform=$TARGETPLATFORM debian:trixie-slim
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad gstreamer1.0-libav \
     && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-COPY --from=builder /app/target/release/rock5c-v4l2-drm ./rock5c-v4l2-drm
-
-EXPOSE 4433/udp
-EXPOSE 4434/udp
-
-CMD ["./rock5c-v4l2-drm"]
+COPY --from=builder /app/target/release/rock5c-v4l2-drm /usr/local/bin/rock5c-v4l2-drm
+ENTRYPOINT ["/usr/local/bin/rock5c-v4l2-drm"]

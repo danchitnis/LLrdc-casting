@@ -2,3 +2,6 @@ target/
 node_modules/
 client/node_modules/
 client/assets/*.h264
+client/assets/
+bin/
+.DS_Store

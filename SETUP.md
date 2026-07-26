@@ -1,4 +1,4 @@
-# Agent Setup Instructions: Radxa Rock 5C+ V4L2 DRM Pipeline Initialization (Rust)
+# Agent Setup Instructions: Radxa ROCK 4C+ (RK3399) V4L2 DRM Pipeline Initialization (Rust)
 
 This document outlines the step-by-step workflow for an **AI Agent** or automated system initializing and deploying the safe Rust WebTransport V4L2 DMA-BUF DRM Atomic pipeline on a fresh/blank Armbian installation upon acquiring SSH access.
 
@@ -42,8 +42,8 @@ ssh <BOARD_IP> "ls -l /dev/video*"
 
 *Target Drivers & Output*:
 - DRM display card: `/dev/dri/card0` (Driver: `rockchip`)
-- Active HDMI Connector ID: e.g. `54` (`HDMI-A-1`, preferred mode `1920x1080 @ 60Hz`)
-- RK3588 Hardware Video Decoder Node: `/dev/video2` (`rkvdec`)
+- Active HDMI Connector ID: `54` (`HDMI-A-1`; current mode `3840x2160 @ 60Hz`)
+- RK3399 Hardware Video Decoder Node: `/dev/video2` (`rkvdec`, V4L2 stateless)
 
 ---
 
@@ -64,16 +64,10 @@ To stop the server container on the board:
 
 ### Step 4: Execute Video Streamer Test Client
 
-To stream H.264 video at 1080p:
+Run the HEVC smoke test at 1080p:
 
 ```bash
-./stream.sh --h264 --1080p
-```
-
-To stream H.265 / HEVC video at 1080p:
-
-```bash
-./stream.sh --h265 --1080p
+./test.sh --1080p --fps 60 --duration 20
 ```
 
 ---
@@ -84,21 +78,10 @@ Verify that the output logs report success across all server stages:
 ```text
 [STEP 1] Opening DRM device & autodetecting display mode...
 [DRM SUCCESS] Opened display card: /dev/dri/card0
-[DRM] Selected 1080p HDMI display mode: 1920x1080 @ 60Hz
-[DRM AUTODETECT SUCCESS] Screen Resolution: 1920x1080 @ 60Hz
+[DRM] Selected highest capacity HDMI mode: 3840x2160 @ 60Hz
+[DRM AUTODETECT SUCCESS] Screen Resolution: 3840x2160 @ 60Hz
 
-[HW DECODER SUCCESS] Bound RK3588 V4L2 Hardware Video Decoder: /dev/video2
-[HW DECODER ENGINE] rkvdec (Hardware H.264 / HEVC / VP9 Video Acceleration Active)
-
-[STEP 2] Allocating Double-Buffered DRM PRIME frame memory (1920x1080)...
-[DMA-BUF 0] Buffer 0 ready: fd=12, FB=framebuffer::Handle(60)
-[DMA-BUF 1] Buffer 1 ready: fd=13, FB=framebuffer::Handle(61)
-
-[NETWORK] Active IPv4 Addresses detected on device:
-  - lo         : 127.0.0.1
-  - end0       : 192.168.1.72
-
-[SERVER READY] WebTransport QUIC UDP Server running on port 4433/4434.
- Displaying IPv4 Dashboard with Real-Time Clock on HDMI.
- Waiting for incoming video streams from remote client...
+[IDLE DASHBOARD] HDMI IP screen active; waiting for HEVC stream.
+[READY] waiting for H.265 UDP access units on port 4434
+[PLAYBACK READY] HEVC -> v4l2slh265dec -> HDMI connector 54, plane 33
 ```

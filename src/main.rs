@@ -1,8 +1,6 @@
-/*
- * Radxa Rock 5C+ WebTransport QUIC UDP Remote Screen Sharing Server
- * Safe Rust V4L2 DMA-BUF DRM Atomic Display Pipeline (Real-Time Clock & Double-Buffered Page Flip)
- */
-
+//! Verified RK3399 fallback: UDP HEVC -> V4L2 stateless decoder -> KMS.
+//! The atomic two-plane presenter is developed separately; this keeps HDMI
+//! playback on the proven pipeline while it is completed.
 mod drm_kms;
 mod gfx;
 mod net;
@@ -10,201 +8,84 @@ mod text;
 mod v4l2_decoder;
 mod webtransport_server;
 
-use drm::control::Device as ControlDevice;
-use std::os::fd::AsFd;
-use std::os::unix::io::AsRawFd;
-use std::time::Duration;
+use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::process::{Child, ChildStdin, Command, Stdio};
 use tokio::sync::mpsc;
+
+fn start_playback() -> Result<(Child, ChildStdin), Box<dyn std::error::Error>> {
+    let connector = std::env::var("DRM_CONNECTOR_ID").unwrap_or_else(|_| "54".into());
+    let plane = std::env::var("DRM_PLANE_ID").unwrap_or_else(|_| "33".into());
+    let mut child = Command::new("gst-launch-1.0")
+        .args([
+            "-q", "fdsrc", "fd=0", "blocksize=262144", "!", "h265parse", "!",
+            "v4l2slh265dec", "!", "kmssink", "driver-name=rockchip",
+            &format!("connector-id={connector}"), &format!("plane-id={plane}"),
+            "force-modesetting=false", "sync=false", "skip-vsync=true", "max-lateness=0",
+        ])
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn()?;
+    let stdin = child.stdin.take().ok_or("could not open GStreamer stdin")?;
+    println!("[PLAYBACK READY] HEVC -> v4l2slh265dec -> HDMI connector {connector}, plane {plane}");
+    Ok((child, stdin))
+}
+
+/// Holds the DRM file and scanout allocation while the receiver is idle. It
+/// must be dropped before gst-launch starts so the playback process can become
+/// DRM master and take over the same HDMI plane.
+struct IdleDashboard {
+    _card: drm_kms::Card,
+    _fb: drm::control::framebuffer::Handle,
+    _prime_fd: i32,
+}
+
+impl IdleDashboard {
+    fn release(self) {
+        drm_kms::drop_master(&self._card);
+        println!("[IDLE DASHBOARD] released DRM master for video playback.");
+    }
+}
+
+fn show_idle_dashboard() -> Result<IdleDashboard, Box<dyn std::error::Error>> {
+    let card = drm_kms::open_display_card()?;
+    let (width, height, mode, connector, crtc) = drm_kms::autodetect_display_mode(&card)?;
+    let (prime_fd, pitch, size, ptr) = drm_kms::allocate_prime_dmabuf(card.0.as_raw_fd(), width, height)?;
+    let fb = drm_kms::import_dmabuf_and_add_fb(card.0.as_raw_fd(), prime_fd, width, height, pitch, drm_kms::DRM_FORMAT_XRGB8888)?;
+    let ips = net::get_active_ipv4_addresses();
+    unsafe {
+        let pixels = std::slice::from_raw_parts_mut(ptr as *mut u32, size / 4);
+        text::draw_ip_dashboard_argb(pixels, width, height, mode.vrefresh(), &ips);
+    }
+    drm_kms::set_display_mode(&card, crtc, fb, connector, mode)?;
+    println!("[IDLE DASHBOARD] HDMI IP screen active; waiting for HEVC stream.");
+    Ok(IdleDashboard { _card: card, _fb: fb, _prime_fd: prime_fd })
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=====================================================");
-    println!(" Safe Rust Pipeline: WebTransport -> V4L2 -> DRM");
-    println!(" Radxa Rock 5C+ / Rockchip RK3588 DRM Display");
-    println!("=====================================================\n");
-
-    // -------------------------------------------------------------
-    // Step 1: Open DRM Card Device & Autodetect HDMI Screen Resolution
-    // -------------------------------------------------------------
-    println!("[STEP 1] Opening DRM device & autodetecting display mode...");
-    let card = drm_kms::open_display_card()?;
-    let (screen_w, screen_h, mode, conn_handle, crtc_handle) =
-        drm_kms::autodetect_display_mode(&card)?;
-
-    // Initialize V4L2 Hardware Decoder Node (/dev/video2 / rkvdec)
-    v4l2_decoder::init_hardware_decoder()?;
-
-    let drm_raw_fd = card.as_fd().as_raw_fd();
-
-    // -------------------------------------------------------------
-    // Step 2: Allocate DOUBLE-BUFFERED Native DRM PRIME DMA-BUF Buffers
-    // -------------------------------------------------------------
-    let active_format = if screen_w >= 3840 {
-        drm_kms::DRM_FORMAT_NV12
-    } else {
-        drm_kms::DRM_FORMAT_XRGB8888
-    };
-
-    println!("\n[STEP 2] Allocating Double-Buffered DRM PRIME frame memory ({}x{})...", screen_w, screen_h);
-
-    let (fd_0, pitch_0, size_0, ptr_0) = drm_kms::allocate_prime_dmabuf(drm_raw_fd, screen_w, screen_h)?;
-    let fb_handle_0 = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, fd_0, screen_w, screen_h, pitch_0, active_format)?;
-    println!("[DMA-BUF 0] Buffer 0 ready: fd={}, FB={:?}", fd_0, fb_handle_0);
-
-    let (fd_1, pitch_1, size_1, ptr_1) = drm_kms::allocate_prime_dmabuf(drm_raw_fd, screen_w, screen_h)?;
-    let fb_handle_1 = drm_kms::import_dmabuf_and_add_fb(drm_raw_fd, fd_1, screen_w, screen_h, pitch_1, active_format)?;
-    println!("[DMA-BUF 1] Buffer 1 ready: fd={}, FB={:?}", fd_1, fb_handle_1);
-
-    // -------------------------------------------------------------
-    // Step 2b: Query Active Network IPv4 Addresses
-    // -------------------------------------------------------------
-    let active_ips = net::get_active_ipv4_addresses();
-    println!("\n[NETWORK] Active IPv4 Addresses detected on device:");
-    for (iface, ip) in &active_ips {
-        println!("  - {:<10} : {}", iface, ip);
-    }
-
-    if !ptr_0.is_null() && size_0 > 0 {
-        if active_format == drm_kms::DRM_FORMAT_NV12 {
-            let slice_0 = unsafe { std::slice::from_raw_parts_mut(ptr_0 as *mut u8, size_0) };
-            text::draw_ip_dashboard_nv12(slice_0, screen_w, screen_h, &active_ips);
-        } else {
-            let slice_0 = unsafe { std::slice::from_raw_parts_mut(ptr_0 as *mut u32, size_0 / 4) };
-            text::draw_ip_dashboard_argb(slice_0, screen_w, screen_h, &active_ips);
+    let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(2);
+    tokio::spawn(async move { if let Err(error) = webtransport_server::run_server(tx).await { eprintln!("[SERVER ERROR] {error}"); } });
+    let mut dashboard = if std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
+        Some(show_idle_dashboard()?)
+    } else { None };
+    println!("[READY] waiting for H.265 UDP access units on port 4434");
+    let mut playback: Option<(Child, ChildStdin)> = None;
+    let mut sent = 0u64;
+    while let Some(mut frame) = rx.recv().await {
+        while let Ok(newer) = rx.try_recv() { frame = newer; }
+        if frame.codec != "hevc" { continue; }
+        if playback.is_none() {
+            // Release the dashboard's DRM master immediately before hand-off.
+            if let Some(dashboard) = dashboard.take() { dashboard.release(); }
+            playback = Some(start_playback()?);
         }
-    }
-    if !ptr_1.is_null() && size_1 > 0 {
-        if active_format == drm_kms::DRM_FORMAT_NV12 {
-            let slice_1 = unsafe { std::slice::from_raw_parts_mut(ptr_1 as *mut u8, size_1) };
-            text::draw_ip_dashboard_nv12(slice_1, screen_w, screen_h, &active_ips);
-        } else {
-            let slice_1 = unsafe { std::slice::from_raw_parts_mut(ptr_1 as *mut u32, size_1 / 4) };
-            text::draw_ip_dashboard_argb(slice_1, screen_w, screen_h, &active_ips);
+        let (_, stdin) = playback.as_mut().expect("playback initialized");
+        if let Err(error) = stdin.write_all(&frame.access_unit).and_then(|_| stdin.flush()) {
+            eprintln!("[PLAYBACK ERROR] seq={} {error}; restarting pipeline", frame.seq);
+            playback = None;
+            continue;
         }
+        sent += 1;
+        if sent == 1 || sent % 60 == 0 { println!("[PLAYBACK] submitted_hevc_access_units={sent}"); }
     }
-
-    // -------------------------------------------------------------
-    // Step 3: Commit Initial CRTC Mode
-    // -------------------------------------------------------------
-    println!("\n[STEP 3] Executing Initial DRM KMS Modeset on CRTC {:?}...", crtc_handle);
-    drm_kms::set_display_mode(&card, crtc_handle, fb_handle_0, conn_handle, mode)?;
-
-    // -------------------------------------------------------------
-    // Step 4: Start WebTransport Server & Video Stream Receiver
-    // -------------------------------------------------------------
-    let (frame_tx, mut frame_rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(32);
-
-    tokio::spawn(async move {
-        if let Err(e) = webtransport_server::run_server(frame_tx).await {
-            eprintln!("[SERVER ERROR] WebTransport QUIC server error: {}", e);
-        }
-    });
-
-    println!("\n[SERVER READY] WebTransport QUIC UDP Server running on port 4433/4434.");
-    println!(" Displaying IPv4 Dashboard with Real-Time Clock on HDMI.");
-    println!(" Waiting for incoming video streams from remote client...");
-
-    use std::time::Instant;
-
-    let mut clock_interval = tokio::time::interval(Duration::from_secs(1));
-    let mut last_render_time = Instant::now();
-    let mut frame_time_deltas: Vec<f32> = Vec::with_capacity(30);
-
-    let mut current_buf_idx = 0;
-    let mut is_streaming_active = false;
-
-    loop {
-        tokio::select! {
-            // Update real-time clock on IP screen every second when idle
-            _ = clock_interval.tick() => {
-                if !is_streaming_active {
-                    let (back_ptr, back_size, back_fb) = if current_buf_idx == 0 {
-                        (ptr_1, size_1, fb_handle_1)
-                    } else {
-                        (ptr_0, size_0, fb_handle_0)
-                    };
-
-                    if !back_ptr.is_null() && back_size > 0 {
-                        if active_format == drm_kms::DRM_FORMAT_NV12 {
-                            let slice = unsafe { std::slice::from_raw_parts_mut(back_ptr as *mut u8, back_size) };
-                            text::draw_ip_dashboard_nv12(slice, screen_w, screen_h, &active_ips);
-                        } else {
-                            let slice = unsafe { std::slice::from_raw_parts_mut(back_ptr as *mut u32, back_size / 4) };
-                            text::draw_ip_dashboard_argb(slice, screen_w, screen_h, &active_ips);
-                        }
-                        let _ = card.page_flip(crtc_handle, back_fb, drm::control::PageFlipFlags::empty(), None);
-                        current_buf_idx = 1 - current_buf_idx;
-                    }
-                }
-            }
-
-            // Immediately render every fully reassembled video frame in strict FIFO sequence
-            Some(video_frame) = frame_rx.recv() => {
-                let now = Instant::now();
-                let delta_ms = now.duration_since(last_render_time).as_secs_f32() * 1000.0;
-                last_render_time = now;
-
-                if !is_streaming_active || delta_ms > 1000.0 {
-                    is_streaming_active = true;
-                    frame_time_deltas.clear();
-                    v4l2_decoder::reset_decoder_pipeline();
-                } else if delta_ms > 0.1 && delta_ms < 500.0 {
-                    frame_time_deltas.push(delta_ms);
-                    if frame_time_deltas.len() > 30 {
-                        frame_time_deltas.remove(0);
-                    }
-                }
-
-                let avg_delta = frame_time_deltas.iter().sum::<f32>() / frame_time_deltas.len() as f32;
-                let measured_fps = if avg_delta > 0.0 { 1000.0 / avg_delta } else { 30.0 };
-                let jitter_ms = (frame_time_deltas.iter().map(|&d| (d - avg_delta).powi(2)).sum::<f32>() / frame_time_deltas.len() as f32).sqrt();
-
-                let (back_ptr, back_size, back_fb) = if current_buf_idx == 0 {
-                    (ptr_1, size_1, fb_handle_1)
-                } else {
-                    (ptr_0, size_0, fb_handle_0)
-                };
-
-                if let Ok(_) = v4l2_decoder::render_frame_to_buffer(
-                    &video_frame,
-                    back_ptr,
-                    back_size,
-                    screen_w,
-                    screen_h,
-                    active_format,
-                    &active_ips,
-                    measured_fps,
-                    jitter_ms,
-                ) {
-                    let mut res = card.page_flip(
-                        crtc_handle,
-                        back_fb,
-                        drm::control::PageFlipFlags::ASYNC,
-                        None,
-                    ).or_else(|_| {
-                        card.page_flip(
-                            crtc_handle,
-                            back_fb,
-                            drm::control::PageFlipFlags::empty(),
-                            None,
-                        )
-                    });
-
-                    if res.is_err() {
-                        tokio::time::sleep(Duration::from_millis(2)).await;
-                        res = card.page_flip(
-                            crtc_handle,
-                            back_fb,
-                            drm::control::PageFlipFlags::empty(),
-                            None,
-                        );
-                    }
-
-                    if res.is_ok() {
-                        current_buf_idx = 1 - current_buf_idx;
-                    }
-                }
-            }
-        }
-    }
+    Ok(())
 }
