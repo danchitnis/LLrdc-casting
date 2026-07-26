@@ -36,12 +36,31 @@ struct IdleDashboard {
     _card: drm_kms::Card,
     _fb: drm::control::framebuffer::Handle,
     _prime_fd: i32,
+    _stop_tx: Option<std::sync::mpsc::Sender<()>>,
+    _thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl IdleDashboard {
-    fn release(self) {
+    fn release(mut self) {
+        if let Some(tx) = self._stop_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self._thread_handle.take() {
+            let _ = handle.join();
+        }
         drm_kms::drop_master(&self._card);
         println!("[IDLE DASHBOARD] released DRM master for video playback.");
+    }
+}
+
+impl Drop for IdleDashboard {
+    fn drop(&mut self) {
+        if let Some(tx) = self._stop_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self._thread_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -57,7 +76,41 @@ fn show_idle_dashboard() -> Result<IdleDashboard, Box<dyn std::error::Error>> {
     }
     drm_kms::set_display_mode(&card, crtc, fb, connector, mode)?;
     println!("[IDLE DASHBOARD] HDMI IP screen active; waiting for HEVC stream.");
-    Ok(IdleDashboard { _card: card, _fb: fb, _prime_fd: prime_fd })
+
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let ptr_addr = ptr as usize;
+
+    let thread_handle = std::thread::spawn(move || {
+        let mut last_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        loop {
+            match stop_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if now_secs != last_secs {
+                last_secs = now_secs;
+                unsafe {
+                    let pixels = std::slice::from_raw_parts_mut(ptr_addr as *mut u32, size / 4);
+                    text::update_clock_argb(pixels, width, height);
+                }
+            }
+        }
+    });
+
+    Ok(IdleDashboard {
+        _card: card,
+        _fb: fb,
+        _prime_fd: prime_fd,
+        _stop_tx: Some(stop_tx),
+        _thread_handle: Some(thread_handle),
+    })
 }
 
 #[tokio::main]
