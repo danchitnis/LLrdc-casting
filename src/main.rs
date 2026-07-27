@@ -12,7 +12,21 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use tokio::sync::mpsc;
+fn elevate_process_priority() {
+    unsafe {
+        let param = libc::sched_param { sched_priority: 20 };
+        if libc::sched_setscheduler(0, libc::SCHED_FIFO, &param as *const _) == 0 {
+            println!("[PRIORITY] Successfully elevated main process to SCHED_FIFO priority 20");
+        } else {
+            let err = *libc::__errno_location();
+            println!("[PRIORITY] SCHED_FIFO elevation not permitted (errno={err}); setting niceness to -10...");
+            libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+        }
+    }
+}
+
 fn spawn_dmesg_kernel_monitor() {
+    elevate_process_priority();
     std::thread::spawn(|| {
         if let Ok(mut child) = Command::new("dmesg").args(["-w"]).stdout(Stdio::piped()).spawn() {
             if let Some(stdout) = child.stdout.take() {
@@ -49,8 +63,9 @@ fn start_playback(codec: &str) -> Result<(Child, ChildStdin, String), Box<dyn st
     let mut child = Command::new("gst-launch-1.0")
         .env("GST_DEBUG", "v4l2slh265dec:4,h265parse:4,v4l2slh264dec:4,h264parse:4,kmssink:4")
         .args([
-            "-q", "fdsrc", "fd=0", "blocksize=262144", "!",
-            parser, "!", decoder, "!",
+            "-q", "fdsrc", "fd=0", "blocksize=4096", "do-timestamp=true", "!",
+            parser, "config-interval=-1", "!",
+            decoder, "!",
             "kmssink", "driver-name=rockchip",
             &format!("connector-id={connector}"), &format!("plane-id={plane}"),
             "force-modesetting=false", "sync=false", "skip-vsync=true", "max-lateness=0",
@@ -167,7 +182,7 @@ fn show_idle_dashboard() -> Result<IdleDashboard, Box<dyn std::error::Error>> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_dmesg_kernel_monitor();
     let _ = drm_kms::inspect_live_scanout_status();
-    let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(2);
+    let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(64);
     tokio::spawn(async move { if let Err(error) = webtransport_server::run_server(tx).await { eprintln!("[SERVER ERROR] {error}"); } });
     let mut dashboard = if std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
         Some(show_idle_dashboard()?)
@@ -175,8 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[READY] waiting for video stream access units on UDP/WebTransport");
     let mut playback: Option<(Child, ChildStdin, String)> = None;
     let mut sent = 0u64;
-    while let Some(mut frame) = rx.recv().await {
-        while let Ok(newer) = rx.try_recv() { frame = newer; }
+    while let Some(frame) = rx.recv().await {
         if frame.codec != "hevc" && frame.codec != "h264" { continue; }
         
         let need_restart = match &playback {

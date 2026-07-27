@@ -248,13 +248,13 @@ const intervalMs = 1000.0 / FPS;
 let nextDeadline = performance.now();
 let stopped = false;
 
-function streamNextFrame() {
+async function streamNextFrame() {
   if (stopped) return;
   frameSeq++;
   const frameData = videoFrames[frameIdx % videoFrames.length];
   frameIdx++;
 
-  sendVideoFrame(frameData, frameSeq);
+  await sendVideoFrame(frameData, frameSeq);
 
   if (frameSeq % FPS === 0) {
     const elapsedSec = (Date.now() - startTime) / 1000.0;
@@ -262,11 +262,12 @@ function streamNextFrame() {
     console.log(`[${FPS} FPS ${CODEC} STREAM] Frame #${frameSeq}: Transmitted ${VID_W}x${VID_H} Frame (${Math.round(frameData.length / 1024)} KB) -> ${SERVER_HOST}:${SERVER_PORT} (${actualFps} FPS)`);
   }
   nextDeadline += intervalMs;
-  setTimeout(streamNextFrame, Math.max(0, nextDeadline - performance.now()));
+  const delay = Math.max(0, nextDeadline - performance.now());
+  setTimeout(streamNextFrame, delay);
 }
 streamNextFrame();
 
-// Stop after 10 seconds of streaming
+// Stop after specified duration of streaming
 setTimeout(() => {
   stopped = true;
   console.log(`\n=====================================================`);
@@ -278,10 +279,11 @@ setTimeout(() => {
   }, 200);
 }, DURATION_SEC * 1000);
 
-function sendVideoFrame(frameBuf, seq) {
+async function sendVideoFrame(frameBuf, seq) {
   const CHUNK_SIZE = 1350;
   const totalChunks = Math.ceil(frameBuf.length / CHUNK_SIZE);
   const headerTag = CODEC === 'H265' ? 'H265' : 'H264';
+  const BATCH_SIZE = 8; // Send 8 packets (approx 10.8KB) per micro-batch
 
   for (let c = 0; c < totalChunks; c++) {
     const start = c * CHUNK_SIZE;
@@ -298,5 +300,9 @@ function sendVideoFrame(frameBuf, seq) {
 
     const packet = Buffer.concat([header, chunkData]);
     udpClient.send(packet, SERVER_PORT, SERVER_HOST, () => {});
+
+    if ((c + 1) % BATCH_SIZE === 0 && c + 1 < totalChunks) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
   }
 }

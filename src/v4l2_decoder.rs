@@ -60,10 +60,15 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     };
     let seq = u32::from_be_bytes(packet[4..8].try_into().ok()?);
 
-    // Drop stale chunks from older already-completed frames
+    // Drop stale chunks from older already-completed frames, but handle stream sequence resets
     let last_seq = LAST_COMPLETED_SEQ.load(Ordering::Relaxed);
     if seq <= last_seq && last_seq > 0 {
-        return None;
+        if last_seq.saturating_sub(seq) > 50 {
+            // Sequence reset detected (e.g. new client or new stream restart); reset sequence counter
+            LAST_COMPLETED_SEQ.store(0, Ordering::Relaxed);
+        } else {
+            return None;
+        }
     }
 
     let chunk_index = u16::from_be_bytes(packet[8..10].try_into().ok()?);

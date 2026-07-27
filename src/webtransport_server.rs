@@ -90,10 +90,8 @@ pub async fn run_server(
             let mut buf = [0u8; 65536];
             while let Ok((len, _addr)) = socket.recv_from(&mut buf).await {
                 if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&buf[..len]) {
-                    // Never let the network task wait behind display/decode work.
-                    // The receiver is intentionally latest-frame-wins for low latency.
-                    if frame_tx_udp.try_send(video_frame).is_err() {
-                        // A full queue means a newer access unit will be more useful.
+                    if frame_tx_udp.send(video_frame).await.is_err() {
+                        break;
                     }
                 }
             }
@@ -141,7 +139,7 @@ async fn handle_connection(
                                 let mut packet = vec![0u8; len];
                                 if recv_stream.read_exact(&mut packet).await.is_err() { break; }
                                 if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&packet) {
-                                    let _ = frame_tx_clone.try_send(video_frame);
+                                    if frame_tx_clone.send(video_frame).await.is_err() { break; }
                                 }
                             }
                         });
@@ -159,7 +157,7 @@ async fn handle_connection(
                         let payload = dgram.payload().to_vec();
                         if !payload.is_empty() {
                             if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&payload) {
-                                let _ = frame_tx.try_send(video_frame);
+                                let _ = frame_tx.send(video_frame).await;
                             }
                         }
                     }
