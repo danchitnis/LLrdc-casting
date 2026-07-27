@@ -85,8 +85,21 @@ pub fn open_display_card() -> Result<Card, Box<dyn std::error::Error>> {
                 if !handles.connectors().is_empty() && !handles.crtcs().is_empty() {
                     println!("[DRM SUCCESS] Opened display card: {}", card_path);
 
-                    card.set_client_capability(drm::ClientCapability::UniversalPlanes, true)?;
-                    card.set_client_capability(drm::ClientCapability::Atomic, true)?;
+                    let mut last_err = None;
+                    for _attempt in 1..=10 {
+                        let res1 = card.set_client_capability(drm::ClientCapability::UniversalPlanes, true);
+                        let res2 = card.set_client_capability(drm::ClientCapability::Atomic, true);
+                        if res1.is_ok() && res2.is_ok() {
+                            return Ok(card);
+                        }
+                        if let Err(e) = res1.or(res2) {
+                            last_err = Some(e);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    if let Some(e) = last_err {
+                        return Err(Box::new(e));
+                    }
                     return Ok(card);
                 }
             }

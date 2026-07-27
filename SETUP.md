@@ -26,7 +26,22 @@ ssh <BOARD_IP> "uname -a"
 
 ---
 
-### Step 2: Inspect Display Subsystem, V4L2 Hardware Decoders & DRM Modes (`modetest`)
+### Step 2: Install & Prepare Docker Engine on Target Board
+Ensure `docker.io` and `docker-cli` are installed, the Docker service is active, and the SSH user belongs to the `docker` group.
+
+Check Docker installation status:
+```bash
+ssh <BOARD_IP> "docker info"
+```
+
+If Docker or `docker-cli` is missing or user permissions are required, ask the user for `sudo` execution:
+```bash
+ssh -t <USER>@<BOARD_IP> "sudo apt update && sudo apt install -y docker.io docker-cli && sudo systemctl enable --now docker && sudo usermod -aG docker \$USER"
+```
+
+---
+
+### Step 3: Inspect Display Subsystem, V4L2 Hardware Decoders & DRM Modes (`modetest`)
 Inspect available DRM graphics cards, V4L2 hardware video nodes (`rkvdec`), and display connectors:
 
 ```bash
@@ -47,7 +62,7 @@ ssh <BOARD_IP> "ls -l /dev/video*"
 
 ---
 
-### Step 3: Launch WebTransport Screen Sharing Server
+### Step 4: Launch WebTransport Screen Sharing Server
 To build the Docker image locally and transfer it to the board in background mode:
 
 ```bash
@@ -62,7 +77,7 @@ To stop the server container on the board:
 
 ---
 
-### Step 4: Execute Video Streamer Test Client
+### Step 5: Execute Video Streamer Test Client
 
 Run the HEVC smoke test at 1080p:
 
@@ -72,7 +87,7 @@ Run the HEVC smoke test at 1080p:
 
 ---
 
-### Step 5: Verify Pipeline Execution Logs
+### Step 6: Verify Pipeline Execution Logs
 Verify that the output logs report success across all server stages:
 
 ```text
