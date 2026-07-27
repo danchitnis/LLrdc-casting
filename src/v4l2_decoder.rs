@@ -79,7 +79,7 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
         return None;
     }
     let payload = &packet[HEADER_LEN..];
-    if payload.len() > CHUNK_BYTES { return None; }
+    if payload.len() > MAX_ACCESS_UNIT_BYTES { return None; }
 
     let now = Instant::now();
     let mut assemblies = ASSEMBLIES.lock().expect("assembly mutex poisoned");
