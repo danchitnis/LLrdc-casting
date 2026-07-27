@@ -3,15 +3,21 @@
 //! Compressed network data is the only video data kept in normal RAM. Decoded
 //! pixels never enter Rust memory: `mpp_decoder` exports them as DMA-BUFs.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 const HEADER_LEN: usize = 16;
 const CHUNK_BYTES: usize = 1350;
-const MAX_ACCESS_UNIT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_ACCESS_UNIT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHUNKS: usize = (MAX_ACCESS_UNIT_BYTES + CHUNK_BYTES - 1) / CHUNK_BYTES;
-const MAX_IN_FLIGHT: usize = 4;
-const ASSEMBLY_TTL: Duration = Duration::from_millis(35);
+const MAX_IN_FLIGHT: usize = 32;
+const ASSEMBLY_TTL: Duration = Duration::from_millis(250);
+
+static STATS_CHUNKS: AtomicU64 = AtomicU64::new(0);
+static STATS_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static STATS_DROPPED_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+static STATS_DROPPED_EVICTED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct VideoFrame {
@@ -42,6 +48,8 @@ pub fn reset_decoder_pipeline() {
 
 pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     if packet.len() <= HEADER_LEN { return None; }
+    STATS_CHUNKS.fetch_add(1, Ordering::Relaxed);
+
     let codec = match &packet[..4] {
         b"H265" | b"HEVC" => "hevc",
         b"H264" | b"VIDC" => "h264",
@@ -60,7 +68,15 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
 
     let now = Instant::now();
     let mut assemblies = ASSEMBLIES.lock().expect("assembly mutex poisoned");
+
+    // Retain non-expired assemblies and count dropped timeouts
+    let initial_len = assemblies.len();
     assemblies.retain(|entry| now.duration_since(entry.first_packet_at) <= ASSEMBLY_TTL);
+    let expired_count = (initial_len - assemblies.len()) as u64;
+    if expired_count > 0 {
+        STATS_DROPPED_TIMEOUT.fetch_add(expired_count, Ordering::Relaxed);
+    }
+
     if let Some(index) = assemblies.iter().position(|entry| entry.seq == seq) {
         let entry = &mut assemblies[index];
         if entry.total_chunks != total_chunks || entry.width != width || entry.height != height || entry.codec != codec { return None; }
@@ -70,7 +86,10 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
             entry.received += 1;
         }
     } else {
-        if assemblies.len() == MAX_IN_FLIGHT { assemblies.remove(0); }
+        if assemblies.len() == MAX_IN_FLIGHT {
+            assemblies.remove(0);
+            STATS_DROPPED_EVICTED.fetch_add(1, Ordering::Relaxed);
+        }
         let mut chunks = (0..total_chunks).map(|_| None).collect::<Vec<_>>();
         chunks[chunk_index as usize] = Some(payload.to_vec());
         assemblies.push(Assembly { seq, total_chunks, width, height, codec, chunks, received: 1, first_packet_at: now });
@@ -82,6 +101,17 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     if actual_len == 0 || actual_len > MAX_ACCESS_UNIT_BYTES { return None; }
     let mut access_unit = Vec::with_capacity(actual_len);
     for chunk in completed.chunks { access_unit.extend_from_slice(chunk.as_deref()?); }
+
+    let completed_count = STATS_COMPLETED.fetch_add(1, Ordering::Relaxed) + 1;
+    if completed_count == 1 || completed_count % 60 == 0 {
+        let chunks_cnt = STATS_CHUNKS.load(Ordering::Relaxed);
+        let timeout_cnt = STATS_DROPPED_TIMEOUT.load(Ordering::Relaxed);
+        let evicted_cnt = STATS_DROPPED_EVICTED.load(Ordering::Relaxed);
+        let total_attempts = completed_count + timeout_cnt + evicted_cnt;
+        let rate = if total_attempts > 0 { (completed_count as f64 / total_attempts as f64) * 100.0 } else { 100.0 };
+        println!("[FRAME INTEGRITY] Completed={completed_count} DroppedTimeout={timeout_cnt} Evicted={evicted_cnt} TotalChunks={chunks_cnt} DeliveryRate={rate:.1}%");
+    }
+
     Some(VideoFrame { seq: completed.seq, width: completed.width as u32, height: completed.height as u32, codec: completed.codec.into(), access_unit, first_packet_at: completed.first_packet_at })
 }
 

@@ -13,20 +13,25 @@ use std::os::fd::AsRawFd;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use tokio::sync::mpsc;
 
-fn start_playback() -> Result<(Child, ChildStdin), Box<dyn std::error::Error>> {
+fn start_playback(codec: &str) -> Result<(Child, ChildStdin, String), Box<dyn std::error::Error>> {
     let connector = std::env::var("DRM_CONNECTOR_ID").unwrap_or_else(|_| "54".into());
     let plane = std::env::var("DRM_PLANE_ID").unwrap_or_else(|_| "33".into());
+    let (parser, decoder) = if codec == "h264" {
+        ("h264parse", "v4l2slh264dec")
+    } else {
+        ("h265parse", "v4l2slh265dec")
+    };
     let mut child = Command::new("gst-launch-1.0")
         .args([
-            "-q", "fdsrc", "fd=0", "blocksize=262144", "!", "h265parse", "!",
-            "v4l2slh265dec", "!", "kmssink", "driver-name=rockchip",
+            "-q", "fdsrc", "fd=0", "blocksize=262144", "!", parser, "!",
+            decoder, "!", "kmssink", "driver-name=rockchip",
             &format!("connector-id={connector}"), &format!("plane-id={plane}"),
             "force-modesetting=false", "sync=false", "skip-vsync=true", "max-lateness=0",
         ])
         .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn()?;
     let stdin = child.stdin.take().ok_or("could not open GStreamer stdin")?;
-    println!("[PLAYBACK READY] HEVC -> v4l2slh265dec -> HDMI connector {connector}, plane {plane}");
-    Ok((child, stdin))
+    println!("[PLAYBACK READY] {codec} -> {parser} -> {decoder} -> HDMI connector {connector}, plane {plane}");
+    Ok((child, stdin, codec.to_string()))
 }
 
 /// Holds the DRM file and scanout allocation while the receiver is idle. It
@@ -120,25 +125,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dashboard = if std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
         Some(show_idle_dashboard()?)
     } else { None };
-    println!("[READY] waiting for H.265 UDP access units on port 4434");
-    let mut playback: Option<(Child, ChildStdin)> = None;
+    println!("[READY] waiting for video stream access units on UDP/WebTransport");
+    let mut playback: Option<(Child, ChildStdin, String)> = None;
     let mut sent = 0u64;
     while let Some(mut frame) = rx.recv().await {
         while let Ok(newer) = rx.try_recv() { frame = newer; }
-        if frame.codec != "hevc" { continue; }
-        if playback.is_none() {
+        if frame.codec != "hevc" && frame.codec != "h264" { continue; }
+        
+        let need_restart = match &playback {
+            Some((_, _, current_codec)) => current_codec != &frame.codec,
+            None => true,
+        };
+
+        if need_restart {
+            playback = None;
             // Release the dashboard's DRM master immediately before hand-off.
             if let Some(dashboard) = dashboard.take() { dashboard.release(); }
-            playback = Some(start_playback()?);
+            playback = Some(start_playback(&frame.codec)?);
         }
-        let (_, stdin) = playback.as_mut().expect("playback initialized");
+
+        let (_, stdin, _) = playback.as_mut().expect("playback initialized");
         if let Err(error) = stdin.write_all(&frame.access_unit).and_then(|_| stdin.flush()) {
             eprintln!("[PLAYBACK ERROR] seq={} {error}; restarting pipeline", frame.seq);
             playback = None;
             continue;
         }
         sent += 1;
-        if sent == 1 || sent % 60 == 0 { println!("[PLAYBACK] submitted_hevc_access_units={sent}"); }
+        if sent == 1 || sent % 60 == 0 { println!("[PLAYBACK] submitted_{}_access_units={sent}", frame.codec); }
     }
     Ok(())
 }
