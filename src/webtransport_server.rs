@@ -128,21 +128,23 @@ async fn handle_connection(
 
     loop {
         tokio::select! {
-            // Receive unidirectional streams containing frame packets
+            // Receive unidirectional streams for 100% reliable loss-free stream delivery
             uni_res = connection.accept_uni() => {
                 match uni_res {
                     Ok(mut recv_stream) => {
-                        let mut buffer = Vec::new();
-                        let mut temp = [0u8; 65536];
-                        while let Ok(Some(n)) = recv_stream.read(&mut temp).await {
-                            if n == 0 { break; }
-                            buffer.extend_from_slice(&temp[..n]);
-                        }
-                        if !buffer.is_empty() {
-                            if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&buffer) {
-                                let _ = frame_tx.try_send(video_frame);
+                        let frame_tx_clone = frame_tx.clone();
+                        tokio::spawn(async move {
+                            let mut len_buf = [0u8; 4];
+                            while recv_stream.read_exact(&mut len_buf).await.is_ok() {
+                                let len = u32::from_be_bytes(len_buf) as usize;
+                                if len == 0 || len > 16 * 1024 * 1024 { break; }
+                                let mut packet = vec![0u8; len];
+                                if recv_stream.read_exact(&mut packet).await.is_err() { break; }
+                                if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&packet) {
+                                    let _ = frame_tx_clone.try_send(video_frame);
+                                }
                             }
-                        }
+                        });
                     }
                     Err(e) => {
                         println!("[WEBTRANSPORT] Stream accept closed: {}", e);

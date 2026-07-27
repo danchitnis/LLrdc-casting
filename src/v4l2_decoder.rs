@@ -3,7 +3,7 @@
 //! Compressed network data is the only video data kept in normal RAM. Decoded
 //! pixels never enter Rust memory: `mpp_decoder` exports them as DMA-BUFs.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,8 +12,9 @@ const CHUNK_BYTES: usize = 1350;
 const MAX_ACCESS_UNIT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHUNKS: usize = (MAX_ACCESS_UNIT_BYTES + CHUNK_BYTES - 1) / CHUNK_BYTES;
 const MAX_IN_FLIGHT: usize = 32;
-const ASSEMBLY_TTL: Duration = Duration::from_millis(250);
+const ASSEMBLY_TTL: Duration = Duration::from_millis(50);
 
+static LAST_COMPLETED_SEQ: AtomicU32 = AtomicU32::new(0);
 static STATS_CHUNKS: AtomicU64 = AtomicU64::new(0);
 static STATS_COMPLETED: AtomicU64 = AtomicU64::new(0);
 static STATS_DROPPED_TIMEOUT: AtomicU64 = AtomicU64::new(0);
@@ -42,7 +43,9 @@ struct Assembly {
 
 static ASSEMBLIES: LazyLock<Mutex<Vec<Assembly>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
+#[cfg(test)]
 pub fn reset_decoder_pipeline() {
+    LAST_COMPLETED_SEQ.store(0, Ordering::Relaxed);
     ASSEMBLIES.lock().expect("assembly mutex poisoned").clear();
 }
 
@@ -56,6 +59,13 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
         _ => return None,
     };
     let seq = u32::from_be_bytes(packet[4..8].try_into().ok()?);
+
+    // Drop stale chunks from older already-completed frames
+    let last_seq = LAST_COMPLETED_SEQ.load(Ordering::Relaxed);
+    if seq <= last_seq && last_seq > 0 {
+        return None;
+    }
+
     let chunk_index = u16::from_be_bytes(packet[8..10].try_into().ok()?);
     let total_chunks = u16::from_be_bytes(packet[10..12].try_into().ok()?);
     let width = u16::from_be_bytes(packet[12..14].try_into().ok()?);
@@ -71,7 +81,7 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
 
     // Retain non-expired assemblies and count dropped timeouts
     let initial_len = assemblies.len();
-    assemblies.retain(|entry| now.duration_since(entry.first_packet_at) <= ASSEMBLY_TTL);
+    assemblies.retain(|entry| now.duration_since(entry.first_packet_at) <= ASSEMBLY_TTL && entry.seq > last_seq);
     let expired_count = (initial_len - assemblies.len()) as u64;
     if expired_count > 0 {
         STATS_DROPPED_TIMEOUT.fetch_add(expired_count, Ordering::Relaxed);
@@ -97,6 +107,11 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
 
     let completed_index = assemblies.iter().position(|entry| entry.seq == seq && entry.received == entry.total_chunks as usize)?;
     let completed = assemblies.remove(completed_index);
+
+    // Update last completed sequence number and purge all older stale assemblies
+    LAST_COMPLETED_SEQ.store(completed.seq, Ordering::Relaxed);
+    assemblies.retain(|entry| entry.seq > completed.seq);
+
     let actual_len: usize = completed.chunks.iter().map(|chunk| chunk.as_ref().map_or(0, Vec::len)).sum();
     if actual_len == 0 || actual_len > MAX_ACCESS_UNIT_BYTES { return None; }
     let mut access_unit = Vec::with_capacity(actual_len);
@@ -112,7 +127,76 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
         println!("[FRAME INTEGRITY] Completed={completed_count} DroppedTimeout={timeout_cnt} Evicted={evicted_cnt} TotalChunks={chunks_cnt} DeliveryRate={rate:.1}%");
     }
 
-    Some(VideoFrame { seq: completed.seq, width: completed.width as u32, height: completed.height as u32, codec: completed.codec.into(), access_unit, first_packet_at: completed.first_packet_at })
+    let frame = VideoFrame { seq: completed.seq, width: completed.width as u32, height: completed.height as u32, codec: completed.codec.into(), access_unit, first_packet_at: completed.first_packet_at };
+    validate_access_unit_bitstream(&frame);
+    Some(frame)
+}
+
+fn validate_access_unit_bitstream(frame: &VideoFrame) {
+    let buf = &frame.access_unit;
+    if buf.len() < 4 {
+        eprintln!("[BITSTREAM ERROR] seq={} access unit length too short ({} bytes)", frame.seq, buf.len());
+        return;
+    }
+
+    let mut nal_types = Vec::new();
+    let mut i = 0;
+    let mut has_start_code = false;
+
+    while i <= buf.len().saturating_sub(4) {
+        let is_start_4 = buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 0 && buf[i+3] == 1;
+        let is_start_3 = buf[i] == 0 && buf[i+1] == 0 && buf[i+2] == 1;
+
+        if is_start_4 || is_start_3 {
+            has_start_code = true;
+            let header_offset = if is_start_4 { i + 4 } else { i + 3 };
+            if header_offset < buf.len() {
+                let header_byte = buf[header_offset];
+                let nal_type = if frame.codec == "hevc" {
+                    (header_byte >> 1) & 0x3f
+                } else {
+                    header_byte & 0x1f
+                };
+                let name = match (frame.codec.as_str(), nal_type) {
+                    ("hevc", 32) => "VPS",
+                    ("hevc", 33) => "SPS",
+                    ("hevc", 34) => "PPS",
+                    ("hevc", 35) => "AUD",
+                    ("hevc", 19) | ("hevc", 20) => "IDR",
+                    ("hevc", 21) => "CRA",
+                    ("hevc", 0) | ("hevc", 1) => "P-SLICE",
+                    ("h264", 7) => "SPS",
+                    ("h264", 8) => "PPS",
+                    ("h264", 9) => "AUD",
+                    ("h264", 5) => "IDR",
+                    ("h264", 1) => "P-SLICE",
+                    _ => "NAL",
+                };
+                nal_types.push(format!("{}({})", name, nal_type));
+            }
+            i = header_offset;
+        } else {
+            i += 1;
+        }
+    }
+
+    let nal_summary = nal_types.join(", ");
+    let is_key = nal_types.iter().any(|t| t.starts_with("IDR") || t.starts_with("CRA"));
+    let has_vps = nal_types.iter().any(|t| t.starts_with("VPS"));
+
+    if frame.seq == 1 || frame.seq % 60 == 0 || !has_start_code || (is_key && frame.codec == "hevc" && !has_vps) {
+        let latency_us = Instant::now().duration_since(frame.first_packet_at).as_micros();
+        println!(
+            "[BITSTREAM VALIDATOR] seq={} ({}, {}x{}, {}B, reassembly={}us) | NALs: [{}] | ValidStartCode: {}",
+            frame.seq,
+            if is_key { "KEYFRAME" } else { "DELTA" },
+            frame.width, frame.height,
+            buf.len(),
+            latency_us,
+            nal_summary,
+            if has_start_code { "YES" } else { "NO" }
+        );
+    }
 }
 
 #[cfg(test)]

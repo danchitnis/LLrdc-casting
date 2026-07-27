@@ -8,10 +8,35 @@ mod text;
 mod v4l2_decoder;
 mod webtransport_server;
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use tokio::sync::mpsc;
+fn spawn_dmesg_kernel_monitor() {
+    std::thread::spawn(|| {
+        if let Ok(mut child) = Command::new("dmesg").args(["-w"]).stdout(Stdio::piped()).spawn() {
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().flatten() {
+                    let lower = line.to_lowercase();
+                    if lower.contains("rkvdec") || lower.contains("v4l2") || lower.contains("rockchip-drm") {
+                        if lower.contains("error") || lower.contains("fault") || lower.contains("failed") || lower.contains("corrupt") || lower.contains("warn") {
+                            println!("[LAYER 1 ALERT] Kernel Driver Event: {}", line);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn stop_playback(playback: &mut Option<(Child, ChildStdin, String)>) {
+    if let Some((mut child, _, codec)) = playback.take() {
+        println!("[PLAYBACK STOPPING] Terminating previous {codec} GStreamer child process...");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
 
 fn start_playback(codec: &str) -> Result<(Child, ChildStdin, String), Box<dyn std::error::Error>> {
     let connector = std::env::var("DRM_CONNECTOR_ID").unwrap_or_else(|_| "54".into());
@@ -22,14 +47,34 @@ fn start_playback(codec: &str) -> Result<(Child, ChildStdin, String), Box<dyn st
         ("h265parse", "v4l2slh265dec")
     };
     let mut child = Command::new("gst-launch-1.0")
+        .env("GST_DEBUG", "v4l2slh265dec:4,h265parse:4,v4l2slh264dec:4,h264parse:4,kmssink:4")
         .args([
-            "-q", "fdsrc", "fd=0", "blocksize=262144", "!", parser, "!",
-            decoder, "!", "kmssink", "driver-name=rockchip",
+            "-q", "fdsrc", "fd=0", "blocksize=262144", "!",
+            parser, "!", decoder, "!",
+            "kmssink", "driver-name=rockchip",
             &format!("connector-id={connector}"), &format!("plane-id={plane}"),
             "force-modesetting=false", "sync=false", "skip-vsync=true", "max-lateness=0",
         ])
-        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn()?;
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
     let stdin = child.stdin.take().ok_or("could not open GStreamer stdin")?;
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                let lower = line.to_lowercase();
+                if lower.contains("error") || lower.contains("warn") || lower.contains("corrupt") || lower.contains("missing") || lower.contains("drop") {
+                    println!("[LAYER 2 ALERT] GStreamer Decoder Event: {}", line);
+                } else if lower.contains("resolution changed") || lower.contains("colorimetry") {
+                    println!("[DECODER CAPS CHANGE] GStreamer: {}", line);
+                }
+            }
+        });
+    }
+
     println!("[PLAYBACK READY] {codec} -> {parser} -> {decoder} -> HDMI connector {connector}, plane {plane}");
     Ok((child, stdin, codec.to_string()))
 }
@@ -120,6 +165,8 @@ fn show_idle_dashboard() -> Result<IdleDashboard, Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    spawn_dmesg_kernel_monitor();
+    let _ = drm_kms::inspect_live_scanout_status();
     let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(2);
     tokio::spawn(async move { if let Err(error) = webtransport_server::run_server(tx).await { eprintln!("[SERVER ERROR] {error}"); } });
     let mut dashboard = if std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
@@ -138,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         if need_restart {
-            playback = None;
+            stop_playback(&mut playback);
             // Release the dashboard's DRM master immediately before hand-off.
             if let Some(dashboard) = dashboard.take() { dashboard.release(); }
             playback = Some(start_playback(&frame.codec)?);
@@ -147,7 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (_, stdin, _) = playback.as_mut().expect("playback initialized");
         if let Err(error) = stdin.write_all(&frame.access_unit).and_then(|_| stdin.flush()) {
             eprintln!("[PLAYBACK ERROR] seq={} {error}; restarting pipeline", frame.seq);
-            playback = None;
+            stop_playback(&mut playback);
             continue;
         }
         sent += 1;

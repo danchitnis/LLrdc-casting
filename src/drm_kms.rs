@@ -15,7 +15,6 @@ use drm::Device as DrmDevice;
 use libc::{c_int, O_CLOEXEC, O_RDWR, MAP_SHARED, PROT_READ, PROT_WRITE, MAP_FAILED};
 
 pub const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
-pub const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
 pub const DRM_FORMAT_NV12: u32 = u32::from_le_bytes(*b"NV12");
 
 const DRM_IOCTL_MODE_CREATE_DUMB: u64 = 0xc02064b2;
@@ -195,35 +194,6 @@ pub fn import_dmabuf_and_add_fb(
     Ok(fb_handle)
 }
 
-/// Import a decoder-owned, linear NV12 DMA-BUF. No mapping or pixel copy occurs.
-/// `v_stride` is used for the UV plane offset because RKMPP buffers are padded.
-pub fn import_mpp_nv12_dmabuf(
-    drm_raw_fd: RawFd,
-    dmabuf_fd: RawFd,
-    width: u32,
-    height: u32,
-    h_stride: u32,
-    v_stride: u32,
-) -> Result<framebuffer::Handle, Box<dyn std::error::Error>> {
-    if dmabuf_fd < 0 || width == 0 || height == 0 || h_stride < width || v_stride < height {
-        return Err("invalid RKMPP NV12 DMA-BUF layout".into());
-    }
-    let mut gem_handle = 0u32;
-    let mut fb_id = 0u32;
-    unsafe {
-        if drmPrimeFDToHandle(drm_raw_fd, dmabuf_fd as u32, &mut gem_handle) < 0 {
-            return Err("DRM could not import RKMPP DMA-BUF".into());
-        }
-        let handles = [gem_handle, gem_handle, 0, 0];
-        let pitches = [h_stride, h_stride, 0, 0];
-        let offsets = [0, h_stride.checked_mul(v_stride).ok_or("NV12 plane offset overflow")?, 0, 0];
-        if drmModeAddFB2(drm_raw_fd, width, height, DRM_FORMAT_NV12, handles.as_ptr(), pitches.as_ptr(), offsets.as_ptr(), &mut fb_id, 0) < 0 {
-            return Err("DRM plane rejected RKMPP NV12 DMA-BUF".into());
-        }
-    }
-    Ok(framebuffer::Handle::from(NonZeroU32::new(fb_id).ok_or("invalid RKMPP framebuffer ID")?))
-}
-
 /// Set CRTC mode and display the framebuffer directly on the HDMI screen
 pub fn set_display_mode(
     card: &Card,
@@ -295,4 +265,23 @@ pub fn allocate_prime_dmabuf(
 
         Ok((prime.fd, create_dumb.pitch, create_dumb.size as usize, ptr))
     }
+}
+
+/// Inspect active DRM CRTC and HDMI scanout state (Layer 3 Inspector)
+pub fn inspect_live_scanout_status() -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(card) = open_display_card() {
+        let resources = card.resource_handles()?;
+        for &crtc in resources.crtcs() {
+            if let Ok(info) = card.get_crtc(crtc) {
+                if let Some(mode) = info.mode() {
+                    let fb = info.framebuffer();
+                    println!(
+                        "[LAYER 3 INSPECTOR] Active DRM CRTC {:?} | Resolution: {}x{} @ {}Hz | FB Handle: {:?}",
+                        crtc, mode.size().0, mode.size().1, mode.vrefresh(), fb
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
