@@ -8,9 +8,12 @@ drm = "0.14"
 nix = { version = "0.29", features = ["mman", "fs", "ioctl", "net"] }
 libc = "0.2"
 tokio = { version = "1.38", features = ["full"] }
+tokio-rustls = "0.24"
+rustls-pemfile = "1.0"
 wtransport = "0.1.12"
 rcgen = "0.13"
 time = "0.3"
+x509-parser = "0.16"
 
 [profile.release]
 opt-level = 2

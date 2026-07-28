@@ -1,8 +1,10 @@
 //! Verified RK3399 fallback: UDP HEVC -> V4L2 stateless decoder -> KMS.
 //! The atomic two-plane presenter is developed separately; this keeps HDMI
 //! playback on the proven pipeline while it is completed.
+mod cert;
 mod drm_kms;
 mod gfx;
+mod http_server;
 mod net;
 mod text;
 mod v4l2_decoder;
@@ -183,7 +185,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_dmesg_kernel_monitor();
     let _ = drm_kms::inspect_live_scanout_status();
     let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(64);
-    tokio::spawn(async move { if let Err(error) = webtransport_server::run_server(tx).await { eprintln!("[SERVER ERROR] {error}"); } });
+
+    let identity = webtransport_server::get_or_create_identity().await.map_err(|e| e as Box<dyn std::error::Error>)?;
+    let cert_hash_hex = webtransport_server::extract_cert_hash_hex(&identity);
+
+    let http_cert_hash = cert_hash_hex.clone();
+    tokio::spawn(async move {
+        if let Err(error) = http_server::run_server(http_cert_hash).await {
+            eprintln!("[HTTP SERVER ERROR] {error}");
+        }
+    });
+
+    tokio::spawn(async move {
+        if let Err(error) = webtransport_server::run_server_with_identity(identity, tx).await {
+            eprintln!("[SERVER ERROR] {error}");
+        }
+    });
     let mut dashboard = if std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
         Some(show_idle_dashboard()?)
     } else { None };

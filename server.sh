@@ -27,7 +27,7 @@ case "$action" in
 
     docker buildx build --platform linux/arm64 -t "$IMAGE" --load .
     docker save "$IMAGE" | gzip -1 | ssh -o BatchMode=yes "$BOARD_IP" 'gunzip | docker load'
-    ssh -o BatchMode=yes "$BOARD_IP" "docker stop -t 2 '$IMAGE' 2>/dev/null || true; docker rm -f '$IMAGE' 2>/dev/null || true; sleep 1; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='$CONNECTOR_ID' -e IDLE_DASHBOARD='$idle_dashboard' -v /dev:/dev '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
+    ssh -o BatchMode=yes "$BOARD_IP" "docker stop -t 2 '$IMAGE' 2>/dev/null || true; docker rm -f '$IMAGE' 2>/dev/null || true; sleep 1; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='$CONNECTOR_ID' -e IDLE_DASHBOARD='$idle_dashboard' -v /dev:/dev -v /var/lib/rock5c-certs:/certs '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
     ;;
   --stop)
     (($# == 0)) || { usage; exit 2; }
