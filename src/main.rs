@@ -2,6 +2,7 @@
 //! The atomic two-plane presenter is developed separately; this keeps HDMI
 //! playback on the proven pipeline while it is completed.
 mod cert;
+mod control;
 mod drm_kms;
 mod gfx;
 mod http_server;
@@ -185,13 +186,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_dmesg_kernel_monitor();
     let _ = drm_kms::inspect_live_scanout_status();
     let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(64);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<control::ControlCommand>(32);
+    let control_channel = control::ControlChannel::new(cmd_tx);
 
     let identity = webtransport_server::get_or_create_identity().await.map_err(|e| e as Box<dyn std::error::Error>)?;
     let cert_hash_hex = webtransport_server::extract_cert_hash_hex(&identity);
 
     let http_cert_hash = cert_hash_hex.clone();
+    let http_control_channel = control_channel.clone();
     tokio::spawn(async move {
-        if let Err(error) = http_server::run_server(http_cert_hash).await {
+        if let Err(error) = http_server::run_server(http_cert_hash, http_control_channel).await {
             eprintln!("[HTTP SERVER ERROR] {error}");
         }
     });
@@ -207,29 +211,110 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[READY] waiting for video stream access units on UDP/WebTransport");
     let mut playback: Option<(Child, ChildStdin, String)> = None;
     let mut sent = 0u64;
-    while let Some(frame) = rx.recv().await {
-        if frame.codec != "hevc" && frame.codec != "h264" { continue; }
-        
-        let need_restart = match &playback {
-            Some((_, _, current_codec)) => current_codec != &frame.codec,
-            None => true,
-        };
+    let idle_timeout = std::time::Duration::from_millis(1500);
 
-        if need_restart {
-            stop_playback(&mut playback);
-            // Release the dashboard's DRM master immediately before hand-off.
-            if let Some(dashboard) = dashboard.take() { dashboard.release(); }
-            playback = Some(start_playback(&frame.codec)?);
-        }
+    loop {
+        tokio::select! {
+            // High priority: Control socket JSON commands
+            Some(cmd) = cmd_rx.recv() => {
+                match cmd {
+                    control::ControlCommand::Stop => {
+                        println!("[CONTROL WS] Received STOP command from independent control socket!");
+                        stop_playback(&mut playback);
+                        if dashboard.is_none() && std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
+                            if let Ok(d) = show_idle_dashboard() {
+                                dashboard = Some(d);
+                            }
+                        }
+                        control_channel.send_telemetry(control::TelemetryMessage::Status {
+                            state: "IDLE".to_string(),
+                            resolution: "0x0".to_string(),
+                            fps: 0,
+                            delivery_rate: 100.0,
+                            frames_submitted: sent,
+                        });
+                    }
+                    control::ControlCommand::Start { codec, resolution } => {
+                        println!("[CONTROL WS] Received START command: codec={:?}, res={:?}", codec, resolution);
+                    }
+                    control::ControlCommand::Ping => {
+                        control_channel.send_telemetry(control::TelemetryMessage::Pong);
+                    }
+                    control::ControlCommand::GetStatus => {
+                        let state = if playback.is_some() { "STREAMING" } else { "IDLE" };
+                        control_channel.send_telemetry(control::TelemetryMessage::Status {
+                            state: state.to_string(),
+                            resolution: "1920x1080".to_string(),
+                            fps: 60,
+                            delivery_rate: 100.0,
+                            frames_submitted: sent,
+                        });
+                    }
+                }
+            }
 
-        let (_, stdin, _) = playback.as_mut().expect("playback initialized");
-        if let Err(error) = stdin.write_all(&frame.access_unit).and_then(|_| stdin.flush()) {
-            eprintln!("[PLAYBACK ERROR] seq={} {error}; restarting pipeline", frame.seq);
-            stop_playback(&mut playback);
-            continue;
+            // High throughput video frame processing
+            recv_res = tokio::time::timeout(idle_timeout, rx.recv()) => {
+                match recv_res {
+                    Ok(Some(frame)) => {
+                        if frame.codec == "stop" {
+                            println!("[PLAYBACK] Received stop signal; restoring HDMI IP dashboard...");
+                            stop_playback(&mut playback);
+                            if dashboard.is_none() && std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
+                                if let Ok(d) = show_idle_dashboard() {
+                                    dashboard = Some(d);
+                                }
+                            }
+                            continue;
+                        }
+                        if frame.codec != "hevc" && frame.codec != "h264" { continue; }
+
+                        let need_restart = match &playback {
+                            Some((_, _, current_codec)) => current_codec != &frame.codec,
+                            None => true,
+                        };
+
+                        if need_restart {
+                            stop_playback(&mut playback);
+                            // Release the dashboard's DRM master immediately before hand-off.
+                            if let Some(dashboard) = dashboard.take() { dashboard.release(); }
+                            playback = Some(start_playback(&frame.codec)?);
+                        }
+
+                        let (_, stdin, _) = playback.as_mut().expect("playback initialized");
+                        if let Err(error) = stdin.write_all(&frame.access_unit).and_then(|_| stdin.flush()) {
+                            eprintln!("[PLAYBACK ERROR] seq={} {error}; restarting pipeline", frame.seq);
+                            stop_playback(&mut playback);
+                            continue;
+                        }
+                        sent += 1;
+                        if sent == 1 || sent % 60 == 0 {
+                            println!("[PLAYBACK] submitted_{}_access_units={sent}", frame.codec);
+                            control_channel.send_telemetry(control::TelemetryMessage::Status {
+                                state: "STREAMING".to_string(),
+                                resolution: format!("{}x{}", frame.width, frame.height),
+                                fps: 60,
+                                delivery_rate: 100.0,
+                                frames_submitted: sent,
+                            });
+                        }
+                    }
+                    Ok(None) => break, // Channel closed
+                    Err(_) => {
+                        // Timeout waiting for frames (1.5s idle)
+                        if playback.is_some() {
+                            println!("[PLAYBACK] Stream idle timeout; restoring HDMI IP dashboard...");
+                            stop_playback(&mut playback);
+                            if dashboard.is_none() && std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
+                                if let Ok(d) = show_idle_dashboard() {
+                                    dashboard = Some(d);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        sent += 1;
-        if sent == 1 || sent % 60 == 0 { println!("[PLAYBACK] submitted_{}_access_units={sent}", frame.codec); }
     }
     Ok(())
 }

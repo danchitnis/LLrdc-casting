@@ -50,6 +50,16 @@ pub fn reset_decoder_pipeline() {
 }
 
 pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
+    if packet.len() >= 4 && &packet[..4] == b"STOP" {
+        return Some(VideoFrame {
+            seq: 0,
+            width: 0,
+            height: 0,
+            codec: "stop".to_string(),
+            access_unit: Vec::new(),
+            first_packet_at: Instant::now(),
+        });
+    }
     if packet.len() <= HEADER_LEN { return None; }
     STATS_CHUNKS.fetch_add(1, Ordering::Relaxed);
 

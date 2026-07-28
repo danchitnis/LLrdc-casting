@@ -148,5 +148,15 @@ async fn handle_connection(
         }
     }
 
+    let stop_frame = VideoFrame {
+        seq: 0,
+        width: 0,
+        height: 0,
+        codec: "stop".to_string(),
+        access_unit: Vec::new(),
+        first_packet_at: std::time::Instant::now(),
+    };
+    let _ = frame_tx.send(stop_frame).await;
+
     Ok(())
 }

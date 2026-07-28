@@ -1,7 +1,7 @@
 /*
- * Lightweight HTTPS & HTTP Server Module
+ * Lightweight HTTPS & HTTP Server Module with Integrated Independent WebSocket Control Socket
  * Serves the embedded screen sharing web client (client/index.html)
- * and TLS certificate fingerprint endpoint on port 8080.
+ * and independent control/telemetry WebSocket endpoint at /ws.
  */
 
 use std::error::Error;
@@ -9,10 +9,12 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
+use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
 use tokio_rustls::TlsAcceptor;
+use crate::control::{ControlChannel, ControlCommand};
 
 static INDEX_HTML: &str = include_str!("../client/index.html");
 
@@ -42,30 +44,113 @@ fn load_key(path: &Path) -> Result<PrivateKey, Box<dyn Error + Send + Sync>> {
     Err("No private key found in key.pem".into())
 }
 
+struct PrefixStream<S> {
+    prefix: Option<Vec<u8>>,
+    inner: S,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixStream<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(prefix) = self.prefix.as_mut() {
+            if prefix.is_empty() {
+                self.prefix = None;
+            } else if prefix.len() <= buf.remaining() {
+                buf.put_slice(prefix);
+                self.prefix = None;
+                return std::task::Poll::Ready(Ok(()));
+            } else {
+                let rest = prefix.split_off(buf.remaining());
+                buf.put_slice(prefix);
+                self.prefix = Some(rest);
+                return std::task::Poll::Ready(Ok(()));
+            }
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixStream<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+async fn handle_websocket_connection<S>(stream: S, control_channel: ControlChannel)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let ws_stream = match tokio_tungstenite::accept_async(stream).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[WS CONTROL ERROR] Handshake failed: {e}");
+            return;
+        }
+    };
+
+    println!("[WS CONTROL] Client connected to independent control socket!");
+    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+    let mut telemetry_rx = control_channel.telemetry_tx.subscribe();
+    let cmd_tx = control_channel.cmd_tx.clone();
+
+    // Broadcast telemetry to connected client
+    tokio::spawn(async move {
+        while let Ok(msg) = telemetry_rx.recv().await {
+            if let Ok(json) = serde_json::to_string(&msg) {
+                if ws_tx.send(tokio_tungstenite::tungstenite::Message::Text(json)).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Handle incoming JSON control commands from browser
+    while let Some(msg_res) = ws_rx.next().await {
+        match msg_res {
+            Ok(tokio_tungstenite::tungstenite::Message::Text(txt)) => {
+                if let Ok(cmd) = serde_json::from_str::<ControlCommand>(&txt) {
+                    println!("[WS CONTROL] Received command: {:?}", cmd);
+                    let _ = cmd_tx.send(cmd).await;
+                }
+            }
+            Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    println!("[WS CONTROL] Client disconnected from control socket.");
+}
+
 async fn serve_http_request<S>(
     stream: &mut S,
     cert_hash: &str,
-    initial_buf: Option<&[u8]>,
+    initial_buf: &[u8],
 ) -> Result<(), Box<dyn Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut buf = [0u8; 2048];
-    let mut read_bytes = 0;
-
-    if let Some(init) = initial_buf {
-        let copy_len = init.len().min(buf.len());
-        buf[..copy_len].copy_from_slice(&init[..copy_len]);
-        read_bytes = copy_len;
-    }
-
-    if read_bytes == 0 {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 { return Ok(()); }
-        read_bytes = n;
-    }
-
-    let req_str = String::from_utf8_lossy(&buf[..read_bytes]);
+    let req_str = String::from_utf8_lossy(initial_buf);
     let first_line = req_str.lines().next().unwrap_or("");
     let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or("");
@@ -104,8 +189,38 @@ where
     Ok(())
 }
 
+async fn handle_connection<S>(
+    mut stream: S,
+    cert_hash: &str,
+    control_channel: ControlChannel,
+) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 { return Ok(()); }
+
+    let req_str = String::from_utf8_lossy(&buf[..n]);
+    let req_lower = req_str.to_lowercase();
+
+    let prefix_stream = PrefixStream {
+        prefix: Some(buf[..n].to_vec()),
+        inner: stream,
+    };
+
+    if req_lower.contains("upgrade: websocket") || req_str.contains("/ws") || req_str.contains("/control") {
+        handle_websocket_connection(prefix_stream, control_channel).await;
+    } else {
+        let mut prefix_stream = prefix_stream;
+        let _ = serve_http_request(&mut prefix_stream, cert_hash, &buf[..n]).await;
+    }
+    Ok(())
+}
+
 pub async fn run_server(
     cert_hash_hex: String,
+    control_channel: ControlChannel,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let port: u16 = std::env::var("HTTP_PORT")
         .ok()
@@ -141,12 +256,12 @@ pub async fn run_server(
 
     println!("\n=====================================================");
     println!(" [HTTP/HTTPS SERVER] Listening on port {port}");
-    println!(" HTTPS: https://<BOARD_IP>:{port}/");
-    println!(" HTTP : http://<BOARD_IP>:{port}/");
+    println!(" Control Socket : wss://<BOARD_IP>:{port}/ws");
+    println!(" Web Share UI   : https://<BOARD_IP>:{port}/");
     println!("=====================================================\n");
 
     loop {
-        let (mut socket, _peer_addr) = match listener.accept().await {
+        let (socket, _peer_addr) = match listener.accept().await {
             Ok(val) => val,
             Err(e) => {
                 eprintln!("[HTTP SERVER] Accept error: {e}");
@@ -156,9 +271,9 @@ pub async fn run_server(
 
         let cert_hash = Arc::clone(&shared_cert_hash);
         let acceptor = tls_acceptor.clone();
+        let channel = control_channel.clone();
 
         tokio::spawn(async move {
-            // Peek at first byte to distinguish TLS ClientHello (0x16) vs Plain HTTP ('G', 'P', etc.)
             let mut first_byte = [0u8; 1];
             let n = match socket.peek(&mut first_byte).await {
                 Ok(n) => n,
@@ -166,15 +281,13 @@ pub async fn run_server(
             };
 
             if n > 0 && first_byte[0] == 0x16 {
-                // TLS Handshake
                 if let Some(acceptor) = acceptor {
-                    if let Ok(mut tls_stream) = acceptor.accept(socket).await {
-                        let _ = serve_http_request(&mut tls_stream, &cert_hash, None).await;
+                    if let Ok(tls_stream) = acceptor.accept(socket).await {
+                        let _ = handle_connection(tls_stream, &cert_hash, channel).await;
                     }
                 }
             } else {
-                // Plain HTTP
-                let _ = serve_http_request(&mut socket, &cert_hash, None).await;
+                let _ = handle_connection(socket, &cert_hash, channel).await;
             }
         });
     }
