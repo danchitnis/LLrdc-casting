@@ -17,13 +17,6 @@ pub fn extract_cert_hash_hex(identity: &Identity) -> String {
     crate::cert::extract_cert_hash_hex(identity)
 }
 
-pub async fn run_server(
-    frame_tx: mpsc::Sender<VideoFrame>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let identity = get_or_create_identity().await?;
-    run_server_with_identity(identity, frame_tx).await
-}
-
 /// Start WebTransport QUIC UDP server on 0.0.0.0:4433 using existing identity
 pub async fn run_server_with_identity(
     identity: Identity,

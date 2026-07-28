@@ -66,12 +66,12 @@ fn start_playback(codec: &str) -> Result<(Child, ChildStdin, String), Box<dyn st
     let mut child = Command::new("gst-launch-1.0")
         .env("GST_DEBUG", "v4l2slh265dec:4,h265parse:4,v4l2slh264dec:4,h264parse:4,kmssink:4")
         .args([
-            "-q", "fdsrc", "fd=0", "blocksize=4096", "do-timestamp=true", "!",
+            "-q", "fdsrc", "fd=0", "blocksize=1048576", "do-timestamp=false", "!",
             parser, "config-interval=-1", "!",
             decoder, "!",
             "kmssink", "driver-name=rockchip",
             &format!("connector-id={connector}"), &format!("plane-id={plane}"),
-            "force-modesetting=false", "sync=false", "skip-vsync=true", "max-lateness=0",
+            "force-modesetting=false", "can-scale=true", "sync=false", "skip-vsync=true", "max-lateness=0",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -211,7 +211,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[READY] waiting for video stream access units on UDP/WebTransport");
     let mut playback: Option<(Child, ChildStdin, String)> = None;
     let mut sent = 0u64;
-    let idle_timeout = std::time::Duration::from_millis(1500);
+    let mut streaming_enabled = false;
+    let idle_timeout = std::time::Duration::from_millis(5000);
 
     loop {
         tokio::select! {
@@ -220,7 +221,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match cmd {
                     control::ControlCommand::Stop => {
                         println!("[CONTROL WS] Received STOP command from independent control socket!");
+                        streaming_enabled = false;
                         stop_playback(&mut playback);
+                        while rx.try_recv().is_ok() {}
                         if dashboard.is_none() && std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
                             if let Ok(d) = show_idle_dashboard() {
                                 dashboard = Some(d);
@@ -236,6 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     control::ControlCommand::Start { codec, resolution } => {
                         println!("[CONTROL WS] Received START command: codec={:?}, res={:?}", codec, resolution);
+                        streaming_enabled = true;
                     }
                     control::ControlCommand::Ping => {
                         control_channel.send_telemetry(control::TelemetryMessage::Pong);
@@ -259,7 +263,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(Some(frame)) => {
                         if frame.codec == "stop" {
                             println!("[PLAYBACK] Received stop signal; restoring HDMI IP dashboard...");
+                            streaming_enabled = false;
                             stop_playback(&mut playback);
+                            while rx.try_recv().is_ok() {}
                             if dashboard.is_none() && std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
                                 if let Ok(d) = show_idle_dashboard() {
                                     dashboard = Some(d);
@@ -268,6 +274,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
                         if frame.codec != "hevc" && frame.codec != "h264" { continue; }
+
+                        // Allow auto-start if a new sequence frame (seq <= 1) arrives
+                        if frame.seq <= 1 {
+                            streaming_enabled = true;
+                        }
+
+                        // If streaming was explicitly stopped, discard trailing/out-of-order frames
+                        if !streaming_enabled {
+                            continue;
+                        }
 
                         let need_restart = match &playback {
                             Some((_, _, current_codec)) => current_codec != &frame.codec,
@@ -304,7 +320,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Timeout waiting for frames (1.5s idle)
                         if playback.is_some() {
                             println!("[PLAYBACK] Stream idle timeout; restoring HDMI IP dashboard...");
+                            streaming_enabled = false;
                             stop_playback(&mut playback);
+                            while rx.try_recv().is_ok() {}
                             if dashboard.is_none() && std::env::var("IDLE_DASHBOARD").map_or(true, |v| v != "0") {
                                 if let Ok(d) = show_idle_dashboard() {
                                     dashboard = Some(d);
