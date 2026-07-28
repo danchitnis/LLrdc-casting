@@ -16,6 +16,7 @@ usage() {
 Usage: ./test.sh [options]
   -r, --res WIDTHxHEIGHT  Resolution (default: 3840x2160)
       --4k|--2160p        3840x2160 preset
+      --2k|--1440p        2560x1440 preset
       --1080p             1920x1080 preset
       --720p              1280x720 preset
   -f, --fps FPS           Frame rate (default: 60)
@@ -36,6 +37,7 @@ while (($#)); do
     -r|--res|--resolution) RESOLUTION="$2"; shift 2 ;;
     --res=*|--resolution=*) RESOLUTION="${1#*=}"; shift ;;
     --4k|--2160p) RESOLUTION="3840x2160"; shift ;;
+    --2k|--1440p) RESOLUTION="2560x1440"; shift ;;
     --1080p|--1080) RESOLUTION="1920x1080"; shift ;;
     --720p|--720) RESOLUTION="1280x720"; shift ;;
     -f|--fps) FPS="$2"; shift 2 ;;

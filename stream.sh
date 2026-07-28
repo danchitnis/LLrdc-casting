@@ -31,7 +31,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Options:"
       echo "  --h265, --hevc         Stream using H.265 / HEVC video codec"
-      echo "  --1080p, --720p, --4k  Set resolution preset"
+      echo "  --1080p, --720p, --2k, --4k  Set resolution preset"
       echo "  -r, --res, --resolution Set resolution (e.g. 1920x1080, 1080p, 1280x720)"
       echo "  -f, --fps              Set frame rate (default: 60)"
       echo "  -d, --duration SEC     Stream duration (default: 20)"
@@ -56,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --720p|--720)
       RAW_RES="1280x720"
+      shift
+      ;;
+    --2k|--1440p|--1440)
+      RAW_RES="2560x1440"
       shift
       ;;
     --480p|--480)
@@ -168,6 +172,9 @@ case "$RAW_RES" in
     ;;
   720p|720|1280x720)
     RES="1280x720"
+    ;;
+  2k|1440p|1440|2560x1440)
+    RES="2560x1440"
     ;;
   480p|480|854x480)
     RES="854x480"
