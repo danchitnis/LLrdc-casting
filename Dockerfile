@@ -5,6 +5,7 @@ WORKDIR /app
 COPY Cargo.toml ./
 COPY client ./client
 COPY src ./src
+ARG BUILD_DATE=unknown
 RUN cargo build --release
 
 # GStreamer 1.26 contains v4l2slh265dec, the userspace implementation of the

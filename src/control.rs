@@ -26,6 +26,8 @@ pub enum TelemetryMessage {
         fps: u32,
         delivery_rate: f32,
         frames_submitted: u64,
+        #[serde(default)]
+        latency_ms: f32,
     },
     Event {
         level: String,

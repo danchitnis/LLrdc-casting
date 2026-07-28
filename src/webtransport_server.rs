@@ -30,6 +30,7 @@ pub async fn run_server_with_identity(
     let config = ServerConfig::builder()
         .with_bind_default(4433)
         .with_identity(&identity)
+        .max_idle_timeout(Some(std::time::Duration::from_secs(30)))?
         .build();
 
     let server = Endpoint::server(config)?;
@@ -116,8 +117,8 @@ async fn handle_connection(
                         });
                     }
                     Err(e) => {
-                        println!("[WEBTRANSPORT] Stream accept closed: {}", e);
-                        break;
+                        println!("[WEBTRANSPORT] Stream accept channel inactive ({})", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                     }
                 }
             }
@@ -133,8 +134,9 @@ async fn handle_connection(
                         }
                     }
                     Err(e) => {
-                        println!("[WEBTRANSPORT] Datagram receive closed: {}", e);
-                        break;
+                        // Do not break loop on datagram channel closure; keep unidirectional stream active
+                        println!("[WEBTRANSPORT] Datagram channel inactive ({})", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                     }
                 }
             }

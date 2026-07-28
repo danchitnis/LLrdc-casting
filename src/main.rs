@@ -13,7 +13,7 @@ mod webtransport_server;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use tokio::sync::mpsc;
 fn elevate_process_priority() {
     unsafe {
@@ -47,18 +47,25 @@ fn spawn_dmesg_kernel_monitor() {
     });
 }
 
-fn stop_playback(playback: &mut Option<(Child, ChildStdin, String)>) {
-    if let Some((mut child, _, codec)) = playback.take() {
-        println!("[PLAYBACK STOPPING] Terminating previous {codec} GStreamer child process...");
-        let _ = child.kill();
-        let _ = child.wait();
+struct PlaybackEngine {
+    child: Child,
+    writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    codec: String,
+}
+
+fn stop_playback(playback: &mut Option<PlaybackEngine>) {
+    if let Some(mut engine) = playback.take() {
+        println!("[PLAYBACK STOPPING] Terminating previous {} GStreamer child process...", engine.codec);
+        let _ = engine.child.kill();
+        let _ = engine.child.wait();
     }
 }
 
-fn start_playback(codec: &str) -> Result<(Child, ChildStdin, String), Box<dyn std::error::Error>> {
+fn start_playback(codec: &str) -> Result<PlaybackEngine, Box<dyn std::error::Error>> {
     let connector = std::env::var("DRM_CONNECTOR_ID").unwrap_or_else(|_| "54".into());
     let plane = std::env::var("DRM_PLANE_ID").unwrap_or_else(|_| "33".into());
-    let (parser, decoder) = if codec == "h264" {
+    let codec_lower = codec.to_lowercase();
+    let (parser, decoder) = if codec_lower == "h264" {
         ("h264parse", "v4l2slh264dec")
     } else {
         ("h265parse", "v4l2slh265dec")
@@ -66,7 +73,7 @@ fn start_playback(codec: &str) -> Result<(Child, ChildStdin, String), Box<dyn st
     let mut child = Command::new("gst-launch-1.0")
         .env("GST_DEBUG", "v4l2slh265dec:4,h265parse:4,v4l2slh264dec:4,h264parse:4,kmssink:4")
         .args([
-            "-q", "fdsrc", "fd=0", "blocksize=1048576", "do-timestamp=false", "!",
+            "-q", "fdsrc", "fd=0", "do-timestamp=true", "!",
             parser, "config-interval=-1", "!",
             decoder, "!",
             "kmssink", "driver-name=rockchip",
@@ -78,7 +85,7 @@ fn start_playback(codec: &str) -> Result<(Child, ChildStdin, String), Box<dyn st
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let stdin = child.stdin.take().ok_or("could not open GStreamer stdin")?;
+    let mut stdin = child.stdin.take().ok_or("could not open GStreamer stdin")?;
     if let Some(stderr) = child.stderr.take() {
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
@@ -93,8 +100,21 @@ fn start_playback(codec: &str) -> Result<(Child, ChildStdin, String), Box<dyn st
         });
     }
 
+    let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+    std::thread::spawn(move || {
+        while let Ok(access_unit) = writer_rx.recv() {
+            if stdin.write_all(&access_unit).and_then(|_| stdin.flush()).is_err() {
+                break;
+            }
+        }
+    });
+
     println!("[PLAYBACK READY] {codec} -> {parser} -> {decoder} -> HDMI connector {connector}, plane {plane}");
-    Ok((child, stdin, codec.to_string()))
+    Ok(PlaybackEngine {
+        child,
+        writer_tx,
+        codec: codec_lower,
+    })
 }
 
 /// Holds the DRM file and scanout allocation while the receiver is idle. It
@@ -209,10 +229,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(show_idle_dashboard()?)
     } else { None };
     println!("[READY] waiting for video stream access units on UDP/WebTransport");
-    let mut playback: Option<(Child, ChildStdin, String)> = None;
+    let mut playback: Option<PlaybackEngine> = None;
     let mut sent = 0u64;
     let mut streaming_enabled = false;
-    let idle_timeout = std::time::Duration::from_millis(5000);
+    let idle_timeout = std::time::Duration::from_millis(30000);
 
     loop {
         tokio::select! {
@@ -235,6 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             fps: 0,
                             delivery_rate: 100.0,
                             frames_submitted: sent,
+                            latency_ms: 0.0,
                         });
                     }
                     control::ControlCommand::Start { codec, resolution } => {
@@ -252,6 +273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             fps: 60,
                             delivery_rate: 100.0,
                             frames_submitted: sent,
+                            latency_ms: 0.0,
                         });
                     }
                 }
@@ -286,7 +308,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         let need_restart = match &playback {
-                            Some((_, _, current_codec)) => current_codec != &frame.codec,
+                            Some(engine) => engine.codec != frame.codec.to_lowercase(),
                             None => true,
                         };
 
@@ -297,21 +319,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             playback = Some(start_playback(&frame.codec)?);
                         }
 
-                        let (_, stdin, _) = playback.as_mut().expect("playback initialized");
-                        if let Err(error) = stdin.write_all(&frame.access_unit).and_then(|_| stdin.flush()) {
-                            eprintln!("[PLAYBACK ERROR] seq={} {error}; restarting pipeline", frame.seq);
-                            stop_playback(&mut playback);
-                            continue;
+                        if let Some(engine) = playback.as_ref() {
+                            if engine.writer_tx.send(frame.access_unit).is_err() {
+                                eprintln!("[PLAYBACK ERROR] seq={} pipe closed; restarting pipeline", frame.seq);
+                                stop_playback(&mut playback);
+                                continue;
+                            }
                         }
                         sent += 1;
-                        if sent == 1 || sent % 60 == 0 {
-                            println!("[PLAYBACK] submitted_{}_access_units={sent}", frame.codec);
+                        let latency_ms = frame.first_packet_at.elapsed().as_secs_f32() * 1000.0;
+                        if sent == 1 || sent % 30 == 0 {
+                            println!("[PLAYBACK] submitted_{}_access_units={sent} (latency={latency_ms:.1}ms)", frame.codec);
                             control_channel.send_telemetry(control::TelemetryMessage::Status {
                                 state: "STREAMING".to_string(),
                                 resolution: format!("{}x{}", frame.width, frame.height),
-                                fps: 60,
+                                fps: 30,
                                 delivery_rate: 100.0,
                                 frames_submitted: sent,
+                                latency_ms,
                             });
                         }
                     }
