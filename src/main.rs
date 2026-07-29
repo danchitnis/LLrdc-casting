@@ -62,7 +62,22 @@ fn stop_playback(playback: &mut Option<PlaybackEngine>) {
 }
 
 fn start_playback(codec: &str) -> Result<PlaybackEngine, Box<dyn std::error::Error>> {
-    let connector = std::env::var("DRM_CONNECTOR_ID").unwrap_or_else(|_| "54".into());
+    let connector = match std::env::var("DRM_CONNECTOR_ID") {
+        Ok(val) if !val.trim().is_empty() && val.trim() != "auto" => val,
+        _ => {
+            if let Ok(card) = drm_kms::open_display_card() {
+                if let Ok((_, _, _, conn_handle, _)) = drm_kms::autodetect_display_mode(&card) {
+                    let id = u32::from(conn_handle).to_string();
+                    println!("[PLAYBACK] Auto-detected active HDMI connector ID: {}", id);
+                    id
+                } else {
+                    "54".into()
+                }
+            } else {
+                "54".into()
+            }
+        }
+    };
     let plane = std::env::var("DRM_PLANE_ID").unwrap_or_else(|_| "33".into());
     let codec_lower = codec.to_lowercase();
     let (parser, decoder) = if codec_lower == "h264" {

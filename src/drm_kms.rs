@@ -108,6 +108,24 @@ pub fn open_display_card() -> Result<Card, Box<dyn std::error::Error>> {
     Err("Could not find an active DRM display card".into())
 }
 
+fn score_mode(mode: &Mode) -> u64 {
+    let (w, h) = (mode.size().0 as u64, mode.size().1 as u64);
+    let fps = mode.vrefresh() as u64;
+    let is_preferred = mode.mode_type().contains(drm::control::ModeTypeFlags::PREFERRED);
+
+    // RK3399 VOP hardware plane limit: filter out widths > 3840 (e.g. Cinema 4K 4096x2160)
+    // because RK3399 hardware planes return ENOSPC when scaling 1080p to 4096 width.
+    if w > 3840 {
+        return 0;
+    }
+
+    let area = w * h;
+    let fps_bonus = if fps >= 50 { 500_000 } else if fps >= 30 { 200_000 } else { 0 };
+    let preferred_bonus = if is_preferred { 1_000_000 } else { 0 };
+
+    area + fps_bonus + preferred_bonus
+}
+
 /// Autodetect active HDMI display connector and preferred mode resolution
 pub fn autodetect_display_mode(card: &Card) -> Result<(u32, u32, Mode, connector::Handle, crtc::Handle), Box<dyn std::error::Error>> {
     let resources = card.resource_handles()?;
@@ -120,25 +138,22 @@ pub fn autodetect_display_mode(card: &Card) -> Result<(u32, u32, Mode, connector
                 let conn_type = conn_info.interface();
                 if conn_type == connector::Interface::HDMIA || conn_type == connector::Interface::HDMIB {
                     println!("[DRM] Found connected HDMI connector: {:?}", conn_handle);
-                    // Select HDMI display mode with maximum resolution & highest refresh rate (e.g. 3840x2160 @ 60Hz)
+                    // Select optimal HDMI display mode prioritizing standard 16:9 60Hz and preferred EDID modes
                     let mut best_mode: Option<Mode> = None;
+                    let mut best_score: u64 = 0;
                     for mode in conn_info.modes() {
-                        if let Some(ref current_best) = best_mode {
-                            let (cw, ch) = (current_best.size().0 as u32, current_best.size().1 as u32);
-                            let (nw, nh) = (mode.size().0 as u32, mode.size().1 as u32);
-                            let current_area = cw * ch;
-                            let new_area = nw * nh;
-
-                            if (new_area > current_area) || (new_area == current_area && mode.vrefresh() > current_best.vrefresh()) {
-                                best_mode = Some(*mode);
-                            }
-                        } else {
+                        let score = score_mode(mode);
+                        println!("[DRM MODE OPTION] {}x{} @ {}Hz (pref={}) -> score={}",
+                                 mode.size().0, mode.size().1, mode.vrefresh(),
+                                 mode.mode_type().contains(drm::control::ModeTypeFlags::PREFERRED), score);
+                        if best_mode.is_none() || score > best_score {
                             best_mode = Some(*mode);
+                            best_score = score;
                         }
                     }
 
                     if let Some(mode) = best_mode {
-                        println!("[DRM] Selected highest capacity HDMI mode: {}x{} @ {}Hz", mode.size().0, mode.size().1, mode.vrefresh());
+                        println!("[DRM] Selected optimal HDMI mode: {}x{} @ {}Hz (score={})", mode.size().0, mode.size().1, mode.vrefresh(), best_score);
                         selected_mode = Some(mode);
                     }
                     target_connector = Some(conn_handle);

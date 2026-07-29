@@ -16,7 +16,7 @@ fi
 
 BOARD_IP="${BOARD_IP:-}"
 IMAGE="rock5c-v4l2-drm"
-CONNECTOR_ID="${DRM_CONNECTOR_ID:-54}"
+CONNECTOR_ID="${DRM_CONNECTOR_ID:-auto}"
 
 usage() {
   echo "Usage: $0 --start [--dashboard|--no-dashboard] | --stop"
