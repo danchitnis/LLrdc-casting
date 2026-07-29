@@ -13,8 +13,19 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Load .env if present
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+  PRE_BOARD_IP="${BOARD_IP:-}"
+  set -a
+  source "${SCRIPT_DIR}/.env"
+  set +a
+  if [ -n "$PRE_BOARD_IP" ]; then
+    BOARD_IP="$PRE_BOARD_IP"
+  fi
+fi
+
 # Default settings
-BOARD_IP="${BOARD_IP:-192.168.1.72}"
+BOARD_IP="${BOARD_IP:-}"
 PORT="${BOARD_PORT:-4434}"
 RAW_RES="${BOARD_RES:-3840x2160}"
 FPS="${STREAM_FPS:-60}"
@@ -36,7 +47,7 @@ while [[ $# -gt 0 ]]; do
       echo "  -f, --fps              Set frame rate (default: 60)"
       echo "  -d, --duration SEC     Stream duration (default: 20)"
       echo "  -c, --codec            Set codec (H265 or HEVC)"
-      echo "  -i, --ip, --board-ip   Set target board IP address (default: 192.168.1.72)"
+      echo "  -i, --ip, --board-ip   Set target board IP address (default: loaded from .env)"
       echo "  -p, --port             Set target UDP port (default: 4434)"
       echo "  --file, --stream-file  Set custom bitstream file path"
       echo "  -h, --help             Display this help message"

@@ -3,7 +3,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOARD_IP="${BOARD_IP:-192.168.1.72}"
+
+# Load .env if present
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+  PRE_BOARD_IP="${BOARD_IP:-}"
+  set -a
+  source "${SCRIPT_DIR}/.env"
+  set +a
+  if [ -n "$PRE_BOARD_IP" ]; then
+    BOARD_IP="$PRE_BOARD_IP"
+  fi
+fi
+
+BOARD_IP="${BOARD_IP:-}"
 PORT="${BOARD_PORT:-4434}"
 RESOLUTION="3840x2160"
 FPS="60"

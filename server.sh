@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BOARD_IP="${BOARD_IP:-192.168.1.72}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load .env if present
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+  PRE_BOARD_IP="${BOARD_IP:-}"
+  set -a
+  source "${SCRIPT_DIR}/.env"
+  set +a
+  if [ -n "$PRE_BOARD_IP" ]; then
+    BOARD_IP="$PRE_BOARD_IP"
+  fi
+fi
+
+BOARD_IP="${BOARD_IP:-}"
 IMAGE="rock5c-v4l2-drm"
 CONNECTOR_ID="${DRM_CONNECTOR_ID:-54}"
 
