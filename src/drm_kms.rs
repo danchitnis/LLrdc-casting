@@ -113,15 +113,9 @@ fn score_mode(mode: &Mode) -> u64 {
     let fps = mode.vrefresh() as u64;
     let is_preferred = mode.mode_type().contains(drm::control::ModeTypeFlags::PREFERRED);
 
-    // RK3399 VOP hardware plane limit: filter out widths > 3840 (e.g. Cinema 4K 4096x2160)
-    // because RK3399 hardware planes return ENOSPC when scaling 1080p to 4096 width.
-    if w > 3840 {
-        return 0;
-    }
-
     let area = w * h;
-    let fps_bonus = if fps >= 50 { 500_000 } else if fps >= 30 { 200_000 } else { 0 };
-    let preferred_bonus = if is_preferred { 1_000_000 } else { 0 };
+    let fps_bonus = if fps >= 50 { 100_000 } else if fps >= 30 { 50_000 } else { 0 };
+    let preferred_bonus = if is_preferred { 100_000 } else { 0 };
 
     area + fps_bonus + preferred_bonus
 }

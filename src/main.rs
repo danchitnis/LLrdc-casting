@@ -62,19 +62,27 @@ fn stop_playback(playback: &mut Option<PlaybackEngine>) {
 }
 
 fn start_playback(codec: &str) -> Result<PlaybackEngine, Box<dyn std::error::Error>> {
-    let connector = match std::env::var("DRM_CONNECTOR_ID") {
-        Ok(val) if !val.trim().is_empty() && val.trim() != "auto" => val,
+    let (connector, render_rect) = match std::env::var("DRM_CONNECTOR_ID") {
+        Ok(val) if !val.trim().is_empty() && val.trim() != "auto" => (val, None),
         _ => {
             if let Ok(card) = drm_kms::open_display_card() {
-                if let Ok((_, _, _, conn_handle, _)) = drm_kms::autodetect_display_mode(&card) {
+                if let Ok((screen_w, screen_h, _, conn_handle, _)) = drm_kms::autodetect_display_mode(&card) {
                     let id = u32::from(conn_handle).to_string();
                     println!("[PLAYBACK] Auto-detected active HDMI connector ID: {}", id);
-                    id
+
+                    let target_w = screen_w.min(screen_h * 16 / 9);
+                    let target_h = screen_h.min(screen_w * 9 / 16);
+                    let offset_x = (screen_w - target_w) / 2;
+                    let offset_y = (screen_h - target_h) / 2;
+
+                    let rect = format!("<{},{},{},{}>", offset_x, offset_y, target_w, target_h);
+                    println!("[PLAYBACK] Display CRTC {}x{} | 16:9 render-rectangle={}", screen_w, screen_h, rect);
+                    (id, Some(rect))
                 } else {
-                    "54".into()
+                    ("54".into(), None)
                 }
             } else {
-                "54".into()
+                ("54".into(), None)
             }
         }
     };
@@ -85,16 +93,25 @@ fn start_playback(codec: &str) -> Result<PlaybackEngine, Box<dyn std::error::Err
     } else {
         ("h265parse", "v4l2slh265dec")
     };
+
+    let mut gst_args = vec![
+        "-q".to_string(), "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), "!".to_string(),
+        parser.to_string(), "config-interval=-1".to_string(), "!".to_string(),
+        decoder.to_string(), "!".to_string(),
+        "kmssink".to_string(), "driver-name=rockchip".to_string(),
+        format!("connector-id={connector}"), format!("plane-id={plane}"),
+    ];
+    if let Some(rect) = render_rect {
+        gst_args.push(format!("render-rectangle={rect}"));
+    }
+    gst_args.extend([
+        "force-modesetting=false".to_string(), "can-scale=true".to_string(),
+        "sync=false".to_string(), "skip-vsync=true".to_string(), "max-lateness=0".to_string(),
+    ]);
+
     let mut child = Command::new("gst-launch-1.0")
         .env("GST_DEBUG", "v4l2slh265dec:4,h265parse:4,v4l2slh264dec:4,h264parse:4,kmssink:4")
-        .args([
-            "-q", "fdsrc", "fd=0", "do-timestamp=true", "!",
-            parser, "config-interval=-1", "!",
-            decoder, "!",
-            "kmssink", "driver-name=rockchip",
-            &format!("connector-id={connector}"), &format!("plane-id={plane}"),
-            "force-modesetting=false", "can-scale=true", "sync=false", "skip-vsync=true", "max-lateness=0",
-        ])
+        .args(&gst_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
