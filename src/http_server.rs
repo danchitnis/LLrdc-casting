@@ -12,34 +12,26 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 use crate::control::{ControlChannel, ControlCommand};
 
 static INDEX_HTML: &str = include_str!("../client/index.html");
 
-fn load_certs(path: &Path) -> Result<Vec<Certificate>, Box<dyn Error + Send + Sync>> {
+fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, Box<dyn Error + Send + Sync>> {
     let certfile = File::open(path)?;
     let mut reader = BufReader::new(certfile);
-    let certs = rustls_pemfile::certs(&mut reader)?
-        .into_iter()
-        .map(Certificate)
-        .collect();
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(certs)
 }
 
-fn load_key(path: &Path) -> Result<PrivateKey, Box<dyn Error + Send + Sync>> {
+fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, Box<dyn Error + Send + Sync>> {
     let keyfile = File::open(path)?;
     let mut reader = BufReader::new(keyfile);
-    let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)?;
-    if let Some(key) = keys.into_iter().next() {
-        return Ok(PrivateKey(key));
-    }
-    let keyfile = File::open(path)?;
-    let mut reader = BufReader::new(keyfile);
-    let keys = rustls_pemfile::rsa_private_keys(&mut reader)?;
-    if let Some(key) = keys.into_iter().next() {
-        return Ok(PrivateKey(key));
+    if let Some(key) = rustls_pemfile::private_key(&mut reader)? {
+        return Ok(key);
     }
     Err("No private key found in key.pem".into())
 }
@@ -118,7 +110,7 @@ where
     tokio::spawn(async move {
         while let Ok(msg) = telemetry_rx.recv().await {
             if let Ok(json) = serde_json::to_string(&msg) {
-                if ws_tx.send(tokio_tungstenite::tungstenite::Message::Text(json)).await.is_err() {
+                if ws_tx.send(tokio_tungstenite::tungstenite::Message::Text(json.into())).await.is_err() {
                     break;
                 }
             }
@@ -233,7 +225,6 @@ pub async fn run_server(
         match (load_certs(&cert_path), load_key(&key_path)) {
             (Ok(certs), Ok(key)) => {
                 let config = ServerConfig::builder()
-                    .with_safe_defaults()
                     .with_no_client_auth()
                     .with_single_cert(certs, key)?;
                 Some(TlsAcceptor::from(Arc::new(config)))

@@ -235,6 +235,7 @@ fn show_idle_dashboard() -> Result<IdleDashboard, Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     spawn_dmesg_kernel_monitor();
     let _ = drm_kms::inspect_live_scanout_status();
     let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(64);

@@ -42,17 +42,16 @@ pub fn is_cert_valid(cert_path: &Path) -> bool {
     };
     let mut reader = BufReader::new(file);
 
-    let certs = match rustls_pemfile::certs(&mut reader) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+    let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+        .filter_map(|r| r.ok())
+        .collect();
 
     let cert_der = match certs.first() {
         Some(c) => c,
         None => return false,
     };
 
-    let (_, parsed_cert) = match x509_parser::parse_x509_certificate(cert_der) {
+    let (_, parsed_cert) = match x509_parser::parse_x509_certificate(cert_der.as_ref()) {
         Ok(res) => res,
         Err(_) => return false,
     };

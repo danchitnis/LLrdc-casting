@@ -29,7 +29,7 @@ pub async fn run_server_with_identity(
 
     let config = ServerConfig::builder()
         .with_bind_default(4433)
-        .with_identity(&identity)
+        .with_identity(identity)
         .max_idle_timeout(Some(std::time::Duration::from_secs(30)))?
         .build();
 
@@ -117,8 +117,8 @@ async fn handle_connection(
                         });
                     }
                     Err(e) => {
-                        println!("[WEBTRANSPORT] Stream accept channel inactive ({})", e);
-                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                        println!("[WEBTRANSPORT] Stream accept channel closed ({})", e);
+                        break;
                     }
                 }
             }
