@@ -1,5 +1,5 @@
 {
-  "name": "rock5c-webtransport-client",
+  "name": "llrdc-casting-webtransport-client",
   "version": "1.0.0",
   "type": "module",
   "description": "Node.js H.264 MP4 video streamer for Rock 5C+",

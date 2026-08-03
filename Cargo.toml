@@ -1,5 +1,5 @@
 [package]
-name = "rock5c-v4l2-drm"
+name = "llrdc-casting"
 version = "0.1.0"
 edition = "2021"
 

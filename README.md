@@ -14,7 +14,7 @@ Start the receiver from the workstation:
 
 The idle HDMI screen shows:
 
-- `RADXA ROCK 4C+ // RK3399 // DEVICE IPS`
+- `LLrdc Casting // DEVICE IPS`
 - Board IPv4 addresses
 - Detected HDMI output mode, for example `3840X2160 @ 60 HZ`
 

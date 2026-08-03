@@ -83,15 +83,15 @@ if (( DEPLOY )); then
   BOARD_IP="$BOARD_IP" "${SCRIPT_DIR}/server.sh" --start
   sleep 3
 fi
-if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$BOARD_IP" 'docker ps --format "{{.Names}}" | grep -qx rock5c-v4l2-drm'; then
+if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$BOARD_IP" 'docker ps --format "{{.Names}}" | grep -qx llrdc-casting'; then
   echo "Receiver container is not running; use --deploy to build and start it." >&2; exit 1
 fi
 
 echo "Testing HEVC ${RESOLUTION}@${FPS} for ${DURATION}s -> ${BOARD_IP}:${PORT}"
 node "${SCRIPT_DIR}/client/client.mjs" "$BOARD_IP" "$PORT" "$RESOLUTION" "$FPS" H265 "$STREAM_FILE" -d "$DURATION"
 sleep 1
-memory=$(ssh -o BatchMode=yes "$BOARD_IP" 'docker stats --no-stream --format "{{.MemUsage}}" rock5c-v4l2-drm')
-playback=$(ssh -o BatchMode=yes "$BOARD_IP" 'docker logs rock5c-v4l2-drm 2>&1 | grep "\[PLAYBACK" | tail -1 || true')
+memory=$(ssh -o BatchMode=yes "$BOARD_IP" 'docker stats --no-stream --format "{{.MemUsage}}" llrdc-casting')
+playback=$(ssh -o BatchMode=yes "$BOARD_IP" 'docker logs llrdc-casting 2>&1 | grep "\[PLAYBACK" | tail -1 || true')
 echo
 echo "Receiver memory: ${memory}"
 echo "Latest receiver state: ${playback:-no playback log emitted}"

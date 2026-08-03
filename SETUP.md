@@ -49,7 +49,7 @@ Inspect available DRM graphics cards, V4L2 hardware video nodes (`rkvdec`), and 
 ssh <BOARD_IP> "ls -l /dev/dri/card* /dev/dri/render*"
 
 # 2. Query active connectors, EDIDs, and supported screen modes (e.g., 1080p, 2K)
-ssh <BOARD_IP> "docker run --rm --privileged -v /dev:/dev rock5c-v4l2-drm modetest -M rockchip -c"
+ssh <BOARD_IP> "docker run --rm --privileged -v /dev:/dev llrdc-casting modetest -M rockchip -c"
 
 # 3. List V4L2 hardware video nodes
 ssh <BOARD_IP> "ls -l /dev/video*"

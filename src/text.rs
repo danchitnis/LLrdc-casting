@@ -179,7 +179,7 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, refresh_
     }
 
     // Header Title
-    let title = "RADXA ROCK 4C+ // RK3399 // DEVICE IPS";
+    let title = "LLrdc Casting // DEVICE IPS";
     draw_string_argb(
         buf,
         width,
