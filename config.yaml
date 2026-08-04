@@ -1,0 +1,20 @@
+# Target Device & System Configuration
+board:
+  ip: "100.100.1.72"
+
+server:
+  port: 4434                   # Direct UDP video receiver port
+  webtransport_port: 4433      # WebTransport QUIC server port
+  http_port: 8080              # Web UI & WebSocket control socket port
+  drm_connector_id: "auto"     # DRM display connector ID (auto or e.g. 54)
+  drm_plane_id: "33"           # DRM overlay plane ID
+  idle_dashboard: true         # Enable idle IP screen when no stream is active
+  idle_timeout_sec: 30         # Seconds of stream inactivity before restoring dashboard
+  udp_buffer_size_mb: 8        # UDP socket receive buffer size in MB
+  cert_dir: "/certs"           # Directory for TLS certificates
+
+test-stream:
+  resolution: "3840x2160"
+  fps: 60
+  codec: "H265"
+  duration: 20

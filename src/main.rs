@@ -265,7 +265,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut playback: Option<PlaybackEngine> = None;
     let mut sent = 0u64;
     let mut streaming_enabled = false;
-    let idle_timeout = std::time::Duration::from_millis(30000);
+    let idle_timeout_sec: u64 = std::env::var("IDLE_TIMEOUT_SEC")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(30);
+    let idle_timeout = std::time::Duration::from_secs(idle_timeout_sec);
 
     loop {
         tokio::select! {

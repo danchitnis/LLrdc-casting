@@ -3,20 +3,41 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Load .env if present
-if [ -f "${SCRIPT_DIR}/.env" ]; then
-  PRE_BOARD_IP="${BOARD_IP:-}"
-  set -a
-  source "${SCRIPT_DIR}/.env"
-  set +a
-  if [ -n "$PRE_BOARD_IP" ]; then
-    BOARD_IP="$PRE_BOARD_IP"
+# Load config.yaml if present
+load_config() {
+  local cfg="${SCRIPT_DIR}/config.yaml"
+  if [ -f "$cfg" ]; then
+    eval "$(python3 -c '
+import sys
+path = sys.argv[1]
+current_section = ""
+with open(path) as f:
+    for line in f:
+        line = line.split("#")[0].rstrip()
+        if not line: continue
+        indent = len(line) - len(line.lstrip())
+        line_str = line.strip()
+        if indent == 0 and line_str.endswith(":") and ":" not in line_str[:-1]:
+            current_section = line_str[:-1].strip().replace("-", "_")
+            continue
+        if ":" in line_str:
+            k, v = line_str.split(":", 1)
+            k = k.strip().replace("-", "_")
+            v = v.strip().strip("\"'\''")
+            full_key = f"{current_section}_{k}".upper() if indent > 0 and current_section else k.upper()
+            if v:
+                print(f"export {full_key}=\"{v}\"")
+' "$cfg" 2>/dev/null || true)"
   fi
-fi
+}
 
+PRE_BOARD_IP="${BOARD_IP:-}"
+PRE_CONNECTOR_ID="${DRM_CONNECTOR_ID:-}"
+load_config
+if [ -n "$PRE_BOARD_IP" ]; then BOARD_IP="$PRE_BOARD_IP"; fi
 BOARD_IP="${BOARD_IP:-}"
 IMAGE="llrdc-casting"
-CONNECTOR_ID="${DRM_CONNECTOR_ID:-auto}"
+CONNECTOR_ID="${PRE_CONNECTOR_ID:-${BOARD_DRM_CONNECTOR_ID:-${DRM_CONNECTOR_ID:-auto}}}"
 
 usage() {
   echo "Usage: $0 --start [--dashboard|--no-dashboard] | --stop"
@@ -63,7 +84,7 @@ case "$action" in
     scp -o BatchMode=yes /tmp/llrdc-casting "${BOARD_IP}:/var/tmp/llrdc-bin/llrdc-casting"
     rm -f /tmp/llrdc-casting
 
-    ssh -o BatchMode=yes "$BOARD_IP" "docker stop -t 2 '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; docker rm -f '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; sleep 1; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='$CONNECTOR_ID' -e IDLE_DASHBOARD='$idle_dashboard' -v /dev:/dev -v /var/lib/llrdc-certs:/certs -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
+    ssh -o BatchMode=yes "$BOARD_IP" "docker stop -t 2 '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; docker rm -f '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; sleep 1; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='${SERVER_DRM_CONNECTOR_ID:-${BOARD_DRM_CONNECTOR_ID:-${DRM_CONNECTOR_ID:-auto}}}' -e DRM_PLANE_ID='${SERVER_DRM_PLANE_ID:-${BOARD_DRM_PLANE_ID:-33}}' -e IDLE_DASHBOARD='${idle_dashboard:-${SERVER_IDLE_DASHBOARD:-${BOARD_IDLE_DASHBOARD:-1}}}' -e IDLE_TIMEOUT_SEC='${SERVER_IDLE_TIMEOUT_SEC:-${BOARD_IDLE_TIMEOUT_SEC:-30}}' -e HTTP_PORT='${SERVER_HTTP_PORT:-${BOARD_HTTP_PORT:-8080}}' -e WEBTRANSPORT_PORT='${SERVER_WEBTRANSPORT_PORT:-${BOARD_WEBTRANSPORT_PORT:-4433}}' -e BOARD_PORT='${SERVER_PORT:-${BOARD_PORT:-4434}}' -e UDP_BUFFER_SIZE_MB='${SERVER_UDP_BUFFER_SIZE_MB:-${BOARD_UDP_BUFFER_SIZE_MB:-8}}' -e CERTS_DIR='${SERVER_CERT_DIR:-${BOARD_CERT_DIR:-/certs}}' -v /dev:/dev -v /var/lib/llrdc-certs:/certs -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
     ;;
   --stop)
     (($# == 0)) || { usage; exit 2; }

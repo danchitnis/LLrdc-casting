@@ -8,10 +8,38 @@ import ffmpegPath from 'ffmpeg-static';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function loadConfigYaml() {
+  const configPath = path.resolve(__dirname, '../config.yaml');
+  const config = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      const content = fs.readFileSync(configPath, 'utf8');
+      let currentSection = '';
+      for (let rawLine of content.split('\n')) {
+        const line = rawLine.split('#')[0].trim();
+        if (!line) continue;
+        if (line.endsWith(':') && !line.slice(0, -1).includes(':')) {
+          currentSection = line.slice(0, -1).trim().replace(/-/g, '_');
+          continue;
+        }
+        if (line.includes(':')) {
+          const parts = line.split(':');
+          const key = parts[0].trim().replace(/-/g, '_');
+          const val = parts.slice(1).join(':').trim().replace(/^["']|["']$/g, '');
+          const fullKey = currentSection ? `${currentSection}_${key}`.toUpperCase() : key.toUpperCase();
+          if (val) config[fullKey] = val;
+        }
+      }
+    } catch (_) {}
+  }
+  return config;
+}
+const yamlConfig = loadConfigYaml();
+
 // Argument Parsing:
 // Options can be passed in order: HOST PORT RES FPS CODEC STREAM_FILE
-// OR env vars: BOARD_IP, BOARD_PORT, BOARD_WIDTH, BOARD_HEIGHT, STREAM_FPS, CODEC, STREAM_FILE
-let DURATION_SEC = parseInt(process.env.STREAM_DURATION || '20', 10);
+// OR env vars / config.yaml: BOARD_IP, BOARD_PORT, BOARD_WIDTH, BOARD_HEIGHT, TEST_STREAM_FPS, CODEC, STREAM_FILE
+let DURATION_SEC = parseInt(process.env.STREAM_DURATION || yamlConfig.TEST_STREAM_DURATION || yamlConfig.STREAM_DURATION || '20', 10);
 const cleanArgs = [];
 for (let i = 0; i < process.argv.length; i++) {
   if ((process.argv[i] === '-d' || process.argv[i] === '--duration') && process.argv[i + 1]) {
@@ -22,14 +50,14 @@ for (let i = 0; i < process.argv.length; i++) {
   }
 }
 
-const SERVER_HOST = cleanArgs[2] || process.env.BOARD_IP || '192.168.1.72';
-const SERVER_PORT = parseInt(cleanArgs[3] || process.env.BOARD_PORT || '4434', 10);
+const SERVER_HOST = cleanArgs[2] || process.env.BOARD_IP || yamlConfig.BOARD_IP || '100.100.1.72';
+const SERVER_PORT = parseInt(cleanArgs[3] || process.env.BOARD_PORT || yamlConfig.SERVER_PORT || yamlConfig.BOARD_PORT || '4434', 10);
 
-let VID_W = parseInt(process.env.BOARD_WIDTH || '1280', 10);
-let VID_H = parseInt(process.env.BOARD_HEIGHT || '720', 10);
-let FPS = parseInt(process.env.STREAM_FPS || '30', 10);
-let CODEC = (process.env.CODEC || 'H264').toUpperCase();
-let streamFilePath = process.env.STREAM_FILE || null;
+let VID_W = parseInt(process.env.BOARD_WIDTH || yamlConfig.BOARD_WIDTH || '1280', 10);
+let VID_H = parseInt(process.env.BOARD_HEIGHT || yamlConfig.BOARD_HEIGHT || '720', 10);
+let FPS = parseInt(process.env.STREAM_FPS || yamlConfig.TEST_STREAM_FPS || yamlConfig.STREAM_FPS || '30', 10);
+let CODEC = (process.env.CODEC || yamlConfig.TEST_STREAM_CODEC || yamlConfig.STREAM_CODEC || yamlConfig.CODEC || 'H264').toUpperCase();
+let streamFilePath = process.env.STREAM_FILE || yamlConfig.TEST_STREAM_FILE || yamlConfig.STREAM_FILE || null;
 
 let argIdx = 4;
 if (cleanArgs[argIdx]) {

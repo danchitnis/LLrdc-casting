@@ -4,19 +4,43 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Load .env if present
-if [ -f "${SCRIPT_DIR}/.env" ]; then
-  PRE_BOARD_IP="${BOARD_IP:-}"
-  set -a
-  source "${SCRIPT_DIR}/.env"
-  set +a
-  if [ -n "$PRE_BOARD_IP" ]; then
-    BOARD_IP="$PRE_BOARD_IP"
+# Load config.yaml if present
+load_config() {
+  local cfg="${SCRIPT_DIR}/config.yaml"
+  if [ -f "$cfg" ]; then
+    eval "$(python3 -c '
+import sys
+path = sys.argv[1]
+current_section = ""
+with open(path) as f:
+    for line in f:
+        line = line.split("#")[0].rstrip()
+        if not line: continue
+        indent = len(line) - len(line.lstrip())
+        line_str = line.strip()
+        if indent == 0 and line_str.endswith(":") and ":" not in line_str[:-1]:
+            current_section = line_str[:-1].strip().replace("-", "_")
+            continue
+        if ":" in line_str:
+            k, v = line_str.split(":", 1)
+            k = k.strip().replace("-", "_")
+            v = v.strip().strip("\"'\''")
+            full_key = f"{current_section}_{k}".upper() if indent > 0 and current_section else k.upper()
+            if v:
+                print(f"export {full_key}=\"{v}\"")
+' "$cfg" 2>/dev/null || true)"
   fi
-fi
+}
+
+PRE_BOARD_IP="${BOARD_IP:-}"
+load_config
+if [ -n "$PRE_BOARD_IP" ]; then BOARD_IP="$PRE_BOARD_IP"; fi
 
 BOARD_IP="${BOARD_IP:-}"
-PORT="${BOARD_PORT:-4434}"
+PORT="${SERVER_PORT:-${BOARD_PORT:-4434}}"
+RESOLUTION="${TEST_STREAM_RESOLUTION:-${STREAM_RESOLUTION:-3840x2160}}"
+FPS="${TEST_STREAM_FPS:-${STREAM_FPS:-60}}"
+DURATION="${TEST_STREAM_DURATION:-${STREAM_DURATION:-20}}"
 RESOLUTION="3840x2160"
 FPS="60"
 DURATION="20"

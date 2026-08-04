@@ -27,28 +27,49 @@ pub async fn run_server_with_identity(
         println!("[WEBTRANSPORT] Persistent Certificate SHA-256 (HEX): {}", hex_str);
     }
 
+    let wt_port: u16 = std::env::var("WEBTRANSPORT_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(4433);
+
+    let udp_port: u16 = std::env::var("BOARD_PORT")
+        .or_else(|_| std::env::var("UDP_PORT"))
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(4434);
+
+    let buf_mb: usize = std::env::var("UDP_BUFFER_SIZE_MB")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8);
+
+    let idle_timeout_sec: u64 = std::env::var("IDLE_TIMEOUT_SEC")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(30);
+
     let config = ServerConfig::builder()
-        .with_bind_default(4433)
+        .with_bind_default(wt_port)
         .with_identity(identity)
-        .max_idle_timeout(Some(std::time::Duration::from_secs(30)))?
+        .max_idle_timeout(Some(std::time::Duration::from_secs(idle_timeout_sec)))?
         .build();
 
     let server = Endpoint::server(config)?;
     println!("\n=====================================================");
-    println!(" [WEBTRANSPORT SERVER] Listening on UDP 0.0.0.0:4433");
+    println!(" [WEBTRANSPORT SERVER] Listening on UDP 0.0.0.0:{wt_port}");
     println!(" Ready for incoming WebTransport QUIC screen sharing!");
     println!("=====================================================\n");
 
-    // Spawn companion UDP listener on 0.0.0.0:4434 for direct UDP video frame packets
+    // Spawn companion UDP listener for direct UDP video frame packets
     let frame_tx_udp = frame_tx.clone();
     tokio::spawn(async move {
-        if let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:4434").await {
-            println!("[UDP RECEIVER] Listening on 0.0.0.0:4434 for direct UDP video stream packets");
+        if let Ok(socket) = tokio::net::UdpSocket::bind(("0.0.0.0", udp_port)).await {
+            println!("[UDP RECEIVER] Listening on 0.0.0.0:{udp_port} for direct UDP video stream packets");
 
-            // Set socket receive buffer to 8MB using nix/libc socket options
+            // Set socket receive buffer using nix/libc socket options
             use std::os::unix::io::AsRawFd;
             let raw_fd = socket.as_raw_fd();
-            let buf_size: libc::c_int = 8 * 1024 * 1024; // 8MB socket buffer
+            let buf_size: libc::c_int = (buf_mb * 1024 * 1024) as libc::c_int;
             unsafe {
                 libc::setsockopt(
                     raw_fd,
