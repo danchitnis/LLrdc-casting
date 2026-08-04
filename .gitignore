@@ -5,3 +5,7 @@ client/assets/*.h264
 client/assets/
 bin/
 .DS_Store
+.astro/
+client/.astro/
+dist/
+client/dist/
