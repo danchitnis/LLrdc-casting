@@ -43,14 +43,16 @@ struct Assembly {
 
 static ASSEMBLIES: LazyLock<Mutex<Vec<Assembly>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
-#[cfg(test)]
 pub fn reset_decoder_pipeline() {
     LAST_COMPLETED_SEQ.store(0, Ordering::Relaxed);
-    ASSEMBLIES.lock().expect("assembly mutex poisoned").clear();
+    if let Ok(mut assemblies) = ASSEMBLIES.lock() {
+        assemblies.clear();
+    }
 }
 
 pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     if packet.len() >= 4 && &packet[..4] == b"STOP" {
+        reset_decoder_pipeline();
         return Some(VideoFrame {
             seq: 0,
             width: 0,
@@ -73,9 +75,9 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     // Drop stale chunks from older already-completed frames, but handle stream sequence resets
     let last_seq = LAST_COMPLETED_SEQ.load(Ordering::Relaxed);
     if seq <= last_seq && last_seq > 0 {
-        if last_seq.saturating_sub(seq) > 50 {
+        if seq <= 5 || seq < last_seq {
             // Sequence reset detected (e.g. new client or new stream restart); reset sequence counter
-            LAST_COMPLETED_SEQ.store(0, Ordering::Relaxed);
+            reset_decoder_pipeline();
         } else {
             return None;
         }
@@ -93,6 +95,10 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
 
     let now = Instant::now();
     let mut assemblies = ASSEMBLIES.lock().expect("assembly mutex poisoned");
+
+    if seq == 1 && chunk_index == 0 {
+        println!("[PROBE RECV] seq=1 first chunk arrived at {:?}", Instant::now());
+    }
 
     // Retain non-expired assemblies and count dropped timeouts
     let initial_len = assemblies.len();

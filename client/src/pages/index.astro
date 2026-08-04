@@ -468,6 +468,8 @@ async function toggleScreenShare() {
     return;
   }
 
+  seqNum = 0;
+
   // Lock settings fields immediately when screen sharing is triggered
   setSettingsDisabled(true);
 
@@ -640,8 +642,8 @@ async function toggleScreenShare() {
       lastFrameTime = now;
 
       frameCount++;
-      const keyframeInterval = targetFps;
-      const needKeyFrame = (frameCount === 1 || frameCount % keyframeInterval === 0 || forceNextKeyframe);
+      const keyframeInterval = Math.max(10, Math.floor(targetFps / 2));
+      const needKeyFrame = (frameCount <= 5 || frameCount % keyframeInterval === 0 || forceNextKeyframe);
       if (forceNextKeyframe) forceNextKeyframe = false;
 
       if (videoEncoder.encodeQueueSize > 8) {
@@ -666,6 +668,7 @@ async function stopStreaming() {
     return;
   }
   isStreaming = false;
+  seqNum = 0;
   if (controlWs && controlWs.readyState === WebSocket.OPEN) {
     try {
       controlWs.send(JSON.stringify({ type: 'stop' }));

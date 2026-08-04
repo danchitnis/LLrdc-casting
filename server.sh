@@ -72,7 +72,7 @@ case "$action" in
       ssh -o BatchMode=yes "$BOARD_IP" "echo '$DOCKERFILE_HASH' > /var/tmp/llrdc-bin/Dockerfile.sha256"
     else
       echo "[DEPLOY] Dockerfile unchanged -> Fast deploy: building and copying only binary (~3.9MB)..."
-      docker buildx build --target builder --platform linux/arm64 -t "${IMAGE}-builder" --load .
+      docker buildx build --build-arg BUILD_DATE="$(date +%s)" --target builder --platform linux/arm64 -t "${IMAGE}-builder" --load .
     fi
 
     # Extract compiled binary and copy to board host path
