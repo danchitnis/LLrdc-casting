@@ -7,13 +7,16 @@
   "scripts": {
     "start": "node client.mjs",
     "serve": "node server.mjs",
+    "check": "astro check && tsc --noEmit",
     "build": "astro build"
   },
   "dependencies": {
     "ffmpeg-static": "^5.3.0"
   },
   "devDependencies": {
+    "@astrojs/check": "^0.9.10",
     "astro": "^7.1.6",
+    "typescript": "^6.0.3",
     "vite-plugin-singlefile": "^2.3.3"
   }
 }
