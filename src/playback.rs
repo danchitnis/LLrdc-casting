@@ -7,8 +7,29 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
 pub struct PlaybackEngine {
-    pub _child: Child,
+    pub child: Child,
     pub writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    pub current_codec: String,
+}
+
+impl PlaybackEngine {
+    pub fn ensure_codec(
+        &mut self,
+        target_codec: &str,
+        connector: &str,
+        render_rect: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let norm = if target_codec.to_lowercase().contains("264") { "h264" } else { "h265" };
+        if self.current_codec == norm {
+            return Ok(());
+        }
+        println!("[PLAYBACK SWITCH] Switching GStreamer pipeline from {} to {}", self.current_codec, norm);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let new_engine = start_persistent_playback(norm, connector, render_rect)?;
+        *self = new_engine;
+        Ok(())
+    }
 }
 
 pub fn autodetect_display_info() -> (u32, u32, u32, String, Option<String>) {
@@ -37,14 +58,15 @@ pub fn start_persistent_playback(
     render_rect: Option<&str>,
 ) -> Result<PlaybackEngine, Box<dyn std::error::Error>> {
     let t_start = std::time::Instant::now();
-    println!("[PLAYBACK STARTUP] Initializing persistent GStreamer pipeline at t=0ms");
     let plane = std::env::var("DRM_PLANE_ID").unwrap_or_else(|_| "33".into());
     let codec_lower = codec.to_lowercase();
-    let (parser, decoder) = if codec_lower == "h264" {
+    let norm_codec = if codec_lower.contains("264") { "h264" } else { "h265" };
+    let (parser, decoder) = if norm_codec == "h264" {
         ("h264parse", "v4l2slh264dec")
     } else {
         ("h265parse", "v4l2slh265dec")
     };
+    println!("[PLAYBACK STARTUP] Initializing persistent GStreamer pipeline for {norm_codec} ({parser} -> {decoder}) at t=0ms");
 
     let mut gst_args = vec![
         "-q".to_string(), "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), "blocksize=65536".to_string(), "!".to_string(),
@@ -98,7 +120,8 @@ pub fn start_persistent_playback(
 
     println!("[PLAYBACK READY] Persistent GStreamer pipeline active on HDMI connector {connector}, plane {plane}");
     Ok(PlaybackEngine {
-        _child: child,
+        child,
         writer_tx,
+        current_codec: norm_codec.to_string(),
     })
 }

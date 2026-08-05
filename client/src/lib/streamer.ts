@@ -281,11 +281,13 @@ export async function toggleScreenShare(): Promise<void> {
   const resStr = resSelect.value;
   const targetFps = parseInt(fpsSelect.value, 10);
   const selectedCodec = codecSelect.value;
+  const wireCodec = selectedCodec.startsWith('H264') ? 'H264' : 'H265';
+  const isSWRequested = selectedCodec === 'H264_SW';
   const bitrateSetting = bitrateSelect ? bitrateSelect.value : 'auto';
   const latencySetting = latencySelect ? latencySelect.value : 'ULL';
 
   const [width = 1920, height = 1080] = resStr.split('x').map(n => parseInt(n, 10));
-  const targetBitrate = calculateTargetBitrate(bitrateSetting, selectedCodec, width, targetFps);
+  const targetBitrate = calculateTargetBitrate(bitrateSetting, wireCodec, width, targetFps);
   const targetMbps = (targetBitrate / 1_000_000).toFixed(1);
 
   const webcodecsLatencyMode = (latencySetting === 'quality') ? 'quality' : 'realtime';
@@ -302,11 +304,11 @@ export async function toggleScreenShare(): Promise<void> {
   const statBitrate = document.getElementById('statBitrate');
   const statEncoderMode = document.getElementById('statEncoderMode');
   if (statRes) statRes.textContent = `${resStr} @ ${targetFps} FPS`;
-  if (statCodec) statCodec.textContent = selectedCodec === 'H265' ? 'HEVC / H.265' : 'H.264';
+  if (statCodec) statCodec.textContent = wireCodec === 'H265' ? 'HEVC / H.265' : (isSWRequested ? 'H.264 (Software)' : 'H.264');
   if (statBitrate) statBitrate.textContent = `${targetMbps} Mbps (${bitrateSetting === 'auto' ? 'Auto' : 'Custom'})`;
   if (statEncoderMode) statEncoderMode.textContent = encoderModeLabel;
 
-  log(`[CONFIG] Codec: ${selectedCodec} | Res: ${resStr} @ ${targetFps} FPS | Bandwidth: ${targetMbps} Mbps | Priority: ${encoderModeLabel}`);
+  log(`[CONFIG] Codec: ${wireCodec} (${isSWRequested ? 'SW' : 'HW'}) | Res: ${resStr} @ ${targetFps} FPS | Bandwidth: ${targetMbps} Mbps | Priority: ${encoderModeLabel}`);
   log(`[CONNECTING] WebTransport -> https://${boardIp}:${boardPort}`);
   updateStatus('connecting', 'CONNECTING');
 
@@ -340,7 +342,7 @@ export async function toggleScreenShare(): Promise<void> {
       try {
         controlWs.send(JSON.stringify({
           type: 'start',
-          codec: selectedCodec,
+          codec: wireCodec,
           resolution: resStr,
           fps: targetFps,
           bitrate_mbps: parseFloat(targetMbps),
@@ -391,22 +393,68 @@ export async function toggleScreenShare(): Promise<void> {
     const activeWidth = (rawWidth % 16 !== 0) ? Math.ceil(rawWidth / 16) * 16 : rawWidth;
     const activeHeight = (rawHeight % 16 !== 0) ? Math.ceil(rawHeight / 16) * 16 : rawHeight;
 
-    const codecString = getCodecString(selectedCodec, activeWidth, targetFps);
-    log(`[WEBCODECS] Initializing ${selectedCodec} Hardware Encoder (${codecString}) at ${activeWidth}x${activeHeight}...`);
+    const codecString = getCodecString(wireCodec, activeWidth, targetFps);
+    const hardwarePref: HardwareAcceleration = isSWRequested ? 'prefer-software' : 'prefer-hardware';
+
+    // Verify browser hardware acceleration capability
+    let isHWAccelerated = false;
+    let isSupported = false;
+    if (typeof VideoEncoder !== 'undefined' && typeof VideoEncoder.isConfigSupported === 'function') {
+      try {
+        const supportCheck = await VideoEncoder.isConfigSupported({
+          codec: codecString,
+          width: activeWidth,
+          height: activeHeight,
+          bitrate: targetBitrate,
+          framerate: targetFps,
+          hardwareAcceleration: hardwarePref
+        });
+        isSupported = !!supportCheck.supported;
+        isHWAccelerated = supportCheck.config?.hardwareAcceleration === 'prefer-hardware' && !isSWRequested;
+      } catch (e) {}
+    }
+
+    if (!isSupported) {
+      log(`[ERROR] Selected codec ${wireCodec} (${codecString}) is not supported for encoding in this browser.`, true);
+      await stopStreaming();
+      return;
+    }
+
+    if (selectedCodec === 'H265' && !isHWAccelerated) {
+      log(`[ERROR] H.265 software encoding is blocked to prevent heavy CPU usage. Please select H.264.`, true);
+      await stopStreaming();
+      return;
+    }
+
+    const statEncoderHW = document.getElementById('statEncoderHW');
+    if (statEncoderHW) {
+      if (isSWRequested) {
+        statEncoderHW.textContent = 'SW Emulated (CPU)';
+        statEncoderHW.style.color = '#f59e0b';
+      } else if (isHWAccelerated) {
+        statEncoderHW.textContent = 'HW Accelerated (GPU)';
+        statEncoderHW.style.color = '#10b981';
+      } else {
+        statEncoderHW.textContent = 'SW Emulated (CPU)';
+        statEncoderHW.style.color = '#f59e0b';
+      }
+    }
+
+    log(`[WEBCODECS] Initializing ${wireCodec} Encoder (${codecString}) at ${activeWidth}x${activeHeight} [${isSWRequested ? 'SW CPU' : (isHWAccelerated ? 'HW GPU' : 'SW CPU')}]...`);
 
     let forceNextKeyframe = false;
 
     videoEncoder = new VideoEncoder({
       output: async (chunk, metadata) => {
         seqNum++;
-        const accessUnit = convertToAnnexB(chunk, metadata, selectedCodec, nalCache, seqNum, log);
-        await sendAccessUnit(accessUnit, seqNum, activeWidth, activeHeight, selectedCodec);
+        const accessUnit = convertToAnnexB(chunk, metadata, wireCodec, nalCache, seqNum, log);
+        await sendAccessUnit(accessUnit, seqNum, activeWidth, activeHeight, wireCodec);
 
         const frameStat = document.getElementById('statFrameCount');
         if (frameStat) frameStat.textContent = seqNum.toString();
 
         if (seqNum % targetFps === 0) {
-          log(`[STREAMING ${selectedCodec}] Frame #${seqNum}: ${activeWidth}x${activeHeight} (${Math.round(accessUnit.length / 1024)} KB) via QUIC stream`);
+          log(`[STREAMING ${wireCodec}] Frame #${seqNum}: ${activeWidth}x${activeHeight} (${Math.round(accessUnit.length / 1024)} KB) via QUIC stream`);
         }
       },
       error: (e) => {
@@ -422,7 +470,7 @@ export async function toggleScreenShare(): Promise<void> {
       bitrate: targetBitrate,
       framerate: targetFps,
       latencyMode: webcodecsLatencyMode as 'quality' | 'realtime',
-      hardwareAcceleration: 'prefer-hardware'
+      hardwareAcceleration: hardwarePref
     });
 
     updateStatus('active', 'STREAMING');

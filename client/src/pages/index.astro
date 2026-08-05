@@ -144,7 +144,7 @@ import LogConsole from '../components/LogConsole.astro';
 
 <script>
   import { toggleScreenShare, initControlSocket, log } from '../lib/streamer';
-  import { onResolutionChange, onCodecChange, updateCodecAndResolutionGuardrails } from '../lib/guardrails';
+  import { onResolutionChange, onCodecChange, checkBrowserCodecCapabilities } from '../lib/guardrails';
 
   declare global {
     interface Window {
@@ -168,7 +168,7 @@ import LogConsole from '../components/LogConsole.astro';
       codecSelect.addEventListener('change', () => onCodecChange(log));
     }
 
-    updateCodecAndResolutionGuardrails(log);
+    await checkBrowserCodecCapabilities(log);
 
     try {
       const res = await fetch('/cert_hash');

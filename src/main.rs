@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (screen_w, screen_h, vrefresh, connector_id, render_rect) = playback::autodetect_display_info();
 
     // 2. Start single persistent GStreamer pipeline
-    let playback_engine = playback::start_persistent_playback("hevc", &connector_id, render_rect.as_deref())?;
+    let mut playback_engine = playback::start_persistent_playback("hevc", &connector_id, render_rect.as_deref())?;
 
     let streaming_active = Arc::new(AtomicBool::new(false));
     let active_fps = Arc::new(AtomicU32::new(30));
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         playback_engine.writer_tx.clone(),
     );
 
-    println!("[READY] Persistent GStreamer HDMI presenter running; waiting for UDP/WebTransport HEVC stream");
+    println!("[READY] Persistent GStreamer HDMI presenter running; waiting for UDP/WebTransport stream");
     let mut sent = 0u64;
     let idle_timeout_sec: u64 = std::env::var("IDLE_TIMEOUT_SEC")
         .ok()
@@ -82,6 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("[CONTROL WS] Received STOP command from independent control socket!");
                         streaming_active.store(false, Ordering::Relaxed);
                         v4l2_decoder::reset_decoder_pipeline();
+                        let _ = playback_engine.ensure_codec("hevc", &connector_id, render_rect.as_deref());
                         while rx.try_recv().is_ok() {}
                         let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                         let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
@@ -99,7 +100,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                     }
                     control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode } => {
-                        println!("[CONTROL WS] Received START command: codec={:?}, res={:?}, fps={:?}, bitrate={:?}, latency_mode={:?}", codec, resolution, fps, bitrate_mbps, latency_mode);
+                        let req_codec = codec.as_deref().unwrap_or("hevc");
+                        println!("[CONTROL WS] Received START command: codec={:?}, res={:?}, fps={:?}, bitrate={:?}, latency_mode={:?}", req_codec, resolution, fps, bitrate_mbps, latency_mode);
+                        let _ = playback_engine.ensure_codec(req_codec, &connector_id, render_rect.as_deref());
                         streaming_active.store(true, Ordering::Relaxed);
                         let res_str = resolution.unwrap_or_else(|| "1920x1080".to_string());
                         let stream_fps = fps.unwrap_or(30);
@@ -160,6 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("[PLAYBACK] Received stop signal; restoring HDMI IP dashboard...");
                             streaming_active.store(false, Ordering::Relaxed);
                             v4l2_decoder::reset_decoder_pipeline();
+                            let _ = playback_engine.ensure_codec("hevc", &connector_id, render_rect.as_deref());
                             while rx.try_recv().is_ok() {}
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                             let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
@@ -178,6 +182,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
                         if frame.codec != "hevc" && frame.codec != "h264" { continue; }
+
+                        let _ = playback_engine.ensure_codec(&frame.codec, &connector_id, render_rect.as_deref());
 
                         // Allow auto-start if a new sequence frame (seq <= 1) arrives
                         if frame.seq <= 1 {
@@ -241,6 +247,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if streaming_active.load(Ordering::Relaxed) {
                             println!("[PLAYBACK] Stream idle timeout; restoring HDMI IP dashboard...");
                             streaming_active.store(false, Ordering::Relaxed);
+                            let _ = playback_engine.ensure_codec("hevc", &connector_id, render_rect.as_deref());
                             while rx.try_recv().is_ok() {}
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                             let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
