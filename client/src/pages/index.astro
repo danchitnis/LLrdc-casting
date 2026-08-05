@@ -160,7 +160,7 @@ let cachedSps = null;
 let cachedPps = null;
 
 function setSettingsDisabled(disabled) {
-  const fields = ['videoSource', 'resolution', 'fps', 'codec'];
+  const fields = ['videoSource', 'resolution', 'fps', 'codec', 'bitrate'];
   fields.forEach(id => {
     const el = document.getElementById(id);
     if (el) {
@@ -444,6 +444,29 @@ function createSyntheticScreenStream(width, height, fps) {
   return canvas.captureStream(fps);
 }
 
+function updateCodecAndResolutionGuardrails() {
+  const codecSelect = document.getElementById('codec');
+  const resSelect = document.getElementById('resolution');
+  if (!codecSelect || !resSelect) return;
+
+  const selectedCodec = codecSelect.value;
+  const res2kOption = resSelect.querySelector('option[value="2560x1440"]');
+  const res4kOption = resSelect.querySelector('option[value="3840x2160"]');
+
+  if (selectedCodec === 'H264') {
+    if (res2kOption) res2kOption.disabled = true;
+    if (res4kOption) res4kOption.disabled = true;
+
+    if (resSelect.value === '2560x1440' || resSelect.value === '3840x2160') {
+      resSelect.value = '1920x1080';
+      log('[GUARDRAIL] H.264 supports up to 1080p on RK3399 hardware decoder; adjusted to 1080p');
+    }
+  } else {
+    if (res2kOption) res2kOption.disabled = false;
+    if (res4kOption) res4kOption.disabled = false;
+  }
+}
+
 function onResolutionChange() {
   const resSelect = document.getElementById('resolution');
   if (!resSelect) return;
@@ -453,9 +476,31 @@ function onResolutionChange() {
   if (codecSelect) {
     if (w >= 2560) {
       codecSelect.value = 'H265';
-    } else {
-      codecSelect.value = 'H264';
     }
+  }
+  updateCodecAndResolutionGuardrails();
+}
+
+function onCodecChange() {
+  updateCodecAndResolutionGuardrails();
+}
+
+function calculateTargetBitrate(bitrateSetting, codec, width, fps) {
+  if (bitrateSetting && bitrateSetting !== 'auto') {
+    const mbps = parseFloat(bitrateSetting);
+    if (!isNaN(mbps) && mbps > 0) {
+      return Math.round(mbps * 1_000_000);
+    }
+  }
+
+  if (codec === 'H265') {
+    if (width >= 3840) return fps >= 60 ? 25_000_000 : 15_000_000;
+    if (width >= 2560) return fps >= 60 ? 14_000_000 : 9_000_000;
+    if (width >= 1920) return fps >= 60 ? 10_000_000 : 6_000_000;
+    return fps >= 60 ? 5_000_000 : 3_000_000;
+  } else {
+    if (width >= 1920) return fps >= 60 ? 16_000_000 : 10_000_000;
+    return fps >= 60 ? 8_000_000 : 5_000_000;
   }
 }
 
@@ -489,15 +534,22 @@ async function toggleScreenShare() {
   const resStr = document.getElementById('resolution').value;
   const targetFps = parseInt(document.getElementById('fps').value, 10);
   const selectedCodec = document.getElementById('codec').value;
+  const bitrateSelect = document.getElementById('bitrate');
+  const bitrateSetting = bitrateSelect ? bitrateSelect.value : 'auto';
 
   const [width, height] = resStr.split('x').map(n => parseInt(n, 10));
+  const targetBitrate = calculateTargetBitrate(bitrateSetting, selectedCodec, width, targetFps);
+  const targetMbps = (targetBitrate / 1_000_000).toFixed(1);
 
   // Update telemetry UI
   const statRes = document.getElementById('statResolution');
   const statCodec = document.getElementById('statCodec');
+  const statBitrate = document.getElementById('statBitrate');
   if (statRes) statRes.textContent = `${resStr} @ ${targetFps} FPS`;
   if (statCodec) statCodec.textContent = selectedCodec === 'H265' ? 'HEVC / H.265' : 'H.264';
+  if (statBitrate) statBitrate.textContent = `${targetMbps} Mbps (${bitrateSetting === 'auto' ? 'Auto' : 'Custom'})`;
 
+  log(`[CONFIG] Codec: ${selectedCodec} | Res: ${resStr} @ ${targetFps} FPS | Bandwidth Cap: ${targetMbps} Mbps`);
   log(`[CONNECTING] WebTransport -> https://${boardIp}:${boardPort}`);
   updateStatus('connecting', 'CONNECTING');
 
@@ -525,7 +577,13 @@ async function toggleScreenShare() {
 
     if (controlWs && controlWs.readyState === WebSocket.OPEN) {
       try {
-        controlWs.send(JSON.stringify({ type: 'start', codec: selectedCodec, resolution: resStr, fps: targetFps }));
+        controlWs.send(JSON.stringify({
+          type: 'start',
+          codec: selectedCodec,
+          resolution: resStr,
+          fps: targetFps,
+          bitrate_mbps: parseFloat(targetMbps)
+        }));
       } catch (e) {}
     }
 
@@ -587,12 +645,6 @@ async function toggleScreenShare() {
         stopStreaming();
       }
     });
-
-    const targetBitrate = (activeWidth >= 3840)
-      ? (targetFps >= 60 ? 20_000_000 : 12_000_000)
-      : (activeWidth >= 2560)
-      ? (targetFps >= 60 ? 14_000_000 : 8_000_000)
-      : (targetFps >= 60 ? 8_000_000 : 4_000_000);
 
     videoEncoder.configure({
       codec: codecString,
@@ -755,6 +807,13 @@ function handleServerStatusUpdate(msg) {
     }
   }
 
+  if (msg.bitrate_mbps && msg.bitrate_mbps > 0) {
+    const statBitrate = document.getElementById('statBitrate');
+    if (statBitrate) {
+      statBitrate.textContent = `${msg.bitrate_mbps.toFixed(1)} Mbps`;
+    }
+  }
+
   if (msg.state === 'STREAMING') {
     if (isStreaming) {
       updateStatus('active', 'STREAMING');
@@ -851,6 +910,13 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (resSelect) {
     resSelect.addEventListener('change', onResolutionChange);
   }
+
+  const codecSelect = document.getElementById('codec');
+  if (codecSelect) {
+    codecSelect.addEventListener('change', onCodecChange);
+  }
+
+  updateCodecAndResolutionGuardrails();
 
   try {
     const res = await fetch('/cert_hash');
