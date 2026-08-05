@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let active_fps = Arc::new(AtomicU32::new(30));
     let active_res = Arc::new(Mutex::new("1920x1080".to_string()));
     let active_bitrate_mbps = Arc::new(Mutex::new(10.0f32));
+    let active_latency_mode = Arc::new(Mutex::new("ULL".to_string()));
 
     // 3. Background feeder thread for native HEVC clock/IP dashboard
     dashboard::spawn_idle_dashboard_thread(
@@ -83,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         v4l2_decoder::reset_decoder_pipeline();
                         while rx.try_recv().is_ok() {}
                         let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
+                        let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
                         control_channel.send_telemetry(control::TelemetryMessage::Status {
                             state: "IDLE".to_string(),
                             resolution: "0x0".to_string(),
@@ -93,17 +95,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             display_resolution: format!("{}x{}", screen_w, screen_h),
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
+                            latency_mode: lat_mode,
                         });
                     }
-                    control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps } => {
-                        println!("[CONTROL WS] Received START command: codec={:?}, res={:?}, fps={:?}, bitrate={:?}", codec, resolution, fps, bitrate_mbps);
+                    control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode } => {
+                        println!("[CONTROL WS] Received START command: codec={:?}, res={:?}, fps={:?}, bitrate={:?}, latency_mode={:?}", codec, resolution, fps, bitrate_mbps, latency_mode);
                         streaming_active.store(true, Ordering::Relaxed);
                         let res_str = resolution.unwrap_or_else(|| "1920x1080".to_string());
                         let stream_fps = fps.unwrap_or(30);
                         let bw = bitrate_mbps.unwrap_or(10.0);
+                        let lat_mode = latency_mode.unwrap_or_else(|| "ULL".to_string());
                         active_fps.store(stream_fps, Ordering::Relaxed);
                         if let Ok(mut l) = active_res.lock() { *l = res_str.clone(); }
                         if let Ok(mut l) = active_bitrate_mbps.lock() { *l = bw; }
+                        if let Ok(mut l) = active_latency_mode.lock() { *l = lat_mode.clone(); }
                         control_channel.send_telemetry(control::TelemetryMessage::Status {
                             state: "STREAMING".to_string(),
                             resolution: res_str,
@@ -114,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             display_resolution: format!("{}x{}", screen_w, screen_h),
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
+                            latency_mode: lat_mode,
                         });
                     }
                     control::ControlCommand::Ping => {
@@ -129,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let cur_fps = if is_act { active_fps.load(Ordering::Relaxed) } else { 0 };
                         let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
+                        let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
                         control_channel.send_telemetry(control::TelemetryMessage::Status {
                             state: state.to_string(),
                             resolution: cur_res,
@@ -139,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             display_resolution: format!("{}x{}", screen_w, screen_h),
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
+                            latency_mode: lat_mode,
                         });
                     }
                 }
@@ -154,6 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             v4l2_decoder::reset_decoder_pipeline();
                             while rx.try_recv().is_ok() {}
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
+                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
                             control_channel.send_telemetry(control::TelemetryMessage::Status {
                                 state: "IDLE".to_string(),
                                 resolution: "0x0".to_string(),
@@ -164,6 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 display_resolution: format!("{}x{}", screen_w, screen_h),
                                 display_fps: vrefresh,
                                 bitrate_mbps: bw,
+                                latency_mode: lat_mode,
                             });
                             continue;
                         }
@@ -176,6 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Ok(mut l) = active_res.lock() { *l = frame_res.clone(); }
                             let cur_fps = active_fps.load(Ordering::Relaxed);
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
+                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
                             if !was_active {
                                 control_channel.send_telemetry(control::TelemetryMessage::Status {
                                     state: "STREAMING".to_string(),
@@ -187,6 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     display_resolution: format!("{}x{}", screen_w, screen_h),
                                     display_fps: vrefresh,
                                     bitrate_mbps: bw,
+                                    latency_mode: lat_mode,
                                 });
                             }
                         }
@@ -208,6 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let frame_res = format!("{}x{}", frame.width, frame.height);
                             let cur_fps = active_fps.load(Ordering::Relaxed);
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
+                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
                             control_channel.send_telemetry(control::TelemetryMessage::Status {
                                 state: "STREAMING".to_string(),
                                 resolution: frame_res,
@@ -218,6 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 display_resolution: format!("{}x{}", screen_w, screen_h),
                                 display_fps: vrefresh,
                                 bitrate_mbps: bw,
+                                latency_mode: lat_mode,
                             });
                         }
                     }
@@ -229,6 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             streaming_active.store(false, Ordering::Relaxed);
                             while rx.try_recv().is_ok() {}
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
+                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
                             control_channel.send_telemetry(control::TelemetryMessage::Status {
                                 state: "IDLE".to_string(),
                                 resolution: "0x0".to_string(),
@@ -239,6 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 display_resolution: format!("{}x{}", screen_w, screen_h),
                                 display_fps: vrefresh,
                                 bitrate_mbps: bw,
+                                latency_mode: lat_mode,
                             });
                         }
                     }

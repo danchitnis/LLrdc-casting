@@ -16,6 +16,8 @@ pub enum ControlCommand {
         fps: Option<u32>,
         #[serde(default)]
         bitrate_mbps: Option<f32>,
+        #[serde(default)]
+        latency_mode: Option<String>,
     },
     Stop,
     Ping,
@@ -40,6 +42,8 @@ pub enum TelemetryMessage {
         display_fps: u32,
         #[serde(default)]
         bitrate_mbps: f32,
+        #[serde(default)]
+        latency_mode: String,
     },
     Event {
         level: String,

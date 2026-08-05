@@ -160,7 +160,7 @@ let cachedSps = null;
 let cachedPps = null;
 
 function setSettingsDisabled(disabled) {
-  const fields = ['videoSource', 'resolution', 'fps', 'codec', 'bitrate'];
+  const fields = ['videoSource', 'resolution', 'fps', 'codec', 'bitrate', 'latencyMode'];
   fields.forEach(id => {
     const el = document.getElementById(id);
     if (el) {
@@ -536,20 +536,33 @@ async function toggleScreenShare() {
   const selectedCodec = document.getElementById('codec').value;
   const bitrateSelect = document.getElementById('bitrate');
   const bitrateSetting = bitrateSelect ? bitrateSelect.value : 'auto';
+  const latencySelect = document.getElementById('latencyMode');
+  const latencySetting = latencySelect ? latencySelect.value : 'ULL';
 
   const [width, height] = resStr.split('x').map(n => parseInt(n, 10));
   const targetBitrate = calculateTargetBitrate(bitrateSetting, selectedCodec, width, targetFps);
   const targetMbps = (targetBitrate / 1_000_000).toFixed(1);
 
+  const webcodecsLatencyMode = (latencySetting === 'quality') ? 'quality' : 'realtime';
+  const keyframeInterval = (latencySetting === 'quality')
+    ? targetFps * 2
+    : (latencySetting === 'balanced' ? targetFps : Math.max(5, Math.floor(targetFps / 2)));
+
+  const encoderModeLabel = (latencySetting === 'quality')
+    ? 'High Quality (Buffered)'
+    : (latencySetting === 'balanced' ? 'Balanced LAN' : 'ULL (Ultra Low Latency)');
+
   // Update telemetry UI
   const statRes = document.getElementById('statResolution');
   const statCodec = document.getElementById('statCodec');
   const statBitrate = document.getElementById('statBitrate');
+  const statEncoderMode = document.getElementById('statEncoderMode');
   if (statRes) statRes.textContent = `${resStr} @ ${targetFps} FPS`;
   if (statCodec) statCodec.textContent = selectedCodec === 'H265' ? 'HEVC / H.265' : 'H.264';
   if (statBitrate) statBitrate.textContent = `${targetMbps} Mbps (${bitrateSetting === 'auto' ? 'Auto' : 'Custom'})`;
+  if (statEncoderMode) statEncoderMode.textContent = encoderModeLabel;
 
-  log(`[CONFIG] Codec: ${selectedCodec} | Res: ${resStr} @ ${targetFps} FPS | Bandwidth Cap: ${targetMbps} Mbps`);
+  log(`[CONFIG] Codec: ${selectedCodec} | Res: ${resStr} @ ${targetFps} FPS | Bandwidth: ${targetMbps} Mbps | Priority: ${encoderModeLabel}`);
   log(`[CONNECTING] WebTransport -> https://${boardIp}:${boardPort}`);
   updateStatus('connecting', 'CONNECTING');
 
@@ -582,7 +595,8 @@ async function toggleScreenShare() {
           codec: selectedCodec,
           resolution: resStr,
           fps: targetFps,
-          bitrate_mbps: parseFloat(targetMbps)
+          bitrate_mbps: parseFloat(targetMbps),
+          latency_mode: latencySetting
         }));
       } catch (e) {}
     }
@@ -652,7 +666,7 @@ async function toggleScreenShare() {
       height: activeHeight,
       bitrate: targetBitrate,
       framerate: targetFps,
-      latencyMode: 'realtime',
+      latencyMode: webcodecsLatencyMode,
       hardwareAcceleration: 'prefer-hardware'
     });
 
@@ -705,7 +719,6 @@ async function toggleScreenShare() {
       lastFrameTime = now;
 
       frameCount++;
-      const keyframeInterval = Math.max(10, Math.floor(targetFps / 2));
       const needKeyFrame = (frameCount <= 5 || frameCount % keyframeInterval === 0 || forceNextKeyframe);
       if (forceNextKeyframe) forceNextKeyframe = false;
 
@@ -811,6 +824,16 @@ function handleServerStatusUpdate(msg) {
     const statBitrate = document.getElementById('statBitrate');
     if (statBitrate) {
       statBitrate.textContent = `${msg.bitrate_mbps.toFixed(1)} Mbps`;
+    }
+  }
+
+  if (msg.latency_mode) {
+    const statEncoderMode = document.getElementById('statEncoderMode');
+    if (statEncoderMode) {
+      const modeLabel = (msg.latency_mode === 'quality')
+        ? 'High Quality (Buffered)'
+        : (msg.latency_mode === 'balanced' ? 'Balanced LAN' : 'ULL (Ultra Low Latency)');
+      statEncoderMode.textContent = modeLabel;
     }
   }
 

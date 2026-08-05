@@ -1,5 +1,7 @@
 # 1. HTML Client Builder Stage
+ARG BUILD_DATE=unknown
 FROM node:latest AS html-builder
+ARG BUILD_DATE
 WORKDIR /app/client
 COPY client/package*.json ./
 RUN npm ci || npm install
