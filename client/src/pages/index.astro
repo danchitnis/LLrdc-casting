@@ -525,7 +525,7 @@ async function toggleScreenShare() {
 
     if (controlWs && controlWs.readyState === WebSocket.OPEN) {
       try {
-        controlWs.send(JSON.stringify({ type: 'start', codec: selectedCodec, resolution: resStr }));
+        controlWs.send(JSON.stringify({ type: 'start', codec: selectedCodec, resolution: resStr, fps: targetFps }));
       } catch (e) {}
     }
 
@@ -720,7 +720,11 @@ async function stopStreaming() {
   }
 
   if (!isRemoteStreaming) {
-    updateStatus('idle', 'IDLE');
+    if (controlWs && controlWs.readyState === WebSocket.OPEN) {
+      updateStatus('connected', 'CONNECTED');
+    } else {
+      updateStatus('disconnected', 'DISCONNECTED');
+    }
 
     const toggleBtn = document.getElementById('toggleBtn');
     const toggleText = document.getElementById('toggleText');
@@ -743,6 +747,14 @@ function handleServerStatusUpdate(msg) {
   const toggleBtn = document.getElementById('toggleBtn');
   const toggleText = document.getElementById('toggleText');
 
+  if (msg.display_resolution) {
+    const statDisplay = document.getElementById('statDisplay');
+    if (statDisplay) {
+      const fpsStr = msg.display_fps ? ` @ ${msg.display_fps} FPS` : '';
+      statDisplay.textContent = `${msg.display_resolution}${fpsStr}`;
+    }
+  }
+
   if (msg.state === 'STREAMING') {
     if (isStreaming) {
       updateStatus('active', 'STREAMING');
@@ -764,12 +776,23 @@ function handleServerStatusUpdate(msg) {
     }
     if (msg.resolution && msg.resolution !== '0x0') {
       const statRes = document.getElementById('statResolution');
-      if (statRes) statRes.textContent = msg.resolution;
+      if (statRes) {
+        if (msg.resolution.includes('@')) {
+          statRes.textContent = msg.resolution;
+        } else {
+          const fpsVal = msg.fps || 30;
+          statRes.textContent = `${msg.resolution} @ ${fpsVal} FPS`;
+        }
+      }
     }
   } else if (msg.state === 'IDLE') {
     isRemoteStreaming = false;
     if (!isStreaming) {
-      updateStatus('idle', 'IDLE');
+      if (controlWs && controlWs.readyState === WebSocket.OPEN) {
+        updateStatus('connected', 'CONNECTED');
+      } else {
+        updateStatus('disconnected', 'DISCONNECTED');
+      }
       setSettingsDisabled(false);
       if (toggleBtn && toggleText) {
         toggleText.textContent = 'Start Screen Sharing';
@@ -787,10 +810,13 @@ function initControlSocket() {
   const host = window.location.host || '192.168.1.72:8080';
   const wsUrl = `${wsProtocol}//${host}/ws`;
 
+  updateStatus('connecting', 'CONNECTING...');
+
   try {
     controlWs = new WebSocket(wsUrl);
     controlWs.onopen = () => {
       log(`[CONTROL SOCKET] Connected to independent command & telemetry channel (${wsUrl})`);
+      updateStatus('connected', 'CONNECTED');
       try {
         controlWs.send(JSON.stringify({ type: 'get_status' }));
       } catch (e) {}
@@ -799,17 +825,23 @@ function initControlSocket() {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'status') {
-          log(`[TELEMETRY] Device State: ${msg.state} | Res: ${msg.resolution} | Submitted Frames: ${msg.frames_submitted}`);
+          log(`[TELEMETRY] Device State: ${msg.state} | Res: ${msg.resolution} | Display: ${msg.display_resolution || 'N/A'} @ ${msg.display_fps || 0}FPS | Frames: ${msg.frames_submitted}`);
           handleServerStatusUpdate(msg);
         } else if (msg.type === 'pong') {
           log(`[CONTROL SOCKET] Received pong from device`);
         }
       } catch (e) {}
     };
+    controlWs.onerror = () => {
+      updateStatus('disconnected', 'DISCONNECTED');
+    };
     controlWs.onclose = () => {
+      updateStatus('disconnected', 'DISCONNECTED');
       setTimeout(initControlSocket, 3000);
     };
-  } catch (e) {}
+  } catch (e) {
+    updateStatus('disconnected', 'DISCONNECTED');
+  }
 }
 
 window.addEventListener('DOMContentLoaded', async () => {

@@ -20,8 +20,8 @@ const { title = "LLrdc Casting", subtitle = "Ultra Low Latency Hardware Video St
     </div>
   </div>
   <div class="status-container">
-    <span class="status-indicator-dot idle" id="statusDot"></span>
-    <span id="statusBadge" class="status-badge idle">IDLE</span>
+    <span class="status-indicator-dot disconnected" id="statusDot"></span>
+    <span id="statusBadge" class="status-badge disconnected">CONNECTING...</span>
   </div>
 </header>
 
@@ -91,6 +91,11 @@ const { title = "LLrdc Casting", subtitle = "Ultra Low Latency Hardware Video St
     background-color: #64748b;
   }
 
+  .status-indicator-dot.connected {
+    background-color: #10b981;
+    box-shadow: 0 0 10px #10b981;
+  }
+
   .status-indicator-dot.active {
     background-color: #10b981;
     box-shadow: 0 0 10px #10b981;
@@ -103,7 +108,8 @@ const { title = "LLrdc Casting", subtitle = "Ultra Low Latency Hardware Video St
     animation: pulse 1s infinite;
   }
 
-  .status-indicator-dot.error {
+  .status-indicator-dot.error,
+  .status-indicator-dot.disconnected {
     background-color: #ef4444;
     box-shadow: 0 0 10px #ef4444;
   }
@@ -116,9 +122,11 @@ const { title = "LLrdc Casting", subtitle = "Ultra Low Latency Hardware Video St
   }
 
   .status-badge.idle { color: #94a3b8; }
+  .status-badge.connected { color: #34d399; }
   .status-badge.active { color: #34d399; }
   .status-badge.connecting { color: #fbbf24; }
-  .status-badge.error { color: #f87171; }
+  .status-badge.error,
+  .status-badge.disconnected { color: #f87171; }
 
   @keyframes pulse {
     0% { opacity: 1; transform: scale(1); }

@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlCommand {
-    Start { codec: Option<String>, resolution: Option<String> },
+    Start { codec: Option<String>, resolution: Option<String>, fps: Option<u32> },
     Stop,
     Ping,
     GetStatus,
@@ -28,6 +28,10 @@ pub enum TelemetryMessage {
         frames_submitted: u64,
         #[serde(default)]
         latency_ms: f32,
+        #[serde(default)]
+        display_resolution: String,
+        #[serde(default)]
+        display_fps: u32,
     },
     Event {
         level: String,
