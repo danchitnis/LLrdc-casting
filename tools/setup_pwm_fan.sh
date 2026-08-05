@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Script to configure and control PWM1 fan on Radxa ROCK 4C+ (RK3399)
+# Script to configure and control PWM0 fan (Pin 7) on Radxa ROCK 4C+ (RK3399)
 # Designed to be executed directly on the device (or via docker/deployment scripts).
 
 COMMAND="${1:-setup}"
 ARG2="${2:-}"
 
-OVERLAY_NAME="rockchip-rk3399-pwm1-fan"
+OVERLAY_NAME="rockchip-rk3399-pwm0-fan"
 DTS_PATH="/tmp/${OVERLAY_NAME}.dts"
 DTBO_PATH="/tmp/${OVERLAY_NAME}.dtbo"
 
@@ -41,11 +41,11 @@ function setup_local() {
 	compatible = "rockchip,rk3399";
 
 	fragment@0 {
-		target = <&pwm1>;
+		target = <&pwm0>;
 		__overlay__ {
 			status = "okay";
-			pinctrl-names = "active";
-			pinctrl-0 = <&pwm1_pin>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pwm0_pin>;
 		};
 	};
 
@@ -54,7 +54,7 @@ function setup_local() {
 		__overlay__ {
 			fan0: pwm-fan {
 				compatible = "pwm-fan";
-				pwms = <&pwm1 0 50000 0>;
+				pwms = <&pwm0 0 1000000 0>;
 				cooling-levels = <0 100 150 200 255>;
 				#cooling-cells = <2>;
 			};
@@ -64,6 +64,22 @@ function setup_local() {
 	fragment@2 {
 		target = <&cpu_thermal>;
 		__overlay__ {
+			polling-delay = <3000>;
+			polling-delay-passive = <3000>;
+
+			trips {
+				cpu_alert0: cpu_alert0 {
+					temperature = <50000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+				cpu_alert1: cpu_alert1 {
+					temperature = <65000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+			};
+
 			cooling-maps {
 				map2 {
 					trip = <&cpu_alert0>;
