@@ -117,6 +117,9 @@ where
         }
     });
 
+    // Trigger status query so newly connected client gets current status immediately
+    let _ = cmd_tx.send(ControlCommand::GetStatus).await;
+
     // Handle incoming JSON control commands from browser
     while let Some(msg_res) = ws_rx.next().await {
         match msg_res {

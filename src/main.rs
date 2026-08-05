@@ -313,6 +313,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     control::ControlCommand::Start { codec, resolution } => {
                         println!("[CONTROL WS] Received START command: codec={:?}, res={:?}", codec, resolution);
                         streaming_active.store(true, Ordering::Relaxed);
+                        let res_str = resolution.unwrap_or_else(|| "1920x1080".to_string());
+                        control_channel.send_telemetry(control::TelemetryMessage::Status {
+                            state: "STREAMING".to_string(),
+                            resolution: res_str,
+                            fps: 30,
+                            delivery_rate: 100.0,
+                            frames_submitted: sent,
+                            latency_ms: 0.0,
+                        });
                     }
                     control::ControlCommand::Ping => {
                         control_channel.send_telemetry(control::TelemetryMessage::Pong);
@@ -340,13 +349,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             streaming_active.store(false, Ordering::Relaxed);
                             v4l2_decoder::reset_decoder_pipeline();
                             while rx.try_recv().is_ok() {}
+                            control_channel.send_telemetry(control::TelemetryMessage::Status {
+                                state: "IDLE".to_string(),
+                                resolution: "0x0".to_string(),
+                                fps: 0,
+                                delivery_rate: 100.0,
+                                frames_submitted: sent,
+                                latency_ms: 0.0,
+                            });
                             continue;
                         }
                         if frame.codec != "hevc" && frame.codec != "h264" { continue; }
 
                         // Allow auto-start if a new sequence frame (seq <= 1) arrives
                         if frame.seq <= 1 {
-                            streaming_active.store(true, Ordering::Relaxed);
+                            let was_active = streaming_active.swap(true, Ordering::Relaxed);
+                            if !was_active {
+                                control_channel.send_telemetry(control::TelemetryMessage::Status {
+                                    state: "STREAMING".to_string(),
+                                    resolution: format!("{}x{}", frame.width, frame.height),
+                                    fps: 30,
+                                    delivery_rate: 100.0,
+                                    frames_submitted: sent,
+                                    latency_ms: 0.0,
+                                });
+                            }
                         }
 
                         // If streaming was explicitly stopped, discard trailing/out-of-order frames
@@ -380,6 +407,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("[PLAYBACK] Stream idle timeout; restoring HDMI IP dashboard...");
                             streaming_active.store(false, Ordering::Relaxed);
                             while rx.try_recv().is_ok() {}
+                            control_channel.send_telemetry(control::TelemetryMessage::Status {
+                                state: "IDLE".to_string(),
+                                resolution: "0x0".to_string(),
+                                fps: 0,
+                                delivery_rate: 100.0,
+                                frames_submitted: sent,
+                                latency_ms: 0.0,
+                            });
                         }
                     }
                 }

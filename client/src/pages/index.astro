@@ -100,6 +100,15 @@ import LogConsole from '../components/LogConsole.astro';
       box-shadow: 0 6px 20px rgba(220, 38, 38, 0.5);
     }
 
+    .btn-primary.stop:disabled {
+      background: linear-gradient(135deg, #7f1d1d, #991b1b);
+      border-color: rgba(239, 68, 68, 0.4);
+      color: #fca5a5;
+      cursor: not-allowed;
+      box-shadow: 0 4px 16px rgba(220, 38, 38, 0.2);
+      opacity: 0.85;
+    }
+
     .btn-primary:disabled {
       background: #1e293b;
       border-color: #334155;
@@ -140,6 +149,7 @@ let uniStreamWriter = null;
 let mediaStream = null;
 let videoEncoder = null;
 let isStreaming = false;
+let isRemoteStreaming = false;
 let seqNum = 0;
 let lastKeyFrameTime = 0;
 let autoCertHash = null;
@@ -463,6 +473,7 @@ function getCodecString(codec, width, fps) {
 }
 
 async function toggleScreenShare() {
+  if (isRemoteStreaming) return;
   if (isStreaming) {
     await stopStreaming();
     return;
@@ -708,19 +719,67 @@ async function stopStreaming() {
     transport = null;
   }
 
-  updateStatus('idle', 'IDLE');
+  if (!isRemoteStreaming) {
+    updateStatus('idle', 'IDLE');
+
+    const toggleBtn = document.getElementById('toggleBtn');
+    const toggleText = document.getElementById('toggleText');
+    if (toggleBtn && toggleText) {
+      toggleText.textContent = 'Start Screen Sharing';
+      toggleBtn.className = 'btn-primary';
+      toggleBtn.disabled = false;
+    }
+
+    // Re-enable settings fields when screen sharing stops
+    setSettingsDisabled(false);
+  }
+
+  log('[STOPPED] Screen sharing session closed.');
+}
+
+function handleServerStatusUpdate(msg) {
+  if (!msg || !msg.state) return;
 
   const toggleBtn = document.getElementById('toggleBtn');
   const toggleText = document.getElementById('toggleText');
-  if (toggleBtn && toggleText) {
-    toggleText.textContent = 'Start Screen Sharing';
-    toggleBtn.className = 'btn-primary';
+
+  if (msg.state === 'STREAMING') {
+    if (isStreaming) {
+      updateStatus('active', 'STREAMING');
+      setSettingsDisabled(true);
+      if (toggleBtn && toggleText) {
+        toggleText.textContent = 'Stop Screen Sharing';
+        toggleBtn.className = 'btn-primary stop';
+        toggleBtn.disabled = false;
+      }
+    } else {
+      isRemoteStreaming = true;
+      updateStatus('active', 'STREAMING (IN USE)');
+      setSettingsDisabled(true);
+      if (toggleBtn && toggleText) {
+        toggleText.textContent = 'Screen Sharing Active (In Use)';
+        toggleBtn.className = 'btn-primary stop';
+        toggleBtn.disabled = true;
+      }
+    }
+    if (msg.resolution && msg.resolution !== '0x0') {
+      const statRes = document.getElementById('statResolution');
+      if (statRes) statRes.textContent = msg.resolution;
+    }
+  } else if (msg.state === 'IDLE') {
+    isRemoteStreaming = false;
+    if (!isStreaming) {
+      updateStatus('idle', 'IDLE');
+      setSettingsDisabled(false);
+      if (toggleBtn && toggleText) {
+        toggleText.textContent = 'Start Screen Sharing';
+        toggleBtn.className = 'btn-primary';
+        toggleBtn.disabled = false;
+      }
+    } else {
+      stopStreaming();
+    }
   }
-
-  // Re-enable settings fields when screen sharing stops
-  setSettingsDisabled(false);
-
-  log('[STOPPED] Screen sharing session closed.');
 }
 
 function initControlSocket() {
@@ -732,12 +791,16 @@ function initControlSocket() {
     controlWs = new WebSocket(wsUrl);
     controlWs.onopen = () => {
       log(`[CONTROL SOCKET] Connected to independent command & telemetry channel (${wsUrl})`);
+      try {
+        controlWs.send(JSON.stringify({ type: 'get_status' }));
+      } catch (e) {}
     };
     controlWs.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'status') {
           log(`[TELEMETRY] Device State: ${msg.state} | Res: ${msg.resolution} | Submitted Frames: ${msg.frames_submitted}`);
+          handleServerStatusUpdate(msg);
         } else if (msg.type === 'pong') {
           log(`[CONTROL SOCKET] Received pong from device`);
         }

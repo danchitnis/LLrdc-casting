@@ -9,3 +9,5 @@ bin/
 client/.astro/
 dist/
 client/dist/
+client/index.html
+.opencode

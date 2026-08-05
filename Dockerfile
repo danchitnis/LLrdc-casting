@@ -1,13 +1,23 @@
-# The ARM64 binary is compiled locally. The target only loads this runtime image.
+# 1. HTML Client Builder Stage
+FROM node:latest AS html-builder
+WORKDIR /app/client
+COPY client/package*.json ./
+RUN npm ci || npm install
+COPY client ./
+RUN npm run build
+
+# 2. Rust Binary Builder Stage
 FROM rust:1-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libdrm-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml ./
 COPY client ./client
+COPY --from=html-builder /app/client/dist/index.html ./client/index.html
 COPY src ./src
 ARG BUILD_DATE=unknown
 RUN cargo build --release
 
+# 3. Runtime Stage
 # GStreamer 1.26 contains v4l2slh265dec, the userspace implementation of the
 # RK3399 rkvdec stateless request API.
 FROM debian:trixie-slim
