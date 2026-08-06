@@ -42,6 +42,10 @@ export interface ServerStatusMessage {
   bitrate_mbps?: number;
   latency_mode?: string;
   frames_submitted?: number;
+  edid_name?: string;
+  edid_type?: string;
+  edid_max_res?: string;
+  edid_max_fps?: number;
 }
 
 declare global {
@@ -557,6 +561,22 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
 
   const toggleBtn = document.getElementById('toggleBtn');
   const toggleText = document.getElementById('toggleText');
+
+  if (msg.edid_name || msg.edid_type) {
+    const statEdidName = document.getElementById('statEdidName');
+    if (statEdidName) {
+      const typeStr = msg.edid_type ? ` (${msg.edid_type})` : '';
+      statEdidName.textContent = `${msg.edid_name || 'HDMI Monitor'}${typeStr}`;
+    }
+  }
+
+  if (msg.edid_max_res || msg.edid_max_fps) {
+    const statEdidMax = document.getElementById('statEdidMax');
+    if (statEdidMax) {
+      const fpsStr = msg.edid_max_fps ? ` @ ${msg.edid_max_fps} FPS` : '';
+      statEdidMax.textContent = `${msg.edid_max_res || '1920x1080'}${fpsStr}`;
+    }
+  }
 
   if (msg.display_resolution) {
     const statDisplay = document.getElementById('statDisplay');

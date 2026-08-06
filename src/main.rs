@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // 1. Auto-detect display geometry once before starting GStreamer
-    let (screen_w, screen_h, vrefresh, connector_id, render_rect) = playback::autodetect_display_info();
+    let (screen_w, screen_h, vrefresh, connector_id, render_rect, edid_info) = playback::autodetect_display_info();
 
     // 2. Start single persistent GStreamer pipeline
     let mut playback_engine = playback::start_persistent_playback("hevc", &connector_id, render_rect.as_deref())?;
@@ -97,6 +97,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
                             latency_mode: lat_mode,
+                            edid_name: edid_info.name.clone(),
+                            edid_type: edid_info.conn_type.clone(),
+                            edid_max_res: edid_info.max_res.clone(),
+                            edid_max_fps: edid_info.max_fps,
                         });
                     }
                     control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode } => {
@@ -123,6 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
                             latency_mode: lat_mode,
+                            edid_name: edid_info.name.clone(),
+                            edid_type: edid_info.conn_type.clone(),
+                            edid_max_res: edid_info.max_res.clone(),
+                            edid_max_fps: edid_info.max_fps,
                         });
                     }
                     control::ControlCommand::Ping => {
@@ -150,6 +158,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
                             latency_mode: lat_mode,
+                            edid_name: edid_info.name.clone(),
+                            edid_type: edid_info.conn_type.clone(),
+                            edid_max_res: edid_info.max_res.clone(),
+                            edid_max_fps: edid_info.max_fps,
                         });
                     }
                 }
@@ -178,6 +190,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 display_fps: vrefresh,
                                 bitrate_mbps: bw,
                                 latency_mode: lat_mode,
+                                edid_name: edid_info.name.clone(),
+                                edid_type: edid_info.conn_type.clone(),
+                                edid_max_res: edid_info.max_res.clone(),
+                                edid_max_fps: edid_info.max_fps,
                             });
                             continue;
                         }
@@ -205,6 +221,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     display_fps: vrefresh,
                                     bitrate_mbps: bw,
                                     latency_mode: lat_mode,
+                                    edid_name: edid_info.name.clone(),
+                                    edid_type: edid_info.conn_type.clone(),
+                                    edid_max_res: edid_info.max_res.clone(),
+                                    edid_max_fps: edid_info.max_fps,
                                 });
                             }
                         }
@@ -227,18 +247,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let cur_fps = active_fps.load(Ordering::Relaxed);
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                             let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
-                            control_channel.send_telemetry(control::TelemetryMessage::Status {
-                                state: "STREAMING".to_string(),
-                                resolution: frame_res,
-                                fps: cur_fps,
-                                delivery_rate: 100.0,
-                                frames_submitted: sent,
-                                latency_ms,
-                                display_resolution: format!("{}x{}", screen_w, screen_h),
-                                display_fps: vrefresh,
-                                bitrate_mbps: bw,
-                                latency_mode: lat_mode,
-                            });
+                                control_channel.send_telemetry(control::TelemetryMessage::Status {
+                                    state: "STREAMING".to_string(),
+                                    resolution: frame_res,
+                                    fps: cur_fps,
+                                    delivery_rate: 100.0,
+                                    frames_submitted: sent,
+                                    latency_ms: 0.0,
+                                    display_resolution: format!("{}x{}", screen_w, screen_h),
+                                    display_fps: vrefresh,
+                                    bitrate_mbps: bw,
+                                    latency_mode: lat_mode,
+                                    edid_name: edid_info.name.clone(),
+                                    edid_type: edid_info.conn_type.clone(),
+                                    edid_max_res: edid_info.max_res.clone(),
+                                    edid_max_fps: edid_info.max_fps,
+                                });
                         }
                     }
                     Ok(None) => break, // Channel closed
@@ -262,6 +286,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 display_fps: vrefresh,
                                 bitrate_mbps: bw,
                                 latency_mode: lat_mode,
+                                edid_name: edid_info.name.clone(),
+                                edid_type: edid_info.conn_type.clone(),
+                                edid_max_res: edid_info.max_res.clone(),
+                                edid_max_fps: edid_info.max_fps,
                             });
                         }
                     }

@@ -44,6 +44,14 @@ pub enum TelemetryMessage {
         bitrate_mbps: f32,
         #[serde(default)]
         latency_mode: String,
+        #[serde(default)]
+        edid_name: String,
+        #[serde(default)]
+        edid_type: String,
+        #[serde(default)]
+        edid_max_res: String,
+        #[serde(default)]
+        edid_max_fps: u32,
     },
     Event {
         level: String,

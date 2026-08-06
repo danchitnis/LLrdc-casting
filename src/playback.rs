@@ -32,9 +32,9 @@ impl PlaybackEngine {
     }
 }
 
-pub fn autodetect_display_info() -> (u32, u32, u32, String, Option<String>) {
+pub fn autodetect_display_info() -> (u32, u32, u32, String, Option<String>, crate::drm_kms::EdidInfo) {
     if let Ok(card) = crate::drm_kms::open_display_card() {
-        if let Ok((screen_w, screen_h, mode, conn_handle, _)) = crate::drm_kms::autodetect_display_mode(&card) {
+        if let Ok((screen_w, screen_h, mode, conn_handle, _, edid_info)) = crate::drm_kms::autodetect_display_mode(&card) {
             let conn_id = u32::from(conn_handle).to_string();
             let target_w = screen_w.min(screen_h * 16 / 9);
             let target_h = screen_h.min(screen_w * 9 / 16);
@@ -44,12 +44,12 @@ pub fn autodetect_display_info() -> (u32, u32, u32, String, Option<String>) {
             let refresh = mode.vrefresh() as u32;
             crate::drm_kms::drop_master(&card);
             drop(card);
-            println!("[DISPLAY INFO] Auto-detected HDMI Connector {}, {}x{}@{}Hz, rect={}", conn_id, screen_w, screen_h, refresh, rect);
-            return (screen_w, screen_h, refresh, conn_id, Some(rect));
+            println!("[DISPLAY INFO] Auto-detected HDMI Connector {}, {}x{}@{}Hz, name='{}', rect={}", conn_id, screen_w, screen_h, refresh, edid_info.name, rect);
+            return (screen_w, screen_h, refresh, conn_id, Some(rect), edid_info);
         }
         crate::drm_kms::drop_master(&card);
     }
-    (1920, 1080, 60, "54".into(), None)
+    (1920, 1080, 60, "54".into(), None, crate::drm_kms::EdidInfo::default())
 }
 
 pub fn start_persistent_playback(
