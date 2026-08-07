@@ -18,6 +18,18 @@ pub enum ControlCommand {
         bitrate_mbps: Option<f32>,
         #[serde(default)]
         latency_mode: Option<String>,
+        #[serde(default)]
+        aspect_mode: Option<String>,
+        #[serde(default)]
+        source_width: Option<u32>,
+        #[serde(default)]
+        source_height: Option<u32>,
+        #[serde(default)]
+        encoded_width: Option<u32>,
+        #[serde(default)]
+        encoded_height: Option<u32>,
+        #[serde(default)]
+        content_rect: Option<String>,
     },
     Stop,
     Ping,
@@ -52,6 +64,14 @@ pub enum TelemetryMessage {
         edid_max_res: String,
         #[serde(default)]
         edid_max_fps: u32,
+        #[serde(default)]
+        capture_resolution: String,
+        #[serde(default)]
+        encoded_resolution: String,
+        #[serde(default)]
+        aspect_mode: String,
+        #[serde(default)]
+        content_rect: String,
     },
     Event {
         level: String,

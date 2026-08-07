@@ -5,28 +5,50 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+
+pub type SharedWriter = Arc<Mutex<std::sync::mpsc::SyncSender<Vec<u8>>>>;
 
 pub struct PlaybackEngine {
     pub child: Child,
     pub writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     pub current_codec: String,
+    pub render_rect: Option<String>,
+    pub aspect_mode: String,
+    pub dashboard_writer: SharedWriter,
 }
 
 impl PlaybackEngine {
-    pub fn ensure_codec(
+    pub fn ensure_configuration(
         &mut self,
         target_codec: &str,
         connector: &str,
         render_rect: Option<&str>,
+        aspect_mode: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let norm = if target_codec.to_lowercase().contains("264") { "h264" } else { "h265" };
-        if self.current_codec == norm {
+        if self.current_codec == norm
+            && self.render_rect.as_deref() == render_rect
+            && self.aspect_mode == aspect_mode
+        {
             return Ok(());
         }
-        println!("[PLAYBACK SWITCH] Switching GStreamer pipeline from {} to {}", self.current_codec, norm);
+        println!(
+            "[PLAYBACK SWITCH] Reconfiguring GStreamer pipeline: codec {} -> {}, rectangle {:?} -> {:?}, aspect {} -> {}",
+            self.current_codec,
+            norm,
+            self.render_rect,
+            render_rect,
+            self.aspect_mode,
+            aspect_mode,
+        );
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let new_engine = start_persistent_playback(norm, connector, render_rect)?;
+        let mut new_engine = start_persistent_playback(norm, connector, render_rect, aspect_mode)?;
+        if let Ok(mut writer) = self.dashboard_writer.lock() {
+            *writer = new_engine.writer_tx.clone();
+        }
+        new_engine.dashboard_writer = self.dashboard_writer.clone();
         *self = new_engine;
         Ok(())
     }
@@ -36,11 +58,7 @@ pub fn autodetect_display_info() -> (u32, u32, u32, String, Option<String>, crat
     if let Ok(card) = crate::drm_kms::open_display_card() {
         if let Ok((screen_w, screen_h, mode, conn_handle, _, edid_info)) = crate::drm_kms::autodetect_display_mode(&card) {
             let conn_id = u32::from(conn_handle).to_string();
-            let target_w = screen_w.min(screen_h * 16 / 9);
-            let target_h = screen_h.min(screen_w * 9 / 16);
-            let offset_x = (screen_w - target_w) / 2;
-            let offset_y = (screen_h - target_h) / 2;
-            let rect = format!("<{},{},{},{}>", offset_x, offset_y, target_w, target_h);
+            let rect = format!("<0,0,{screen_w},{screen_h}>");
             let refresh = mode.vrefresh() as u32;
             crate::drm_kms::drop_master(&card);
             drop(card);
@@ -49,13 +67,14 @@ pub fn autodetect_display_info() -> (u32, u32, u32, String, Option<String>, crat
         }
         crate::drm_kms::drop_master(&card);
     }
-    (1920, 1080, 60, "54".into(), None, crate::drm_kms::EdidInfo::default())
+    (1920, 1080, 60, "54".into(), Some("<0,0,1920,1080>".to_string()), crate::drm_kms::EdidInfo::default())
 }
 
 pub fn start_persistent_playback(
     codec: &str,
     connector: &str,
     render_rect: Option<&str>,
+    aspect_mode: &str,
 ) -> Result<PlaybackEngine, Box<dyn std::error::Error>> {
     let t_start = std::time::Instant::now();
     let plane = std::env::var("DRM_PLANE_ID").unwrap_or_else(|_| "33".into());
@@ -72,9 +91,11 @@ pub fn start_persistent_playback(
         "-q".to_string(), "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), "blocksize=65536".to_string(), "!".to_string(),
         parser.to_string(), "config-interval=-1".to_string(), "!".to_string(),
         decoder.to_string(), "!".to_string(),
+    ];
+    gst_args.extend([
         "kmssink".to_string(), "driver-name=rockchip".to_string(),
         format!("connector-id={connector}"), format!("plane-id={plane}"),
-    ];
+    ]);
     if let Some(rect) = render_rect {
         gst_args.push(format!("render-rectangle={rect}"));
     }
@@ -119,9 +140,13 @@ pub fn start_persistent_playback(
     });
 
     println!("[PLAYBACK READY] Persistent GStreamer pipeline active on HDMI connector {connector}, plane {plane}");
+    let dashboard_writer = Arc::new(Mutex::new(writer_tx.clone()));
     Ok(PlaybackEngine {
         child,
         writer_tx,
         current_codec: norm_codec.to_string(),
+        render_rect: render_rect.map(str::to_owned),
+        aspect_mode: aspect_mode.to_string(),
+        dashboard_writer,
     })
 }

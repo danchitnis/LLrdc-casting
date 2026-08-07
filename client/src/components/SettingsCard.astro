@@ -43,9 +43,23 @@
         <select id="resolution">
           <option value="1280x720">720p (1280x720)</option>
           <option value="1920x1080" selected>1080p (1920x1080)</option>
-          <option value="2560x1440">2K (2560x1440)</option>
-          <option value="3840x2160">4K UHD (3840x2160)</option>
-          <option value="4096x2160">4K DCI (4096x2160)</option>
+          <option value="2560x1440">1440p (2560x1440)</option>
+          <option value="3840x2160">2160p / 4K UHD (3840x2160)</option>
+        </select>
+        <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label for="aspectMode">
+        <span>Aspect Ratio</span>
+      </label>
+      <div class="select-wrapper">
+        <select id="aspectMode">
+          <option value="preserve" selected>Preserve Laptop Aspect Ratio</option>
+          <option value="stretch">Stretch to HDMI Display</option>
         </select>
         <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9"></polyline>

@@ -48,13 +48,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (screen_w, screen_h, vrefresh, connector_id, render_rect, edid_info) = playback::autodetect_display_info();
 
     // 2. Start single persistent GStreamer pipeline
-    let mut playback_engine = playback::start_persistent_playback("hevc", &connector_id, render_rect.as_deref())?;
+    let mut playback_engine = playback::start_persistent_playback(
+        "hevc",
+        &connector_id,
+        render_rect.as_deref(),
+        "dashboard",
+    )?;
 
     let streaming_active = Arc::new(AtomicBool::new(false));
     let active_fps = Arc::new(AtomicU32::new(30));
     let active_res = Arc::new(Mutex::new("1920x1080".to_string()));
     let active_bitrate_mbps = Arc::new(Mutex::new(10.0f32));
     let active_latency_mode = Arc::new(Mutex::new("ULL".to_string()));
+    let active_capture_resolution = Arc::new(Mutex::new(String::new()));
+    let active_encoded_resolution = Arc::new(Mutex::new(String::new()));
+    let active_aspect_mode = Arc::new(Mutex::new(String::new()));
+    let active_content_rect = Arc::new(Mutex::new(String::new()));
 
     // 3. Background feeder thread for native HEVC clock/IP dashboard
     dashboard::spawn_idle_dashboard_thread(
@@ -62,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         screen_h,
         vrefresh,
         Arc::clone(&streaming_active),
-        playback_engine.writer_tx.clone(),
+        playback_engine.dashboard_writer.clone(),
     );
 
     println!("[READY] Persistent GStreamer HDMI presenter running; waiting for UDP/WebTransport stream");
@@ -81,8 +90,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     control::ControlCommand::Stop => {
                         println!("[CONTROL WS] Received STOP command from independent control socket!");
                         streaming_active.store(false, Ordering::Relaxed);
+                        if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
+                        if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
+                        if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
+                        if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
                         v4l2_decoder::reset_decoder_pipeline();
-                        let _ = playback_engine.ensure_codec("hevc", &connector_id, render_rect.as_deref());
+                        let _ = playback_engine.ensure_configuration("hevc", &connector_id, render_rect.as_deref(), "dashboard");
                         while rx.try_recv().is_ok() {}
                         let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                         let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
@@ -101,17 +114,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             edid_type: edid_info.conn_type.clone(),
                             edid_max_res: edid_info.max_res.clone(),
                             edid_max_fps: edid_info.max_fps,
+                            capture_resolution: String::new(),
+                            encoded_resolution: String::new(),
+                            aspect_mode: String::new(),
+                            content_rect: String::new(),
                         });
                     }
-                    control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode } => {
+                    control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode, source_width, source_height, encoded_width, encoded_height, content_rect } => {
                         let req_codec = codec.as_deref().unwrap_or("hevc");
-                        println!("[CONTROL WS] Received START command: codec={:?}, res={:?}, fps={:?}, bitrate={:?}, latency_mode={:?}", req_codec, resolution, fps, bitrate_mbps, latency_mode);
-                        let _ = playback_engine.ensure_codec(req_codec, &connector_id, render_rect.as_deref());
+                        let requested_aspect_mode = aspect_mode.as_deref() == Some("stretch");
+                        let aspect_mode = if requested_aspect_mode { "stretch" } else { "preserve" };
+                        println!("[CONTROL WS] Received START command: codec={:?}, res={:?}, fps={:?}, bitrate={:?}, latency_mode={:?}, aspect_mode={:?}", req_codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode);
                         streaming_active.store(true, Ordering::Relaxed);
                         let res_str = resolution.unwrap_or_else(|| "1920x1080".to_string());
                         let stream_fps = fps.unwrap_or(30);
                         let bw = bitrate_mbps.unwrap_or(10.0);
                         let lat_mode = latency_mode.unwrap_or_else(|| "ULL".to_string());
+                        let capture_res = match (source_width, source_height) {
+                            (Some(width), Some(height)) => format!("{width}x{height}"),
+                            _ => String::new(),
+                        };
+                        let encoded_res = match (encoded_width, encoded_height) {
+                            (Some(width), Some(height)) => format!("{width}x{height}"),
+                            _ => res_str.clone(),
+                        };
+                        let content_rect = content_rect.unwrap_or_default();
+                        if let Ok(mut l) = active_capture_resolution.lock() { *l = capture_res.clone(); }
+                        if let Ok(mut l) = active_encoded_resolution.lock() { *l = encoded_res.clone(); }
+                        if let Ok(mut l) = active_aspect_mode.lock() { *l = aspect_mode.to_string(); }
+                        if let Ok(mut l) = active_content_rect.lock() { *l = content_rect.clone(); }
+                        if let (Some(visible_width), Some(visible_height), Some(encoded_width), Some(encoded_height)) = (source_width, source_height, encoded_width, encoded_height) {
+                            println!("[SOURCE GEOMETRY] capture={}x{}, encoded={}x{}, content={}", visible_width, visible_height, encoded_width, encoded_height, content_rect);
+                        }
                         active_fps.store(stream_fps, Ordering::Relaxed);
                         if let Ok(mut l) = active_res.lock() { *l = res_str.clone(); }
                         if let Ok(mut l) = active_bitrate_mbps.lock() { *l = bw; }
@@ -131,6 +165,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             edid_type: edid_info.conn_type.clone(),
                             edid_max_res: edid_info.max_res.clone(),
                             edid_max_fps: edid_info.max_fps,
+                            capture_resolution: capture_res,
+                            encoded_resolution: encoded_res,
+                            aspect_mode: aspect_mode.to_string(),
+                            content_rect,
                         });
                     }
                     control::ControlCommand::Ping => {
@@ -147,6 +185,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let cur_fps = if is_act { active_fps.load(Ordering::Relaxed) } else { 0 };
                         let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                         let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
+                        let capture_res = active_capture_resolution.lock().map(|l| l.clone()).unwrap_or_default();
+                        let encoded_res = active_encoded_resolution.lock().map(|l| l.clone()).unwrap_or_default();
+                        let aspect_mode = active_aspect_mode.lock().map(|l| l.clone()).unwrap_or_default();
+                        let content_rect = active_content_rect.lock().map(|l| l.clone()).unwrap_or_default();
                         control_channel.send_telemetry(control::TelemetryMessage::Status {
                             state: state.to_string(),
                             resolution: cur_res,
@@ -162,6 +204,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             edid_type: edid_info.conn_type.clone(),
                             edid_max_res: edid_info.max_res.clone(),
                             edid_max_fps: edid_info.max_fps,
+                            capture_resolution: capture_res,
+                            encoded_resolution: encoded_res,
+                            aspect_mode,
+                            content_rect,
                         });
                     }
                 }
@@ -174,8 +220,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if frame.codec == "stop" {
                             println!("[PLAYBACK] Received stop signal; restoring HDMI IP dashboard...");
                             streaming_active.store(false, Ordering::Relaxed);
+                            if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
+                            if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
+                            if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
+                            if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
                             v4l2_decoder::reset_decoder_pipeline();
-                            let _ = playback_engine.ensure_codec("hevc", &connector_id, render_rect.as_deref());
+                            let _ = playback_engine.ensure_configuration("hevc", &connector_id, render_rect.as_deref(), "dashboard");
                             while rx.try_recv().is_ok() {}
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                             let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
@@ -192,14 +242,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 latency_mode: lat_mode,
                                 edid_name: edid_info.name.clone(),
                                 edid_type: edid_info.conn_type.clone(),
-                                edid_max_res: edid_info.max_res.clone(),
-                                edid_max_fps: edid_info.max_fps,
-                            });
+                                 edid_max_res: edid_info.max_res.clone(),
+                                 edid_max_fps: edid_info.max_fps,
+                                 capture_resolution: String::new(),
+                                 encoded_resolution: String::new(),
+                                 aspect_mode: String::new(),
+                                 content_rect: String::new(),
+                             });
                             continue;
                         }
                         if frame.codec != "hevc" && frame.codec != "h264" { continue; }
 
-                        let _ = playback_engine.ensure_codec(&frame.codec, &connector_id, render_rect.as_deref());
+                        // Do not let trailing packets after an explicit stop switch the
+                        // dashboard pipeline back into composed-stream mode.
+                        if !streaming_active.load(Ordering::Relaxed) && frame.seq > 1 {
+                            continue;
+                        }
+
+                        // The client has already composed the encoded frame, including any
+                        // preserve-mode bars. KMS only scales that frame across the display.
+                        let _ = playback_engine.ensure_configuration(
+                            &frame.codec,
+                            &connector_id,
+                            render_rect.as_deref(),
+                            "composed",
+                        );
 
                         // Allow auto-start if a new sequence frame (seq <= 1) arrives
                         if frame.seq <= 1 {
@@ -223,9 +290,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     latency_mode: lat_mode,
                                     edid_name: edid_info.name.clone(),
                                     edid_type: edid_info.conn_type.clone(),
-                                    edid_max_res: edid_info.max_res.clone(),
-                                    edid_max_fps: edid_info.max_fps,
-                                });
+                                     edid_max_res: edid_info.max_res.clone(),
+                                     edid_max_fps: edid_info.max_fps,
+                                     capture_resolution: String::new(),
+                                     encoded_resolution: String::new(),
+                                     aspect_mode: String::new(),
+                                     content_rect: String::new(),
+                                 });
                             }
                         }
 
@@ -260,9 +331,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     latency_mode: lat_mode,
                                     edid_name: edid_info.name.clone(),
                                     edid_type: edid_info.conn_type.clone(),
-                                    edid_max_res: edid_info.max_res.clone(),
-                                    edid_max_fps: edid_info.max_fps,
-                                });
+                                     edid_max_res: edid_info.max_res.clone(),
+                                     edid_max_fps: edid_info.max_fps,
+                                     capture_resolution: String::new(),
+                                     encoded_resolution: String::new(),
+                                     aspect_mode: String::new(),
+                                     content_rect: String::new(),
+                                 });
                         }
                     }
                     Ok(None) => break, // Channel closed
@@ -271,7 +346,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if streaming_active.load(Ordering::Relaxed) {
                             println!("[PLAYBACK] Stream idle timeout; restoring HDMI IP dashboard...");
                             streaming_active.store(false, Ordering::Relaxed);
-                            let _ = playback_engine.ensure_codec("hevc", &connector_id, render_rect.as_deref());
+                            if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
+                            if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
+                            if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
+                            if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
+                            let _ = playback_engine.ensure_configuration("hevc", &connector_id, render_rect.as_deref(), "dashboard");
                             while rx.try_recv().is_ok() {}
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                             let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
@@ -290,6 +369,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 edid_type: edid_info.conn_type.clone(),
                                 edid_max_res: edid_info.max_res.clone(),
                                 edid_max_fps: edid_info.max_fps,
+                                capture_resolution: String::new(),
+                                encoded_resolution: String::new(),
+                                aspect_mode: String::new(),
+                                content_rect: String::new(),
                             });
                         }
                     }

@@ -1,4 +1,10 @@
 import { createNalCache, convertToAnnexB, type NalCache } from './annexb';
+import {
+  calculateCompositorLayout,
+  formatContentRect,
+  VideoFrameCompositor,
+  type AspectMode,
+} from './compositor';
 import { calculateTargetBitrate, getCodecString } from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
 
@@ -37,6 +43,10 @@ export interface ServerStatusMessage {
   state?: string;
   resolution?: string;
   display_resolution?: string;
+  capture_resolution?: string;
+  encoded_resolution?: string;
+  aspect_mode?: string;
+  content_rect?: string;
   display_fps?: number;
   fps?: number;
   bitrate_mbps?: number;
@@ -63,6 +73,7 @@ let activeVideoTrack: MediaStreamTrack | null = null;
 let trackProcessor: TrackProcessorInstance | null = null;
 let trackProcessorReader: ReadableStreamDefaultReader<VideoFrame> | null = null;
 let videoEncoder: VideoEncoder | null = null;
+let frameCompositor: VideoFrameCompositor | null = null;
 let isStreaming = false;
 let isRemoteStreaming = false;
 let seqNum = 0;
@@ -71,7 +82,7 @@ let controlWs: WebSocket | null = null;
 let nalCache: NalCache = createNalCache();
 
 export function setSettingsDisabled(disabled: boolean): void {
-  const fields = ['videoSource', 'resolution', 'fps', 'codec', 'bitrate', 'latencyMode'];
+  const fields = ['videoSource', 'resolution', 'aspectMode', 'fps', 'codec', 'bitrate', 'latencyMode'];
   fields.forEach(id => {
     const el = document.getElementById(id) as HTMLSelectElement | null;
     if (el) el.disabled = disabled;
@@ -197,6 +208,7 @@ export async function stopStreaming(): Promise<void> {
     try { videoEncoder.close(); } catch (e) {}
     videoEncoder = null;
   }
+  frameCompositor = null;
 
   if (trackProcessorReader) {
     const r = trackProcessorReader;
@@ -277,12 +289,14 @@ export async function toggleScreenShare(): Promise<void> {
   const boardIp = window.location.hostname || '192.168.1.72';
   const boardPort = 4433;
   const resSelect = document.getElementById('resolution') as HTMLSelectElement;
+  const aspectModeSelect = document.getElementById('aspectMode') as HTMLSelectElement | null;
   const fpsSelect = document.getElementById('fps') as HTMLSelectElement;
   const codecSelect = document.getElementById('codec') as HTMLSelectElement;
   const bitrateSelect = document.getElementById('bitrate') as HTMLSelectElement | null;
   const latencySelect = document.getElementById('latencyMode') as HTMLSelectElement | null;
 
   const resStr = resSelect.value;
+  const aspectMode = aspectModeSelect?.value === 'stretch' ? 'stretch' : 'preserve';
   const targetFps = parseInt(fpsSelect.value, 10);
   const selectedCodec = codecSelect.value;
   const wireCodec = selectedCodec.startsWith('H264') ? 'H264' : 'H265';
@@ -312,7 +326,7 @@ export async function toggleScreenShare(): Promise<void> {
   if (statBitrate) statBitrate.textContent = `${targetMbps} Mbps (${bitrateSetting === 'auto' ? 'Auto' : 'Custom'})`;
   if (statEncoderMode) statEncoderMode.textContent = encoderModeLabel;
 
-  log(`[CONFIG] Codec: ${wireCodec} (${isSWRequested ? 'SW' : 'HW'}) | Res: ${resStr} @ ${targetFps} FPS | Bandwidth: ${targetMbps} Mbps | Priority: ${encoderModeLabel}`);
+  log(`[CONFIG] Codec: ${wireCodec} (${isSWRequested ? 'SW' : 'HW'}) | Res: ${resStr} @ ${targetFps} FPS | Aspect: ${aspectMode} | Bandwidth: ${targetMbps} Mbps | Priority: ${encoderModeLabel}`);
   log(`[CONNECTING] WebTransport -> https://${boardIp}:${boardPort}`);
   updateStatus('connecting', 'CONNECTING');
 
@@ -342,19 +356,6 @@ export async function toggleScreenShare(): Promise<void> {
     writer = transport.datagrams.writable.getWriter();
     log(`[WEBTRANSPORT CONNECTED] Session established over QUIC/UDP!`);
 
-    if (controlWs && controlWs.readyState === WebSocket.OPEN) {
-      try {
-        controlWs.send(JSON.stringify({
-          type: 'start',
-          codec: wireCodec,
-          resolution: resStr,
-          fps: targetFps,
-          bitrate_mbps: parseFloat(targetMbps),
-          latency_mode: latencySetting
-        }));
-      } catch (e) {}
-    }
-
     const videoSourceSelect = document.getElementById('videoSource') as HTMLSelectElement;
     const videoSource = videoSourceSelect.value;
 
@@ -362,17 +363,22 @@ export async function toggleScreenShare(): Promise<void> {
       log(`[SOURCE] Using Bouncing Orb / Test Pattern (${width}x${height} @ ${targetFps} FPS)`);
       mediaStream = createSyntheticScreenStream(width, height, targetFps, () => isStreaming);
     } else {
-      log(`[SOURCE] Requesting Chrome Screen Capture (${width}x${height} @ ${targetFps} FPS)...`);
+      log(`[SOURCE] Requesting full native monitor capture (target ${width}x${height} @ ${targetFps} FPS)...`);
       try {
-        mediaStream = await navigator.mediaDevices.getDisplayMedia({
+        const displayMediaOptions = {
           video: {
-            width: { ideal: width },
-            height: { ideal: height },
+            displaySurface: 'monitor',
             frameRate: { ideal: targetFps }
           },
+          monitorTypeSurfaces: 'include',
+          selfBrowserSurface: 'exclude',
           audio: false
-        });
-        log(`[SOURCE] Native Screen Capture granted!`);
+        } as DisplayMediaStreamOptions & {
+          monitorTypeSurfaces: 'include';
+          selfBrowserSurface: 'exclude';
+        };
+        mediaStream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+        log(`[SOURCE] Native monitor capture granted.`);
       } catch (captureErr) {
         const errObj = captureErr as Error;
         log(`[SOURCE] Screen capture cancelled or failed: ${errObj.message}`, true);
@@ -392,10 +398,44 @@ export async function toggleScreenShare(): Promise<void> {
     }
 
     const trackSettings = activeVideoTrack ? activeVideoTrack.getSettings() : {};
+    const displaySurface = trackSettings.displaySurface;
+    if (videoSource !== 'synthetic' && displaySurface !== 'monitor') {
+      throw new Error(`A full monitor is required; Chrome returned ${displaySurface || 'unknown'} capture`);
+    }
     const rawWidth = (videoSource === 'synthetic') ? width : (trackSettings.width || width);
     const rawHeight = (videoSource === 'synthetic') ? height : (trackSettings.height || height);
-    const activeWidth = (rawWidth % 16 !== 0) ? Math.ceil(rawWidth / 16) * 16 : rawWidth;
-    const activeHeight = (rawHeight % 16 !== 0) ? Math.ceil(rawHeight / 16) * 16 : rawHeight;
+    const activeWidth = width;
+    const activeHeight = height;
+    const compositorAspectMode: AspectMode = aspectMode;
+    const initialLayout = calculateCompositorLayout(
+      rawWidth,
+      rawHeight,
+      activeWidth,
+      activeHeight,
+      compositorAspectMode,
+    );
+    const contentRect = formatContentRect(initialLayout);
+
+    log(`[SOURCE] Capture dimensions: ${rawWidth}x${rawHeight}${displaySurface ? ` (${displaySurface})` : ''}`);
+    log(`[COMPOSITOR] ${aspectMode}: ${rawWidth}x${rawHeight} -> ${activeWidth}x${activeHeight}, content=${contentRect}`);
+    const statCapture = document.getElementById('statCapture');
+    const statEncoded = document.getElementById('statEncoded');
+    const statLayout = document.getElementById('statLayout');
+    if (statCapture) statCapture.textContent = `${rawWidth}x${rawHeight}`;
+    if (statEncoded) statEncoded.textContent = `${activeWidth}x${activeHeight}`;
+    if (statLayout) statLayout.textContent = `${aspectMode}: ${contentRect}`;
+
+    try {
+      if (typeof OffscreenCanvas === 'undefined') {
+        throw new Error('OffscreenCanvas is not supported in this browser');
+      }
+      frameCompositor = new VideoFrameCompositor(activeWidth, activeHeight, compositorAspectMode);
+    } catch (compositorErr) {
+      const errObj = compositorErr as Error;
+      log(`[COMPOSITOR ERROR] ${errObj.message}`, true);
+      await stopStreaming();
+      return;
+    }
 
     const codecString = getCodecString(wireCodec, activeWidth, targetFps);
     const hardwarePref: HardwareAcceleration = isSWRequested ? 'prefer-software' : 'prefer-hardware';
@@ -428,6 +468,26 @@ export async function toggleScreenShare(): Promise<void> {
       log(`[ERROR] H.265 software encoding is blocked to prevent heavy CPU usage. Please select H.264.`, true);
       await stopStreaming();
       return;
+    }
+
+    if (controlWs && controlWs.readyState === WebSocket.OPEN) {
+      try {
+        controlWs.send(JSON.stringify({
+          type: 'start',
+          codec: wireCodec,
+          resolution: resStr,
+          fps: targetFps,
+          bitrate_mbps: parseFloat(targetMbps),
+          latency_mode: latencySetting,
+          aspect_mode: aspectMode,
+          source_width: rawWidth,
+          source_height: rawHeight,
+          encoded_width: activeWidth,
+          encoded_height: activeHeight,
+          content_rect: contentRect
+        }));
+        log(`[CONTROL SOCKET] Geometry: capture ${rawWidth}x${rawHeight}, encoded ${activeWidth}x${activeHeight}, content ${contentRect}`);
+      } catch (e) {}
     }
 
     const statEncoderHW = document.getElementById('statEncoderHW');
@@ -537,7 +597,13 @@ export async function toggleScreenShare(): Promise<void> {
         if (videoEncoder && videoEncoder.encodeQueueSize > 8) {
           rawFrame.close();
         } else if (videoEncoder) {
-          videoEncoder.encode(rawFrame, { keyFrame: needKeyFrame });
+          const composedFrame = frameCompositor?.compose(rawFrame);
+          if (!composedFrame) {
+            rawFrame.close();
+            throw new Error('Video compositor is not initialized');
+          }
+          videoEncoder.encode(composedFrame, { keyFrame: needKeyFrame });
+          composedFrame.close();
           rawFrame.close();
         } else {
           rawFrame.close();
@@ -584,6 +650,19 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
       const fpsStr = msg.display_fps ? ` @ ${msg.display_fps} FPS` : '';
       statDisplay.textContent = `${msg.display_resolution}${fpsStr}`;
     }
+  }
+
+  if (msg.capture_resolution) {
+    const statCapture = document.getElementById('statCapture');
+    if (statCapture) statCapture.textContent = msg.capture_resolution;
+  }
+  if (msg.encoded_resolution) {
+    const statEncoded = document.getElementById('statEncoded');
+    if (statEncoded) statEncoded.textContent = msg.encoded_resolution;
+  }
+  if (msg.content_rect) {
+    const statLayout = document.getElementById('statLayout');
+    if (statLayout) statLayout.textContent = `${msg.aspect_mode || 'preserve'}: ${msg.content_rect}`;
   }
 
   if (msg.bitrate_mbps && msg.bitrate_mbps > 0) {
