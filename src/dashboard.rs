@@ -8,6 +8,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::playback::SharedWriter;
+
 pub struct PersistentDashboardEncoder {
     child: Child,
     stdin: std::process::ChildStdin,
@@ -19,7 +21,7 @@ impl PersistentDashboardEncoder {
     pub fn spawn(
         width: u32,
         height: u32,
-        writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+        writer_tx: SharedWriter,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut child = Command::new("ffmpeg")
             .args([
@@ -52,8 +54,8 @@ impl PersistentDashboardEncoder {
             use std::io::Read;
             while let Ok(n) = stdout.read(&mut buf) {
                 if n == 0 { break; }
-                if writer_tx.send(buf[..n].to_vec()).is_err() {
-                    break;
+                if let Ok(writer) = writer_tx.lock() {
+                    let _ = writer.send(buf[..n].to_vec());
                 }
             }
         });
@@ -93,7 +95,7 @@ pub fn spawn_idle_dashboard_thread(
     screen_h: u32,
     vrefresh: u32,
     idle_active: Arc<AtomicBool>,
-    writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    writer_tx: SharedWriter,
 ) {
     std::thread::spawn(move || {
         let mut last_secs = 0u64;

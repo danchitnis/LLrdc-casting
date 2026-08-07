@@ -1,6 +1,8 @@
 //! Verified RK3399 fallback: UDP HEVC -> V4L2 stateless decoder -> KMS.
 //! The atomic two-plane presenter is developed separately; this keeps HDMI
 //! playback on the proven pipeline while it is completed.
+#![deny(dead_code)]
+
 mod cert;
 mod control;
 mod dashboard;
@@ -46,6 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Auto-detect display geometry once before starting GStreamer
     let (screen_w, screen_h, vrefresh, connector_id, render_rect, edid_info) = playback::autodetect_display_info();
+    let signal_resolution = format!("{}x{}", screen_w, screen_h);
+    let panel_resolution = edid_info.panel_res.clone();
 
     // 2. Start single persistent GStreamer pipeline
     let mut playback_engine = playback::start_persistent_playback(
@@ -118,9 +122,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             encoded_resolution: String::new(),
                             aspect_mode: String::new(),
                             content_rect: String::new(),
+                            signal_resolution: signal_resolution.clone(),
+                            panel_resolution: panel_resolution.clone(),
                         });
                     }
-                    control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode, source_width, source_height, encoded_width, encoded_height, content_rect } => {
+                    control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode, source_width, source_height, encoded_width, encoded_height, content_rect, signal_content_rect, panel_content_rect, signal_width, signal_height, panel_width, panel_height } => {
                         let req_codec = codec.as_deref().unwrap_or("hevc");
                         let requested_aspect_mode = aspect_mode.as_deref() == Some("stretch");
                         let aspect_mode = if requested_aspect_mode { "stretch" } else { "preserve" };
@@ -146,6 +152,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let (Some(visible_width), Some(visible_height), Some(encoded_width), Some(encoded_height)) = (source_width, source_height, encoded_width, encoded_height) {
                             println!("[SOURCE GEOMETRY] capture={}x{}, encoded={}x{}, content={}", visible_width, visible_height, encoded_width, encoded_height, content_rect);
                         }
+                        if let (Some(signal_width), Some(signal_height), Some(panel_width), Some(panel_height)) = (signal_width, signal_height, panel_width, panel_height) {
+                            println!("[DISPLAY GEOMETRY] signal={}x{}, panel={}x{}, signal_content={}, panel_content={}", signal_width, signal_height, panel_width, panel_height, signal_content_rect.as_deref().unwrap_or("<unknown>"), panel_content_rect.as_deref().unwrap_or("<unknown>"));
+                        }
                         active_fps.store(stream_fps, Ordering::Relaxed);
                         if let Ok(mut l) = active_res.lock() { *l = res_str.clone(); }
                         if let Ok(mut l) = active_bitrate_mbps.lock() { *l = bw; }
@@ -169,6 +178,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             encoded_resolution: encoded_res,
                             aspect_mode: aspect_mode.to_string(),
                             content_rect,
+                            signal_resolution: signal_resolution.clone(),
+                            panel_resolution: panel_resolution.clone(),
                         });
                     }
                     control::ControlCommand::Ping => {
@@ -208,6 +219,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             encoded_resolution: encoded_res,
                             aspect_mode,
                             content_rect,
+                            signal_resolution: signal_resolution.clone(),
+                            panel_resolution: panel_resolution.clone(),
                         });
                     }
                 }
@@ -248,6 +261,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                  encoded_resolution: String::new(),
                                  aspect_mode: String::new(),
                                  content_rect: String::new(),
+                                 signal_resolution: signal_resolution.clone(),
+                                 panel_resolution: panel_resolution.clone(),
                              });
                             continue;
                         }
@@ -296,6 +311,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                      encoded_resolution: String::new(),
                                      aspect_mode: String::new(),
                                      content_rect: String::new(),
+                                     signal_resolution: signal_resolution.clone(),
+                                     panel_resolution: panel_resolution.clone(),
                                  });
                             }
                         }
@@ -337,6 +354,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                      encoded_resolution: String::new(),
                                      aspect_mode: String::new(),
                                      content_rect: String::new(),
+                                     signal_resolution: signal_resolution.clone(),
+                                     panel_resolution: panel_resolution.clone(),
                                  });
                         }
                     }
@@ -373,6 +392,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 encoded_resolution: String::new(),
                                 aspect_mode: String::new(),
                                 content_rect: String::new(),
+                                signal_resolution: signal_resolution.clone(),
+                                panel_resolution: panel_resolution.clone(),
                             });
                         }
                     }

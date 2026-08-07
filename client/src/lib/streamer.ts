@@ -2,8 +2,11 @@ import { createNalCache, convertToAnnexB, type NalCache } from './annexb';
 import {
   calculateCompositorLayout,
   formatContentRect,
+  formatPanelContentRect,
+  formatSignalContentRect,
   VideoFrameCompositor,
   type AspectMode,
+  type DisplayGeometry,
 } from './compositor';
 import { calculateTargetBitrate, getCodecString } from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
@@ -43,10 +46,14 @@ export interface ServerStatusMessage {
   state?: string;
   resolution?: string;
   display_resolution?: string;
+  signal_resolution?: string;
+  panel_resolution?: string;
   capture_resolution?: string;
   encoded_resolution?: string;
   aspect_mode?: string;
   content_rect?: string;
+  signal_content_rect?: string;
+  panel_content_rect?: string;
   display_fps?: number;
   fps?: number;
   bitrate_mbps?: number;
@@ -74,12 +81,33 @@ let trackProcessor: TrackProcessorInstance | null = null;
 let trackProcessorReader: ReadableStreamDefaultReader<VideoFrame> | null = null;
 let videoEncoder: VideoEncoder | null = null;
 let frameCompositor: VideoFrameCompositor | null = null;
+let outputGeometry: DisplayGeometry | null = null;
 let isStreaming = false;
 let isRemoteStreaming = false;
 let seqNum = 0;
 let autoCertHash: string | null = null;
 let controlWs: WebSocket | null = null;
 let nalCache: NalCache = createNalCache();
+
+function parseResolution(value: string | undefined): [number, number] | null {
+  if (!value) return null;
+  const match = /^(\d+)x(\d+)$/.exec(value.trim());
+  if (!match) return null;
+  const width = Number.parseInt(match[1], 10);
+  const height = Number.parseInt(match[2], 10);
+  return width > 0 && height > 0 ? [width, height] : null;
+}
+
+async function waitForOutputGeometry(): Promise<DisplayGeometry> {
+  const deadline = performance.now() + 5000;
+  while (!outputGeometry && performance.now() < deadline) {
+    await new Promise<void>(resolve => window.setTimeout(resolve, 100));
+  }
+  if (!outputGeometry) {
+    throw new Error('Display geometry is unavailable; waiting for HDMI/EDID telemetry timed out');
+  }
+  return outputGeometry;
+}
 
 export function setSettingsDisabled(disabled: boolean): void {
   const fields = ['videoSource', 'resolution', 'aspectMode', 'fps', 'codec', 'bitrate', 'latencyMode'];
@@ -303,6 +331,15 @@ export async function toggleScreenShare(): Promise<void> {
   const isSWRequested = selectedCodec === 'H264_SW';
   const bitrateSetting = bitrateSelect ? bitrateSelect.value : 'auto';
   const latencySetting = latencySelect ? latencySelect.value : 'ULL';
+  let displayGeometry: DisplayGeometry;
+  try {
+    displayGeometry = await waitForOutputGeometry();
+  } catch (geometryErr) {
+    const errObj = geometryErr as Error;
+    log(`[DISPLAY ERROR] ${errObj.message}`, true);
+    await stopStreaming();
+    return;
+  }
 
   const [width = 1920, height = 1080] = resStr.split('x').map(n => parseInt(n, 10));
   const targetBitrate = calculateTargetBitrate(bitrateSetting, wireCodec, width, targetFps);
@@ -413,11 +450,15 @@ export async function toggleScreenShare(): Promise<void> {
       activeWidth,
       activeHeight,
       compositorAspectMode,
+      displayGeometry,
     );
     const contentRect = formatContentRect(initialLayout);
+    const signalContentRect = formatSignalContentRect(initialLayout);
+    const panelContentRect = formatPanelContentRect(initialLayout);
 
     log(`[SOURCE] Capture dimensions: ${rawWidth}x${rawHeight}${displaySurface ? ` (${displaySurface})` : ''}`);
-    log(`[COMPOSITOR] ${aspectMode}: ${rawWidth}x${rawHeight} -> ${activeWidth}x${activeHeight}, content=${contentRect}`);
+    log(`[DISPLAY] HDMI signal=${displayGeometry.signalWidth}x${displayGeometry.signalHeight}, panel=${displayGeometry.panelWidth}x${displayGeometry.panelHeight}`);
+    log(`[COMPOSITOR] ${aspectMode}: ${rawWidth}x${rawHeight} -> ${activeWidth}x${activeHeight}, encoded=${contentRect}, signal=${signalContentRect}, panel=${panelContentRect}`);
     const statCapture = document.getElementById('statCapture');
     const statEncoded = document.getElementById('statEncoded');
     const statLayout = document.getElementById('statLayout');
@@ -429,7 +470,7 @@ export async function toggleScreenShare(): Promise<void> {
       if (typeof OffscreenCanvas === 'undefined') {
         throw new Error('OffscreenCanvas is not supported in this browser');
       }
-      frameCompositor = new VideoFrameCompositor(activeWidth, activeHeight, compositorAspectMode);
+      frameCompositor = new VideoFrameCompositor(activeWidth, activeHeight, compositorAspectMode, displayGeometry);
     } catch (compositorErr) {
       const errObj = compositorErr as Error;
       log(`[COMPOSITOR ERROR] ${errObj.message}`, true);
@@ -484,7 +525,13 @@ export async function toggleScreenShare(): Promise<void> {
           source_height: rawHeight,
           encoded_width: activeWidth,
           encoded_height: activeHeight,
-          content_rect: contentRect
+          content_rect: contentRect,
+          signal_content_rect: signalContentRect,
+          panel_content_rect: panelContentRect,
+          signal_width: displayGeometry.signalWidth,
+          signal_height: displayGeometry.signalHeight,
+          panel_width: displayGeometry.panelWidth,
+          panel_height: displayGeometry.panelHeight
         }));
         log(`[CONTROL SOCKET] Geometry: capture ${rawWidth}x${rawHeight}, encoded ${activeWidth}x${activeHeight}, content ${contentRect}`);
       } catch (e) {}
@@ -625,6 +672,21 @@ export async function toggleScreenShare(): Promise<void> {
 export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
   if (!msg || !msg.state) return;
 
+  const signalResolution = parseResolution(msg.signal_resolution || msg.display_resolution);
+  const panelResolution = parseResolution(msg.panel_resolution || msg.edid_max_res);
+  if (signalResolution && panelResolution) {
+    outputGeometry = {
+      signalWidth: signalResolution[0],
+      signalHeight: signalResolution[1],
+      panelWidth: panelResolution[0],
+      panelHeight: panelResolution[1],
+    };
+    const statSignal = document.getElementById('statSignal');
+    const statPanel = document.getElementById('statPanel');
+    if (statSignal) statSignal.textContent = `${signalResolution[0]}x${signalResolution[1]}`;
+    if (statPanel) statPanel.textContent = `${panelResolution[0]}x${panelResolution[1]}`;
+  }
+
   const toggleBtn = document.getElementById('toggleBtn');
   const toggleText = document.getElementById('toggleText');
 
@@ -645,10 +707,10 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
   }
 
   if (msg.display_resolution) {
-    const statDisplay = document.getElementById('statDisplay');
-    if (statDisplay) {
+    const statSignal = document.getElementById('statSignal');
+    if (statSignal) {
       const fpsStr = msg.display_fps ? ` @ ${msg.display_fps} FPS` : '';
-      statDisplay.textContent = `${msg.display_resolution}${fpsStr}`;
+      statSignal.textContent = `${msg.display_resolution}${fpsStr}`;
     }
   }
 

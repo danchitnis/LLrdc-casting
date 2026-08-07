@@ -159,21 +159,17 @@ export function updateCodecAndResolutionGuardrails(
   const selectedCodec = codecSelect.value;
   const res2kOption = resSelect.querySelector('option[value="2560x1440"]') as HTMLOptionElement | null;
   const res4kOption = resSelect.querySelector('option[value="3840x2160"]') as HTMLOptionElement | null;
-  const res4kDciOption = resSelect.querySelector('option[value="4096x2160"]') as HTMLOptionElement | null;
-
   if (selectedCodec === 'H264' || selectedCodec === 'H264_SW') {
     if (res2kOption) res2kOption.disabled = true;
     if (res4kOption) res4kOption.disabled = true;
-    if (res4kDciOption) res4kDciOption.disabled = true;
 
-    if (resSelect.value === '2560x1440' || resSelect.value === '3840x2160' || resSelect.value === '4096x2160') {
+    if (resSelect.value === '2560x1440' || resSelect.value === '3840x2160') {
       resSelect.value = '1920x1080';
       logFn?.('[GUARDRAIL] H.264 supports up to 1080p on RK3399 hardware decoder; adjusted to 1080p');
     }
   } else {
     if (res2kOption) res2kOption.disabled = false;
     if (res4kOption) res4kOption.disabled = false;
-    if (res4kDciOption) res4kDciOption.disabled = false;
   }
 }
 

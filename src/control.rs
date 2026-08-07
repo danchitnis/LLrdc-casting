@@ -30,6 +30,18 @@ pub enum ControlCommand {
         encoded_height: Option<u32>,
         #[serde(default)]
         content_rect: Option<String>,
+        #[serde(default)]
+        signal_content_rect: Option<String>,
+        #[serde(default)]
+        panel_content_rect: Option<String>,
+        #[serde(default)]
+        signal_width: Option<u32>,
+        #[serde(default)]
+        signal_height: Option<u32>,
+        #[serde(default)]
+        panel_width: Option<u32>,
+        #[serde(default)]
+        panel_height: Option<u32>,
     },
     Stop,
     Ping,
@@ -72,6 +84,10 @@ pub enum TelemetryMessage {
         aspect_mode: String,
         #[serde(default)]
         content_rect: String,
+        #[serde(default)]
+        signal_resolution: String,
+        #[serde(default)]
+        panel_resolution: String,
     },
     Event {
         level: String,

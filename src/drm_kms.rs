@@ -19,6 +19,7 @@ pub struct EdidInfo {
     pub name: String,
     pub conn_type: String,
     pub max_res: String,
+    pub panel_res: String,
     pub max_fps: u32,
 }
 
@@ -28,6 +29,7 @@ impl Default for EdidInfo {
             name: "HDMI Monitor".to_string(),
             conn_type: "HDMI-A".to_string(),
             max_res: "1920x1080".to_string(),
+            panel_res: "1920x1080".to_string(),
             max_fps: 60,
         }
     }
@@ -254,6 +256,57 @@ fn parse_edid_max_resolution(bytes: &[u8]) -> Option<(u32, u32, u32)> {
     }
 }
 
+fn parse_detailed_timing(block: &[u8]) -> Option<(u32, u32, u32)> {
+    if block.len() < 18 {
+        return None;
+    }
+    let pixel_clock = u16::from_le_bytes([block[0], block[1]]) as u32 * 10_000;
+    if pixel_clock == 0 {
+        return None;
+    }
+
+    let h_active = (block[2] as u32) | (((block[4] as u32) & 0xF0) << 4);
+    let h_blank = (block[3] as u32) | (((block[4] as u32) & 0x0F) << 8);
+    let v_active = (block[5] as u32) | (((block[7] as u32) & 0xF0) << 4);
+    let v_blank = (block[6] as u32) | (((block[7] as u32) & 0x0F) << 8);
+    let h_total = h_active + h_blank;
+    let v_total = v_active + v_blank;
+    if h_active == 0 || v_active == 0 || h_total == 0 || v_total == 0 {
+        return None;
+    }
+
+    let fps = (pixel_clock as f64 / (h_total * v_total) as f64).round() as u32;
+    Some((h_active, v_active, fps))
+}
+
+/// Return the panel's preferred/native timing, rather than its largest advertised mode.
+fn parse_edid_panel_resolution(bytes: &[u8]) -> Option<(u32, u32, u32)> {
+    if bytes.len() < 128 || bytes[0..8] != [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00] {
+        return None;
+    }
+
+    for offset in [54usize, 72, 90, 108] {
+        if let Some(timing) = parse_detailed_timing(&bytes[offset..offset + 18]) {
+            return Some(timing);
+        }
+    }
+
+    if bytes.len() >= 256 && bytes[128] == 0x02 {
+        let ext = &bytes[128..256];
+        let dtd_offset = ext[2] as usize;
+        let dtd_start = if dtd_offset > 4 && dtd_offset <= 127 { dtd_offset } else { 127 };
+        let mut offset = dtd_start;
+        while offset + 18 <= ext.len() {
+            if let Some(timing) = parse_detailed_timing(&ext[offset..offset + 18]) {
+                return Some(timing);
+            }
+            offset += 18;
+        }
+    }
+
+    None
+}
+
 pub fn extract_edid_info(card: &Card, conn_handle: connector::Handle, conn_info: &connector::Info) -> EdidInfo {
     let conn_type = match conn_info.interface() {
         connector::Interface::HDMIA => "HDMI-A".to_string(),
@@ -265,6 +318,16 @@ pub fn extract_edid_info(card: &Card, conn_handle: connector::Handle, conn_info:
     let mut max_w = 0u32;
     let mut max_h = 0u32;
     let mut max_fps = 0u32;
+    let mut panel_w = 0u32;
+    let mut panel_h = 0u32;
+
+    for mode in conn_info.modes() {
+        if mode.mode_type().contains(drm::control::ModeTypeFlags::PREFERRED) {
+            panel_w = mode.size().0 as u32;
+            panel_h = mode.size().1 as u32;
+            break;
+        }
+    }
 
     for mode in conn_info.modes() {
         let w = mode.size().0 as u32;
@@ -313,6 +376,10 @@ pub fn extract_edid_info(card: &Card, conn_handle: connector::Handle, conn_info:
 
     // Override max resolution if EDID binary explicitly specifies higher resolution (e.g. 4096x2160 CTA-861 VICs/DTDs)
     if let Some(bytes) = raw_edid_bytes.as_deref() {
+        if let Some((w, h, _)) = parse_edid_panel_resolution(bytes) {
+            panel_w = w;
+            panel_h = h;
+        }
         if let Some((e_w, e_h, e_fps)) = parse_edid_max_resolution(bytes) {
             if e_w > max_w || (e_w == max_w && e_h > max_h) || (e_w == max_w && e_h == max_h && e_fps > max_fps) {
                 max_w = e_w;
@@ -330,6 +397,15 @@ pub fn extract_edid_info(card: &Card, conn_handle: connector::Handle, conn_info:
         "1920x1080".to_string()
     };
     let max_fps = if max_fps > 0 { max_fps } else { 60 };
+    if panel_w == 0 || panel_h == 0 {
+        panel_w = max_w;
+        panel_h = max_h;
+    }
+    let panel_res = if panel_w > 0 && panel_h > 0 {
+        format!("{}x{}", panel_w, panel_h)
+    } else {
+        "1920x1080".to_string()
+    };
 
     let name = raw_edid_bytes
         .as_deref()
@@ -340,6 +416,7 @@ pub fn extract_edid_info(card: &Card, conn_handle: connector::Handle, conn_info:
         name,
         conn_type,
         max_res,
+        panel_res,
         max_fps,
     }
 }
