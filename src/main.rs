@@ -4,11 +4,13 @@
 #![deny(dead_code)]
 
 mod cert;
+mod cloud_discovery;
 mod control;
 mod dashboard;
 mod drm_kms;
 mod http_server;
 mod net;
+mod local_pairing;
 mod playback;
 mod sys_monitor;
 mod text;
@@ -29,8 +31,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<control::ControlCommand>(32);
     let control_channel = control::ControlChannel::new(cmd_tx);
 
-    let identity = webtransport_server::get_or_create_identity().await.map_err(|e| e as Box<dyn std::error::Error>)?;
+    let identity = webtransport_server::get_or_create_identity()
+        .await
+        .map_err(|e| e as Box<dyn std::error::Error>)?;
     let cert_hash_hex = webtransport_server::extract_cert_hash_hex(&identity);
+    let pairing_state = local_pairing::PairingState::new();
+    local_pairing::spawn_local_pairing(pairing_state.clone());
+    if cloud_discovery::cloud_discovery_enabled() {
+        cloud_discovery::spawn_registration(pairing_state.clone(), cert_hash_hex.clone());
+    }
 
     let http_cert_hash = cert_hash_hex.clone();
     let http_control_channel = control_channel.clone();
@@ -40,14 +49,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let webtransport_control_channel = control_channel.clone();
+    let webtransport_pairing_state = pairing_state.clone();
     tokio::spawn(async move {
-        if let Err(error) = webtransport_server::run_server_with_identity(identity, tx).await {
+        if let Err(error) = webtransport_server::run_server_with_identity(
+            identity,
+            tx,
+            webtransport_control_channel,
+            webtransport_pairing_state,
+        )
+        .await
+        {
             eprintln!("[SERVER ERROR] {error}");
         }
     });
 
     // 1. Auto-detect display geometry once before starting GStreamer
-    let (screen_w, screen_h, vrefresh, connector_id, render_rect, edid_info) = playback::autodetect_display_info();
+    let (screen_w, screen_h, vrefresh, connector_id, render_rect, edid_info) =
+        playback::autodetect_display_info();
     let signal_resolution = format!("{}x{}", screen_w, screen_h);
     let panel_resolution = edid_info.panel_res.clone();
     let idle_dashboard_codec = dashboard::configured_dashboard_codec();
@@ -56,7 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         (screen_w, screen_h)
     };
-    println!("[IDLE DASHBOARD] Mode={} render={}x{} display={}x{}", idle_dashboard_codec, idle_width, idle_height, screen_w, screen_h);
+    println!(
+        "[IDLE DASHBOARD] Mode={} render={}x{} display={}x{}",
+        idle_dashboard_codec, idle_width, idle_height, screen_w, screen_h
+    );
 
     // 2. Start single persistent GStreamer pipeline
     let mut playback_engine = playback::start_persistent_playback(
@@ -85,9 +107,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vrefresh,
         Arc::clone(&streaming_active),
         playback_engine.dashboard_writer.clone(),
+        pairing_state,
     );
 
-    println!("[READY] Persistent GStreamer HDMI presenter running; waiting for UDP/WebTransport stream");
+    println!(
+        "[READY] Persistent GStreamer HDMI presenter running; waiting for UDP/WebTransport stream"
+    );
     let mut sent = 0u64;
     let idle_timeout_sec: u64 = std::env::var("IDLE_TIMEOUT_SEC")
         .ok()

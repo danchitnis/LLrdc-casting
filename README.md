@@ -101,19 +101,41 @@ BOARD_IP=<receiver-ip> ./server.sh --stop
 
 ## Start Casting
 
-1. Open the casting page in Chrome:
+To configure the optional `cast.llrdc.com` discovery service interactively
+after logging in with Wrangler:
+
+```bash
+./setup_cloudflare.sh
+```
+
+The script creates the D1 database, applies migrations, generates and uploads
+the required credentials, deploys the Worker/UI, and restarts the receiver.
+It is safe to rerun; generated private state stays in `.cloudflare/`.
+SSH access to the receiver must already be configured and working. The script
+does not install SSH or change receiver SSH settings. If needed, it uses your
+existing `sudo` access only to install the public pairing key.
+
+1. For offline/LAN-only casting, open the receiver's current IP in Chrome:
 
    ```text
    https://<receiver-ip>:8080/
    ```
 
-2. The first visit may show a certificate warning. This is expected for a
-   receiver using its local certificate.
-3. Select the source and picture settings you want to use.
-4. Select **Start Casting**.
-5. Choose the screen, window, or browser tab to share, then approve the
+2. Accept the receiver's local certificate warning, as in the previous workflow.
+3. Enter the four-digit code shown on the receiver's HDMI idle screen.
+4. Select the source and picture settings you want to use.
+5. Select **Start Casting**.
+6. Choose the screen, window, or browser tab to share, then approve the
    browser permission prompt.
-6. Confirm that the shared content appears on the HDMI display.
+7. Confirm that the shared content appears on the HDMI display.
+
+This direct-IP workflow works without Internet access or Cloudflare. The
+optional `https://cast.llrdc.com` workflow serves the same casting UI and uses
+the Worker only for pairing discovery; WebTransport video and control traffic
+still goes directly over the LAN. Configure
+`CLOUD_DISCOVERY_ENABLED=1` and the Worker credentials described in
+[`cloudflare/worker/README.md`](cloudflare/worker/README.md) only when that
+optional workflow is wanted.
 
 Select **Stop Casting** when finished. The receiver returns to its
 waiting screen after the stream becomes inactive.

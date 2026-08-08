@@ -11,3 +11,5 @@ dist/
 client/dist/
 client/index.html
 .opencode
+.cloudflare/
+cloudflare/worker/wrangler.toml

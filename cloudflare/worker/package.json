@@ -1,0 +1,19 @@
+{
+  "name": "cast-pairing-worker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "build:ui": "npm --prefix ../../client run build",
+    "deploy": "npm run build:ui && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply cast-pairing --local",
+    "db:migrate:remote": "wrangler d1 migrations apply cast-pairing --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260808.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.120.0"
+  }
+}

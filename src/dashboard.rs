@@ -8,6 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::local_pairing::PairingState;
 use crate::playback::SharedWriter;
 
 pub fn configured_dashboard_codec() -> String {
@@ -31,28 +32,49 @@ pub struct RawDashboardFeeder {
     writer_tx: SharedWriter,
     width: u32,
     height: u32,
+    pairing_state: PairingState,
 }
 
 impl RawDashboardFeeder {
-    pub fn new(width: u32, height: u32, writer_tx: SharedWriter) -> Self {
-        Self { writer_tx, width, height }
+    pub fn new(
+        width: u32,
+        height: u32,
+        writer_tx: SharedWriter,
+        pairing_state: PairingState,
+    ) -> Self {
+        Self {
+            writer_tx,
+            width,
+            height,
+            pairing_state,
+        }
     }
 
     pub fn push_frame(&mut self, vrefresh: u32) {
         let ips = crate::net::get_active_ipv4_addresses();
         let mut pixels = vec![0u32; (self.width * self.height) as usize];
-        crate::text::draw_ip_dashboard_argb(&mut pixels, self.width, self.height, vrefresh, &ips);
+        let pairing = self.pairing_state.snapshot();
+        crate::text::draw_ip_dashboard_argb(
+            &mut pixels,
+            self.width,
+            self.height,
+            vrefresh,
+            &ips,
+            pairing.code.as_deref(),
+            &pairing.status,
+        );
 
-        let raw_bytes = unsafe {
-            std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
-        };
+        let raw_bytes =
+            unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
         let frame = raw_bytes.to_vec();
 
         if let Ok(writer) = self.writer_tx.lock() {
             match writer.try_send(frame) {
                 Ok(()) => {}
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                    eprintln!("[IDLE DASHBOARD] Dropping raw frame because GStreamer is backlogged");
+                    eprintln!(
+                        "[IDLE DASHBOARD] Dropping raw frame because GStreamer is backlogged"
+                    );
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                     eprintln!("[IDLE DASHBOARD] GStreamer raw pipeline disconnected");
@@ -67,6 +89,7 @@ pub struct PersistentDashboardEncoder {
     stdin: std::process::ChildStdin,
     width: u32,
     height: u32,
+    pairing_state: PairingState,
 }
 
 impl PersistentDashboardEncoder {
@@ -74,22 +97,35 @@ impl PersistentDashboardEncoder {
         width: u32,
         height: u32,
         writer_tx: SharedWriter,
+        pairing_state: PairingState,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut child = Command::new("ffmpeg")
             .args([
                 "-y",
-                "-r", "1",
-                "-f", "rawvideo",
-                "-pixel_format", "bgra",
-                "-video_size", &format!("{}x{}", width, height),
-                "-i", "-",
-                "-c:v", "libx265",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-flush_packets", "1",
-                "-x265-params", "keyint=3600:bframes=0:no-scenecut=1",
-                "-pix_fmt", "yuv420p",
-                "-f", "hevc",
+                "-r",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "bgra",
+                "-video_size",
+                &format!("{}x{}", width, height),
+                "-i",
+                "-",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-flush_packets",
+                "1",
+                "-x265-params",
+                "keyint=3600:bframes=0:no-scenecut=1",
+                "-pix_fmt",
+                "yuv420p",
+                "-f",
+                "hevc",
                 "-",
             ])
             .stdin(Stdio::piped())
@@ -104,7 +140,9 @@ impl PersistentDashboardEncoder {
         std::thread::spawn(move || {
             let mut buf = [0u8; 131072];
             while let Ok(n) = stdout.read(&mut buf) {
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 if let Ok(writer) = writer_tx.lock() {
                     let _ = writer.send(buf[..n].to_vec());
                 }
@@ -116,19 +154,33 @@ impl PersistentDashboardEncoder {
             stdin,
             width,
             height,
+            pairing_state,
         })
     }
 
     pub fn push_frame(&mut self, vrefresh: u32) {
         let ips = crate::net::get_active_ipv4_addresses();
         let mut pixels = vec![0u32; (self.width * self.height) as usize];
-        crate::text::draw_ip_dashboard_argb(&mut pixels, self.width, self.height, vrefresh, &ips);
+        let pairing = self.pairing_state.snapshot();
+        crate::text::draw_ip_dashboard_argb(
+            &mut pixels,
+            self.width,
+            self.height,
+            vrefresh,
+            &ips,
+            pairing.code.as_deref(),
+            &pairing.status,
+        );
 
-        let raw_bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
-        };
+        let raw_bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
 
-        if self.stdin.write_all(raw_bytes).and_then(|_| self.stdin.flush()).is_err() {
+        if self
+            .stdin
+            .write_all(raw_bytes)
+            .and_then(|_| self.stdin.flush())
+            .is_err()
+        {
             eprintln!("[IDLE ENCODER] Pipe write to ffmpeg stdin failed");
         }
     }
@@ -147,12 +199,18 @@ pub fn spawn_idle_dashboard_thread(
     vrefresh: u32,
     idle_active: Arc<AtomicBool>,
     writer_tx: SharedWriter,
+    pairing_state: PairingState,
 ) {
     let dashboard_codec = configured_dashboard_codec();
     std::thread::spawn(move || {
         let mut last_secs = 0u64;
         let mut raw_feeder = if dashboard_codec == "raw" {
-            Some(RawDashboardFeeder::new(screen_w, screen_h, writer_tx.clone()))
+            Some(RawDashboardFeeder::new(
+                screen_w,
+                screen_h,
+                writer_tx.clone(),
+                pairing_state.clone(),
+            ))
         } else {
             None
         };
@@ -160,8 +218,17 @@ pub fn spawn_idle_dashboard_thread(
         loop {
             if !idle_active.load(Ordering::Relaxed) {
                 if dashboard_codec == "hevc" && encoder.is_none() {
-                    println!("[IDLE THREAD] Spawning fallback {}x{} HEVC dashboard encoder...", screen_w, screen_h);
-                    encoder = PersistentDashboardEncoder::spawn(screen_w, screen_h, writer_tx.clone()).ok();
+                    println!(
+                        "[IDLE THREAD] Spawning fallback {}x{} HEVC dashboard encoder...",
+                        screen_w, screen_h
+                    );
+                    encoder = PersistentDashboardEncoder::spawn(
+                        screen_w,
+                        screen_h,
+                        writer_tx.clone(),
+                        pairing_state.clone(),
+                    )
+                    .ok();
                 }
 
                 let now_secs = std::time::SystemTime::now()

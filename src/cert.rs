@@ -63,12 +63,18 @@ pub fn is_cert_valid(cert_path: &Path) -> bool {
     // Consider certificate expired if less than 24 hours remain
     let buffer_secs = 24 * 3600;
     if now_secs + buffer_secs >= not_after_secs {
-        println!("[CERT] Certificate at {:?} is expired or expires within 24h (not_after={}, now={})", cert_path, not_after_secs, now_secs);
+        println!(
+            "[CERT] Certificate at {:?} is expired or expires within 24h (not_after={}, now={})",
+            cert_path, not_after_secs, now_secs
+        );
         return false;
     }
 
     let remaining_days = (not_after_secs - now_secs) / 86400;
-    println!("[CERT] Certificate at {:?} is valid for another {} days.", cert_path, remaining_days);
+    println!(
+        "[CERT] Certificate at {:?} is valid for another {} days.",
+        cert_path, remaining_days
+    );
     true
 }
 
@@ -78,7 +84,10 @@ pub async fn get_or_create_identity() -> Result<Identity, Box<dyn Error + Send +
     let need_generate = !is_cert_valid(&cert_path) || !key_path.exists();
 
     if need_generate {
-        println!("[CERT] Generating new persistent TLS certificate at {:?}...", cert_path);
+        println!(
+            "[CERT] Generating new persistent TLS certificate at {:?}...",
+            cert_path
+        );
         let subject_alt_names = vec![
             "localhost".to_string(),
             "127.0.0.1".to_string(),
@@ -97,9 +106,15 @@ pub async fn get_or_create_identity() -> Result<Identity, Box<dyn Error + Send +
 
         fs::write(&cert_path, cert_pem)?;
         fs::write(&key_path, key_pem)?;
-        println!("[CERT] Successfully saved TLS cert to {:?} and {:?}", cert_path, key_path);
+        println!(
+            "[CERT] Successfully saved TLS cert to {:?} and {:?}",
+            cert_path, key_path
+        );
     } else {
-        println!("[CERT] Reusing existing persistent TLS certificate from {:?}", cert_path);
+        println!(
+            "[CERT] Reusing existing persistent TLS certificate from {:?}",
+            cert_path
+        );
     }
 
     let identity = Identity::load_pemfiles(&cert_path, &key_path).await?;
@@ -110,7 +125,10 @@ pub fn extract_cert_hash_hex(identity: &Identity) -> String {
     if let Some(cert) = identity.certificate_chain().as_slice().first() {
         let hash = cert.hash();
         let hash_bytes = hash.as_ref();
-        hash_bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(":")
+        hash_bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
     } else {
         String::new()
     }

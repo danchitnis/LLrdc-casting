@@ -12,6 +12,13 @@ server:
   idle_timeout_sec: 30         # Seconds of stream inactivity before restoring dashboard
   udp_buffer_size_mb: 8        # UDP socket receive buffer size in MB
   cert_dir: "/certs"           # Directory for TLS certificates
+  pairing_worker_url: "https://cast.llrdc.com"  # Cloudflare control-plane base URL
+  cloud_discovery_enabled: false
+  receiver_id: ""               # Provisioned unique receiver identifier
+  pairing_code_ttl_sec: 3600
+  pairing_registration_ttl_sec: 3600
+  receiver_registration_secret: "" # Base64url device registration key
+  pairing_token_public_key_file: "/pairing/public.pem"
 
 test-stream:
   resolution: "3840x2160"

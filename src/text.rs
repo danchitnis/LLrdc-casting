@@ -5,7 +5,6 @@
 
 #![forbid(unsafe_code)]
 
-
 /// Simple embedded 8x8 ASCII font bitmap (ASCII 32..=126)
 mod font {
     pub fn get_glyph(c: char) -> [u8; 8] {
@@ -149,7 +148,15 @@ pub fn draw_string_argb(
 }
 
 /// Render the IP Dashboard onto ARGB8888 buffer
-pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, refresh_hz: u32, ips: &[(String, String)]) {
+pub fn draw_ip_dashboard_argb(
+    buf: &mut [u32],
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+    ips: &[(String, String)],
+    pairing_code: Option<&str>,
+    pairing_status: &str,
+) {
     let bg_color = 0xFF0E1017; // Midnight dark blue/gray
     buf.fill(bg_color);
 
@@ -193,8 +200,14 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, refresh_
 
     let hdmi_line = format!("HDMI OUTPUT: {}X{} @ {} HZ", width, height, refresh_hz);
     draw_string_argb(
-        buf, width, height, box_x + 20 * scale / 2,
-        box_y + header_h - 12 * scale, &hdmi_line, 0xFF00E5FF, scale,
+        buf,
+        width,
+        height,
+        box_x + 20 * scale / 2,
+        box_y + header_h - 12 * scale,
+        &hdmi_line,
+        0xFF00E5FF,
+        scale,
     );
 
     // Real-Time Clock in Corner
@@ -245,15 +258,57 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, refresh_
 
     let mut current_y = start_content_y;
 
+    let pairing_url = if crate::cloud_discovery::cloud_discovery_enabled() {
+        "CAST: HTTPS://CAST.LLRDC.COM".to_string()
+    } else {
+        let ip = ips.first().map(|(_, ip)| ip.as_str()).unwrap_or("RECEIVER-IP");
+        format!("OPEN: HTTPS://{}:8080", ip)
+    };
+    draw_string_argb(
+        buf,
+        width,
+        height,
+        box_x + 30 * scale / 2,
+        current_y,
+        &pairing_url,
+        0xFFFFFFFF,
+        scale,
+    );
+    current_y += line_height;
+    let code_text = format!("PAIRING CODE: {}", pairing_code.unwrap_or("----"));
+    draw_string_argb(
+        buf,
+        width,
+        height,
+        box_x + 30 * scale / 2,
+        current_y,
+        &code_text,
+        0xFFFFCC00,
+        scale,
+    );
+    current_y += line_height;
+    draw_string_argb(
+        buf,
+        width,
+        height,
+        box_x + 30 * scale / 2,
+        current_y,
+        &format!("STATUS: {}", pairing_status),
+        0xFF00FF88,
+        scale,
+    );
+    current_y += line_height * 2;
+
     for (i, (iface, ip)) in ips.iter().enumerate() {
         let line_text = format!("[{:02}] {:<12} : {}", i + 1, iface, ip);
-        let color = if iface.starts_with("eth") || iface.starts_with("wlan") || iface.starts_with("end") {
-            0xFF00FF88 // Neon Green for physical interfaces
-        } else if iface == "lo" {
-            0xFFFFCC00 // Yellow for loopback
-        } else {
-            0xFF00E5FF // Cyan for docker/virtual
-        };
+        let color =
+            if iface.starts_with("eth") || iface.starts_with("wlan") || iface.starts_with("end") {
+                0xFF00FF88 // Neon Green for physical interfaces
+            } else if iface == "lo" {
+                0xFFFFCC00 // Yellow for loopback
+            } else {
+                0xFF00E5FF // Cyan for docker/virtual
+            };
 
         draw_string_argb(
             buf,
@@ -289,5 +344,3 @@ pub fn draw_ip_dashboard_argb(buf: &mut [u32], width: u32, height: u32, refresh_
         footer_scale.max(1),
     );
 }
-
-

@@ -23,10 +23,16 @@ export interface WebTransportUnidirectionalStream {
   getWriter(): WritableStreamDefaultWriter<Uint8Array>;
 }
 
+export interface WebTransportBidirectionalStream {
+  readable: ReadableStream<Uint8Array>;
+  writable: WritableStream<Uint8Array>;
+}
+
 export interface WebTransportSession {
   ready: Promise<void>;
   datagrams: WebTransportDatagramStream;
   createUnidirectionalStream(): Promise<WebTransportUnidirectionalStream>;
+  createBidirectionalStream(): Promise<WebTransportBidirectionalStream>;
   close(): void;
 }
 
@@ -77,7 +83,6 @@ declare global {
 }
 
 let transport: WebTransportSession | null = null;
-let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let uniStreamWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let mediaStream: MediaStream | null = null;
 let activeVideoTrack: MediaStreamTrack | null = null;
@@ -89,8 +94,9 @@ let outputGeometry: DisplayGeometry | null = null;
 let isStreaming = false;
 let isRemoteStreaming = false;
 let seqNum = 0;
-let autoCertHash: string | null = null;
-let controlWs: WebSocket | null = null;
+let controlWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
+let controlReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+let pairedConnection: { ip: string; port: number; certHash: string; code: string; token?: string } | null = null;
 let nalCache: NalCache = createNalCache();
 
 function parseResolution(value: string | undefined): [number, number] | null {
@@ -208,6 +214,145 @@ async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number
   await uniStreamWriter.write(combinedBuf);
 }
 
+function controlIsConnected(): boolean {
+  return controlWriter !== null;
+}
+
+async function sendControlMessage(message: object): Promise<void> {
+  if (!controlWriter) return;
+  const payload = new TextEncoder().encode(JSON.stringify(message));
+  const framed = new Uint8Array(4 + payload.length);
+  new DataView(framed.buffer).setUint32(0, payload.length, false);
+  framed.set(payload, 4);
+  await controlWriter.write(framed);
+}
+
+async function readControlMessages(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  let pending = new Uint8Array(0);
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      const merged = new Uint8Array(pending.length + result.value.length);
+      merged.set(pending);
+      merged.set(result.value, pending.length);
+      pending = merged;
+      while (pending.length >= 4) {
+        const length = new DataView(pending.buffer, pending.byteOffset, 4).getUint32(0, false);
+        if (length === 0 || length > 64 * 1024) throw new Error('Invalid control message length');
+        if (pending.length < 4 + length) break;
+        const payload = pending.slice(4, 4 + length);
+        pending = pending.slice(4 + length);
+        const message = JSON.parse(new TextDecoder().decode(payload)) as ServerStatusMessage;
+        if (message.type === 'status') handleServerStatusUpdate(message);
+        if (message.type === 'pong') log('[CONTROL] Received pong from device');
+      }
+    }
+  } catch (error) {
+    if (transport) {
+      log('[CONTROL] Direct LAN control stream disconnected.', true);
+      updateStatus('disconnected', 'DISCONNECTED');
+    }
+  }
+  controlReader = null;
+  controlWriter = null;
+}
+
+async function openPairedTransport(): Promise<void> {
+  if (!pairedConnection) throw new Error('Enter the four-digit receiver code first');
+  if (!window.WebTransport) throw new Error('WebTransport is not supported in this browser');
+
+  const certBytes = parseCertHash(pairedConnection.certHash);
+  if (!certBytes) throw new Error('Receiver certificate fingerprint is invalid');
+  const options: WebTransportOptions = {
+    serverCertificateHashes: [{ algorithm: 'sha-256', value: certBytes.buffer as ArrayBuffer }],
+  };
+  const query = new URLSearchParams({ code: pairedConnection.code });
+  if (pairedConnection.token) query.set('token', pairedConnection.token);
+  const url = `https://${pairedConnection.ip}:${pairedConnection.port}/?${query.toString()}`;
+  transport = new window.WebTransport(url, options);
+  await transport.ready;
+  const control = await transport.createBidirectionalStream();
+  controlWriter = control.writable.getWriter();
+  controlReader = control.readable.getReader();
+  void readControlMessages(controlReader);
+  await sendControlMessage({ type: 'get_status' });
+  updateStatus('connected', 'CONNECTED');
+  log('[WEBTRANSPORT] Connected directly to receiver over the LAN.');
+}
+
+function isDirectIpPage(): boolean {
+  const hostname = window.location.hostname;
+  const ipv4 = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname);
+  const ipv6 = hostname.includes(':');
+  return window.location.port === '8080' || ipv4 || ipv6;
+}
+
+export async function pairWithCode(rawCode: string): Promise<void> {
+  const code = rawCode.trim();
+  if (!/^\d{4}$/.test(code)) throw new Error('Enter the four-digit code shown on the receiver.');
+  updateStatus('connecting', 'PAIRING');
+  const localMode = isDirectIpPage();
+  if (localMode) {
+    const response = await fetch('/cert_hash', { cache: 'no-store' });
+    if (!response.ok) throw new Error('Receiver certificate is unavailable.');
+    const certHash = (await response.text()).trim();
+    pairedConnection = {
+      ip: window.location.hostname,
+      port: 4433,
+      certHash,
+      code,
+    };
+  } else {
+    const response = await fetch('/api/pair', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ code }),
+    });
+    if (!response.ok) throw new Error('Code invalid or receiver unavailable.');
+    const result = await response.json() as {
+      ip_address?: string;
+      webtransport_port?: number;
+      cert_hash_hex?: string;
+      connection_token?: string;
+    };
+    if (!result.ip_address || !result.webtransport_port || !result.cert_hash_hex || !result.connection_token) {
+      throw new Error('Pairing response was incomplete.');
+    }
+    pairedConnection = {
+      ip: result.ip_address,
+      port: result.webtransport_port,
+      certHash: result.cert_hash_hex,
+      code,
+      token: result.connection_token,
+    };
+  }
+  try {
+    await openPairedTransport();
+  } catch (error) {
+    const reason = error instanceof Error && error.message ? ` (${error.message})` : '';
+    log(`[PAIRING] WebTransport connection failed${reason}`, true);
+    pairedConnection = null;
+    transport = null;
+    controlWriter = null;
+    controlReader = null;
+    throw new Error(`Receiver is not reachable from this LAN${reason}.`);
+  }
+  setSettingsDisabled(false);
+  const button = document.getElementById('toggleBtn') as HTMLButtonElement | null;
+  if (button) button.disabled = false;
+  const status = document.getElementById('pairStatus');
+  if (status) status.textContent = 'Paired to receiver on this LAN';
+}
+
+export function initPairing(): void {
+  setSettingsDisabled(true);
+  const button = document.getElementById('toggleBtn') as HTMLButtonElement | null;
+  if (button) button.disabled = true;
+  updateStatus('disconnected', 'ENTER CODE');
+}
+
 export async function stopStreaming(): Promise<void> {
   if (!isStreaming && !mediaStream && !transport) {
     setSettingsDisabled(false);
@@ -216,11 +361,8 @@ export async function stopStreaming(): Promise<void> {
   isStreaming = false;
   seqNum = 0;
 
-  if (controlWs && controlWs.readyState === WebSocket.OPEN) {
-    try {
-      controlWs.send(JSON.stringify({ type: 'stop' }));
-      log('[CONTROL SOCKET] Sent STOP command to device over independent socket.');
-    } catch (e) {}
+  if (controlIsConnected()) {
+    try { await sendControlMessage({ type: 'stop' }); } catch (e) {}
   }
 
   if (uniStreamWriter) {
@@ -269,23 +411,13 @@ export async function stopStreaming(): Promise<void> {
     mediaStream = null;
   }
 
-  if (writer) {
-    try { writer.releaseLock(); } catch (e) {}
-    writer = null;
-  }
-
   if (uniStreamWriter) {
     try { uniStreamWriter.releaseLock(); } catch (e) {}
     uniStreamWriter = null;
   }
 
-  if (transport) {
-    try { transport.close(); } catch (e) {}
-    transport = null;
-  }
-
   if (!isRemoteStreaming) {
-    if (controlWs && controlWs.readyState === WebSocket.OPEN) {
+    if (controlIsConnected()) {
       updateStatus('connected', 'CONNECTED');
     } else {
       updateStatus('disconnected', 'DISCONNECTED');
@@ -318,8 +450,12 @@ export async function toggleCasting(): Promise<void> {
 
   setSettingsDisabled(true);
 
-  const boardIp = window.location.hostname || '192.168.1.72';
-  const boardPort = 4433;
+  if (!transport || !controlIsConnected()) {
+    isStreaming = false;
+    setSettingsDisabled(false);
+    log('[PAIRING] Enter the receiver code before starting a cast.', true);
+    return;
+  }
   const resSelect = document.getElementById('resolution') as HTMLSelectElement;
   const aspectModeSelect = document.getElementById('aspectMode') as HTMLSelectElement | null;
   const fpsSelect = document.getElementById('fps') as HTMLSelectElement;
@@ -351,35 +487,7 @@ export async function toggleCasting(): Promise<void> {
     return;
   }
 
-  log(`[CONNECTING] WebTransport -> https://${boardIp}:${boardPort}`);
-  updateStatus('connecting', 'CONNECTING');
-
   try {
-    const transportOpts: WebTransportOptions = {};
-    if (!autoCertHash) {
-      try {
-        const res = await fetch('/cert_hash');
-        if (res.ok) autoCertHash = (await res.text()).trim();
-      } catch (e) {}
-    }
-    const certBytes = parseCertHash(autoCertHash);
-    if (certBytes) {
-      transportOpts.serverCertificateHashes = [{
-        algorithm: 'sha-256',
-        value: certBytes.buffer as ArrayBuffer
-      }];
-      log(`[CERT] Auto-authenticated device TLS SHA-256 fingerprint`);
-    }
-
-    if (!window.WebTransport) {
-      throw new Error('WebTransport is not supported in this browser environment');
-    }
-
-    transport = new window.WebTransport(`https://${boardIp}:${boardPort}`, transportOpts);
-    await transport.ready;
-    writer = transport.datagrams.writable.getWriter();
-    log(`[WEBTRANSPORT CONNECTED] Session established over QUIC/UDP!`);
-
     const videoSourceSelect = document.getElementById('videoSource') as HTMLSelectElement;
     const videoSource = videoSourceSelect.value;
 
@@ -533,9 +641,9 @@ export async function toggleCasting(): Promise<void> {
       return;
     }
 
-    if (controlWs && controlWs.readyState === WebSocket.OPEN) {
+    if (controlIsConnected()) {
       try {
-        controlWs.send(JSON.stringify({
+        await sendControlMessage({
           type: 'start',
           codec: wireCodec,
           resolution: encodedResolution,
@@ -554,8 +662,8 @@ export async function toggleCasting(): Promise<void> {
           signal_height: displayGeometry.signalHeight,
           panel_width: displayGeometry.panelWidth,
            panel_height: displayGeometry.panelHeight,
-         }));
-         log(`[CONTROL SOCKET] Geometry: capture ${rawWidth}x${rawHeight}, encoded ${activeWidth}x${activeHeight}, KMS 100% HDMI signal, content ${contentRect}`);
+         });
+          log(`[CONTROL] Geometry: capture ${rawWidth}x${rawHeight}, encoded ${activeWidth}x${activeHeight}, KMS 100% HDMI signal, content ${contentRect}`);
       } catch (e) {}
     }
 
@@ -615,13 +723,13 @@ export async function toggleCasting(): Promise<void> {
       toggleBtn.className = 'btn-primary stop';
     }
 
-    const keepAliveTimer = setInterval(() => {
+    const keepAliveTimer = setInterval(async () => {
       if (!isStreaming) {
         clearInterval(keepAliveTimer);
         return;
       }
-      if (controlWs && controlWs.readyState === WebSocket.OPEN) {
-        try { controlWs.send(JSON.stringify({ type: 'ping' })); } catch(e) {}
+      if (controlIsConnected()) {
+        try { await sendControlMessage({ type: 'ping' }); } catch(e) {}
       }
       if (transport && transport.datagrams && transport.datagrams.writable) {
         try {
@@ -808,7 +916,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
   } else if (msg.state === 'IDLE') {
     isRemoteStreaming = false;
     if (!isStreaming) {
-      if (controlWs && controlWs.readyState === WebSocket.OPEN) {
+      if (controlIsConnected()) {
         updateStatus('connected', 'CONNECTED');
       } else {
         updateStatus('disconnected', 'DISCONNECTED');
@@ -826,44 +934,5 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
 }
 
 export function initControlSocket(): void {
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.location.host || '192.168.1.72:8080';
-  const wsUrl = `${wsProtocol}//${host}/ws`;
-
-  updateStatus('connecting', 'CONNECTING...');
-
-  try {
-    controlWs = new WebSocket(wsUrl);
-    controlWs.onopen = () => {
-      log(`[CONTROL SOCKET] Connected to independent command & telemetry channel (${wsUrl})`);
-      updateStatus('connected', 'CONNECTED');
-      try {
-        controlWs?.send(JSON.stringify({ type: 'get_status' }));
-      } catch (e) {}
-    };
-    controlWs.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data) as ServerStatusMessage;
-        if (msg.type === 'status') {
-           log(`[TELEMETRY] Device State: ${msg.state} | Encoded: ${msg.resolution} | Display: ${msg.display_resolution || 'N/A'} @ ${msg.display_fps || 0}FPS | Frames: ${msg.frames_submitted}`);
-          handleServerStatusUpdate(msg);
-        } else if (msg.type === 'pong') {
-          log(`[CONTROL SOCKET] Received pong from device`);
-        }
-      } catch (e) {}
-    };
-    controlWs.onclose = () => {
-      log(`[CONTROL SOCKET] Disconnected. Reconnecting in 3s...`, true);
-      updateStatus('disconnected', 'DISCONNECTED');
-      setTimeout(initControlSocket, 3000);
-    };
-    controlWs.onerror = () => {
-      updateStatus('disconnected', 'DISCONNECTED');
-    };
-  } catch (e) {
-    const errObj = e as Error;
-    log(`[CONTROL SOCKET ERROR] ${errObj.message}`, true);
-    updateStatus('disconnected', 'DISCONNECTED');
-    setTimeout(initControlSocket, 3000);
-  }
+  initPairing();
 }

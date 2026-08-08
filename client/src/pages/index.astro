@@ -59,6 +59,74 @@ import LogConsole from '../components/LogConsole.astro';
       margin-bottom: 24px;
     }
 
+    .pairing-card {
+      background: rgba(19, 27, 46, 0.92);
+      border: 1px solid var(--color-border);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+
+    .pairing-card h2 {
+      margin: 0 0 8px;
+      font-size: 1.05rem;
+    }
+
+    .pairing-card p {
+      color: var(--color-text-muted);
+      margin: 0 0 16px;
+      font-size: 0.9rem;
+    }
+
+    .pairing-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    .pairing-row input {
+      min-width: 0;
+      flex: 1;
+      background: #0b1220;
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      color: var(--color-text);
+      font: 600 1.2rem var(--font-mono);
+      letter-spacing: 0.25em;
+      padding: 12px 14px;
+      text-align: center;
+    }
+
+    .pairing-row button {
+      border: 0;
+      border-radius: 10px;
+      padding: 0 20px;
+      color: white;
+      background: #0ea5e9;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .pairing-row button:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
+
+    #pairStatus {
+      display: block;
+      margin-top: 12px;
+      color: var(--color-text-muted);
+      font-size: 0.85rem;
+    }
+
+    @media (max-width: 520px) {
+      .pairing-row {
+        flex-direction: column;
+      }
+      .pairing-row button {
+        min-height: 44px;
+      }
+    }
+
     .btn-primary {
       width: 100%;
       padding: 16px 24px;
@@ -124,6 +192,18 @@ import LogConsole from '../components/LogConsole.astro';
 <div class="main-container">
   <Header />
 
+  <section class="pairing-card" aria-labelledby="pairingTitle">
+    <h2 id="pairingTitle">Connect to a receiver</h2>
+    <p>Enter the four-digit code shown on the receiver's HDMI screen. Video stays on the local network.</p>
+    <form id="pairForm">
+      <div class="pairing-row">
+        <input id="pairCode" name="code" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="one-time-code" placeholder="0000" aria-label="Four-digit receiver code" required />
+        <button id="pairBtn" type="submit">Connect</button>
+      </div>
+    </form>
+    <span id="pairStatus" role="status">Waiting for code</span>
+  </section>
+
   <SettingsCard />
 
   <div class="action-container">
@@ -143,7 +223,7 @@ import LogConsole from '../components/LogConsole.astro';
 </div>
 
 <script>
-  import { toggleCasting, initControlSocket, log } from '../lib/streamer';
+  import { toggleCasting, initPairing, pairWithCode, log } from '../lib/streamer';
   import { onResolutionChange, onCodecChange, checkBrowserCodecCapabilities } from '../lib/guardrails';
 
   declare global {
@@ -156,7 +236,27 @@ import LogConsole from '../components/LogConsole.astro';
   window.toggleCasting = toggleCasting;
 
   window.addEventListener('DOMContentLoaded', async () => {
-    initControlSocket();
+    initPairing();
+
+    const pairForm = document.getElementById('pairForm') as HTMLFormElement | null;
+    const pairCode = document.getElementById('pairCode') as HTMLInputElement | null;
+    const pairBtn = document.getElementById('pairBtn') as HTMLButtonElement | null;
+    const pairStatus = document.getElementById('pairStatus');
+    pairForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!pairCode || !pairBtn) return;
+      pairBtn.disabled = true;
+      if (pairStatus) pairStatus.textContent = 'Connecting to receiver on this LAN...';
+      try {
+        await pairWithCode(pairCode.value);
+        if (pairStatus) pairStatus.textContent = 'Paired to receiver on this LAN';
+      } catch (error) {
+        if (pairStatus) pairStatus.textContent = (error as Error).message;
+        log(`[PAIRING] ${(error as Error).message}`, true);
+      } finally {
+        pairBtn.disabled = false;
+      }
+    });
 
     const resSelect = document.getElementById('resolution') as HTMLSelectElement | null;
     if (resSelect) {
@@ -170,12 +270,7 @@ import LogConsole from '../components/LogConsole.astro';
 
     await checkBrowserCodecCapabilities(log);
 
-    try {
-      const res = await fetch('/cert_hash');
-      if (res.ok) {
-        log(`[AUTO-CONFIG] Ready to stream to ${window.location.hostname || 'device'}`);
-      }
-    } catch (e) {}
+    log('[PAIRING] Enter the code shown on the receiver HDMI screen.');
   });
 </script>
 

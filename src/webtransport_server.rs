@@ -4,9 +4,13 @@
  */
 
 use std::error::Error;
+use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use wtransport::{Endpoint, Identity, ServerConfig};
 
+use crate::cloud_discovery::ConnectionTokenVerifier;
+use crate::local_pairing::PairingState;
 use crate::v4l2_decoder::VideoFrame;
 
 pub async fn get_or_create_identity() -> Result<Identity, Box<dyn Error + Send + Sync>> {
@@ -21,10 +25,15 @@ pub fn extract_cert_hash_hex(identity: &Identity) -> String {
 pub async fn run_server_with_identity(
     identity: Identity,
     frame_tx: mpsc::Sender<VideoFrame>,
+    control_channel: crate::control::ControlChannel,
+    pairing_state: PairingState,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let hex_str = extract_cert_hash_hex(&identity);
     if !hex_str.is_empty() {
-        println!("[WEBTRANSPORT] Persistent Certificate SHA-256 (HEX): {}", hex_str);
+        println!(
+            "[WEBTRANSPORT] Persistent Certificate SHA-256 (HEX): {}",
+            hex_str
+        );
     }
 
     let wt_port: u16 = std::env::var("WEBTRANSPORT_PORT")
@@ -55,6 +64,17 @@ pub async fn run_server_with_identity(
         .build();
 
     let server = Endpoint::server(config)?;
+    let token_verifier = if crate::cloud_discovery::cloud_discovery_enabled() {
+        match ConnectionTokenVerifier::from_environment() {
+            Ok(verifier) => Some(Arc::new(verifier)),
+            Err(error) => {
+                eprintln!("[WEBTRANSPORT] Optional cloud token verification unavailable: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     println!("\n=====================================================");
     println!(" [WEBTRANSPORT SERVER] Listening on UDP 0.0.0.0:{wt_port}");
     println!(" Ready for incoming LLrdc Casting stream!");
@@ -94,9 +114,20 @@ pub async fn run_server_with_identity(
     loop {
         let incoming_session = server.accept().await;
         let frame_tx_clone = frame_tx.clone();
+        let control_channel_clone = control_channel.clone();
+        let token_verifier_clone = token_verifier.as_ref().map(Arc::clone);
+        let pairing_state_clone = pairing_state.clone();
 
         tokio::spawn(async move {
-            match handle_connection(incoming_session, frame_tx_clone).await {
+            match handle_connection(
+                incoming_session,
+                frame_tx_clone,
+                control_channel_clone,
+                token_verifier_clone,
+                pairing_state_clone,
+            )
+            .await
+            {
                 Ok(_) => println!("[WEBTRANSPORT] Session completed cleanly."),
                 Err(e) => eprintln!("[WEBTRANSPORT] Session error: {}", e),
             }
@@ -107,6 +138,9 @@ pub async fn run_server_with_identity(
 async fn handle_connection(
     incoming_session: wtransport::endpoint::IncomingSession,
     frame_tx: mpsc::Sender<VideoFrame>,
+    control_channel: crate::control::ControlChannel,
+    token_verifier: Option<Arc<ConnectionTokenVerifier>>,
+    pairing_state: PairingState,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let session_request = incoming_session.await?;
     println!(
@@ -114,6 +148,22 @@ async fn handle_connection(
         session_request.path()
     );
 
+    let (code, token) = connection_query(session_request.path());
+    let Some(code) = code else {
+        session_request.forbidden().await;
+        return Err("missing local pairing code".into());
+    };
+    let peer = session_request.remote_address().ip().to_string();
+    if let Err(reason) = pairing_state.validate_code(&code, &peer) {
+        session_request.forbidden().await;
+        return Err(format!("local pairing rejected: {reason}").into());
+    }
+    if let (Some(token), Some(token_verifier)) = (token.as_deref(), token_verifier.as_ref()) {
+        if let Err(reason) = token_verifier.verify(token) {
+            session_request.forbidden().await;
+            return Err(format!("optional cloud token rejected: {reason}").into());
+        }
+    }
     let connection = session_request.accept().await?;
     println!("[WEBTRANSPORT] Client connected successfully via QUIC/UDP!");
 
@@ -141,6 +191,18 @@ async fn handle_connection(
                         println!("[WEBTRANSPORT] Stream accept channel closed ({})", e);
                         break;
                     }
+                }
+            }
+            bi_res = connection.accept_bi() => {
+                match bi_res {
+                    Ok((send_stream, recv_stream)) => {
+                        tokio::spawn(handle_control_stream(
+                            send_stream,
+                            recv_stream,
+                            control_channel.clone(),
+                        ));
+                    }
+                    Err(e) => println!("[WEBTRANSPORT] Control stream channel closed ({})", e),
                 }
             }
             // Also accept datagrams for ultra-low latency frame packets
@@ -174,5 +236,76 @@ async fn handle_connection(
     };
     let _ = frame_tx.send(stop_frame).await;
 
+    Ok(())
+}
+
+fn connection_query(path: &str) -> (Option<String>, Option<String>) {
+    let Some((_, query)) = path.split_once('?') else {
+        return (None, None);
+    };
+    let mut code = None;
+    let mut token = None;
+    for item in query.split('&') {
+        if let Some(value) = item.strip_prefix("code=") {
+            code = Some(value.to_string());
+        } else if let Some(value) = item.strip_prefix("token=") {
+            token = Some(value.to_string());
+        }
+    }
+    (code, token)
+}
+
+async fn handle_control_stream(
+    mut send_stream: wtransport::SendStream,
+    mut recv_stream: wtransport::RecvStream,
+    control_channel: crate::control::ControlChannel,
+) {
+    let mut telemetry_rx = control_channel.telemetry_tx.subscribe();
+    let telemetry_task = tokio::spawn(async move {
+        while let Ok(message) = telemetry_rx.recv().await {
+            let Ok(payload) = serde_json::to_vec(&message) else {
+                continue;
+            };
+            if write_control_message(&mut send_stream, &payload)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let _ = control_channel
+        .cmd_tx
+        .send(crate::control::ControlCommand::GetStatus)
+        .await;
+    loop {
+        let mut length = [0u8; 4];
+        if recv_stream.read_exact(&mut length).await.is_err() {
+            break;
+        }
+        let size = u32::from_be_bytes(length) as usize;
+        if size == 0 || size > 64 * 1024 {
+            break;
+        }
+        let mut payload = vec![0u8; size];
+        if recv_stream.read_exact(&mut payload).await.is_err() {
+            break;
+        }
+        if let Ok(command) = serde_json::from_slice::<crate::control::ControlCommand>(&payload) {
+            let _ = control_channel.cmd_tx.send(command).await;
+        }
+    }
+    telemetry_task.abort();
+}
+
+async fn write_control_message(
+    stream: &mut wtransport::SendStream,
+    payload: &[u8],
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let length = u32::try_from(payload.len())?;
+    stream.write_all(&length.to_be_bytes()).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await?;
     Ok(())
 }
