@@ -1,14 +1,66 @@
 /*
  * Idle Dashboard Module
- * Encodes live clock and IP dashboard frames using ffmpeg (x265) when no client stream is active.
+ * Feeds live clock and IP dashboard frames directly to the idle KMS pipeline.
  */
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::playback::SharedWriter;
+
+pub fn configured_dashboard_codec() -> String {
+    match std::env::var("IDLE_DASHBOARD_MODE").ok().as_deref() {
+        Some("hevc") | Some("h265") => "hevc".to_string(),
+        _ => "raw".to_string(),
+    }
+}
+
+pub fn raw_dashboard_dimensions(screen_w: u32, screen_h: u32) -> (u32, u32) {
+    if screen_w <= 1920 {
+        return (screen_w, screen_h);
+    }
+
+    let width = 1920;
+    let height = ((screen_h as u64 * width as u64) / screen_w as u64) as u32;
+    (width, height & !1)
+}
+
+pub struct RawDashboardFeeder {
+    writer_tx: SharedWriter,
+    width: u32,
+    height: u32,
+}
+
+impl RawDashboardFeeder {
+    pub fn new(width: u32, height: u32, writer_tx: SharedWriter) -> Self {
+        Self { writer_tx, width, height }
+    }
+
+    pub fn push_frame(&mut self, vrefresh: u32) {
+        let ips = crate::net::get_active_ipv4_addresses();
+        let mut pixels = vec![0u32; (self.width * self.height) as usize];
+        crate::text::draw_ip_dashboard_argb(&mut pixels, self.width, self.height, vrefresh, &ips);
+
+        let raw_bytes = unsafe {
+            std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+        };
+        let frame = raw_bytes.to_vec();
+
+        if let Ok(writer) = self.writer_tx.lock() {
+            match writer.try_send(frame) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    eprintln!("[IDLE DASHBOARD] Dropping raw frame because GStreamer is backlogged");
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    eprintln!("[IDLE DASHBOARD] GStreamer raw pipeline disconnected");
+                }
+            }
+        }
+    }
+}
 
 pub struct PersistentDashboardEncoder {
     child: Child,
@@ -51,7 +103,6 @@ impl PersistentDashboardEncoder {
         // Parallel reader thread: forwards stdout stream chunks directly to GStreamer writer_tx
         std::thread::spawn(move || {
             let mut buf = [0u8; 131072];
-            use std::io::Read;
             while let Ok(n) = stdout.read(&mut buf) {
                 if n == 0 { break; }
                 if let Ok(writer) = writer_tx.lock() {
@@ -97,13 +148,19 @@ pub fn spawn_idle_dashboard_thread(
     idle_active: Arc<AtomicBool>,
     writer_tx: SharedWriter,
 ) {
+    let dashboard_codec = configured_dashboard_codec();
     std::thread::spawn(move || {
         let mut last_secs = 0u64;
+        let mut raw_feeder = if dashboard_codec == "raw" {
+            Some(RawDashboardFeeder::new(screen_w, screen_h, writer_tx.clone()))
+        } else {
+            None
+        };
         let mut encoder: Option<PersistentDashboardEncoder> = None;
         loop {
             if !idle_active.load(Ordering::Relaxed) {
-                if encoder.is_none() {
-                    println!("[IDLE THREAD] Spawning persistent native {}x{} HEVC dashboard encoder...", screen_w, screen_h);
+                if dashboard_codec == "hevc" && encoder.is_none() {
+                    println!("[IDLE THREAD] Spawning fallback {}x{} HEVC dashboard encoder...", screen_w, screen_h);
                     encoder = PersistentDashboardEncoder::spawn(screen_w, screen_h, writer_tx.clone()).ok();
                 }
 
@@ -114,12 +171,14 @@ pub fn spawn_idle_dashboard_thread(
 
                 if now_secs != last_secs {
                     last_secs = now_secs;
-                    if let Some(enc) = encoder.as_mut() {
+                    if let Some(feeder) = raw_feeder.as_mut() {
+                        feeder.push_frame(vrefresh);
+                    } else if let Some(enc) = encoder.as_mut() {
                         enc.push_frame(vrefresh);
                     }
                 }
             } else if encoder.is_some() {
-                println!("[IDLE THREAD] Streaming active; terminating idle HEVC dashboard encoder process.");
+                println!("[IDLE THREAD] Streaming active; terminating fallback idle HEVC encoder process.");
                 encoder = None;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));

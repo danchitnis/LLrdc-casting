@@ -13,6 +13,8 @@ pub struct PlaybackEngine {
     pub child: Child,
     pub writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     pub current_codec: String,
+    pub width: u32,
+    pub height: u32,
     pub render_rect: Option<String>,
     pub aspect_mode: String,
     pub dashboard_writer: SharedWriter,
@@ -26,7 +28,7 @@ impl PlaybackEngine {
         render_rect: Option<&str>,
         aspect_mode: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let norm = if target_codec.to_lowercase().contains("264") { "h264" } else { "h265" };
+        let norm = normalize_codec(target_codec);
         if self.current_codec == norm
             && self.render_rect.as_deref() == render_rect
             && self.aspect_mode == aspect_mode
@@ -44,13 +46,24 @@ impl PlaybackEngine {
         );
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let mut new_engine = start_persistent_playback(norm, connector, render_rect, aspect_mode)?;
+        let mut new_engine = start_persistent_playback(norm, connector, render_rect, aspect_mode, self.width, self.height)?;
         if let Ok(mut writer) = self.dashboard_writer.lock() {
             *writer = new_engine.writer_tx.clone();
         }
         new_engine.dashboard_writer = self.dashboard_writer.clone();
         *self = new_engine;
         Ok(())
+    }
+}
+
+fn normalize_codec(codec: &str) -> &str {
+    let codec_lower = codec.to_lowercase();
+    if codec_lower == "raw" || codec_lower == "bgra" || codec_lower == "dashboard" {
+        "raw"
+    } else if codec_lower.contains("264") {
+        "h264"
+    } else {
+        "h265"
     }
 }
 
@@ -75,23 +88,32 @@ pub fn start_persistent_playback(
     connector: &str,
     render_rect: Option<&str>,
     aspect_mode: &str,
+    width: u32,
+    height: u32,
 ) -> Result<PlaybackEngine, Box<dyn std::error::Error>> {
     let t_start = std::time::Instant::now();
     let plane = std::env::var("DRM_PLANE_ID").unwrap_or_else(|_| "33".into());
-    let codec_lower = codec.to_lowercase();
-    let norm_codec = if codec_lower.contains("264") { "h264" } else { "h265" };
-    let (parser, decoder) = if norm_codec == "h264" {
-        ("h264parse", "v4l2slh264dec")
+    let norm_codec = normalize_codec(codec);
+    let mut gst_args = vec!["-q".to_string()];
+    if norm_codec == "raw" {
+        println!("[PLAYBACK STARTUP] Initializing raw BGRA dashboard pipeline at {width}x{height} at t=0ms");
+        gst_args.extend([
+            "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), "blocksize=65536".to_string(), "!".to_string(),
+            "rawvideoparse".to_string(), "format=bgra".to_string(), format!("width={width}"), format!("height={height}"), "framerate=1/1".to_string(), "!".to_string(),
+        ]);
     } else {
-        ("h265parse", "v4l2slh265dec")
-    };
-    println!("[PLAYBACK STARTUP] Initializing persistent GStreamer pipeline for {norm_codec} ({parser} -> {decoder}) at t=0ms");
-
-    let mut gst_args = vec![
-        "-q".to_string(), "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), "blocksize=65536".to_string(), "!".to_string(),
-        parser.to_string(), "config-interval=-1".to_string(), "!".to_string(),
-        decoder.to_string(), "!".to_string(),
-    ];
+        let (parser, decoder) = if norm_codec == "h264" {
+            ("h264parse", "v4l2slh264dec")
+        } else {
+            ("h265parse", "v4l2slh265dec")
+        };
+        println!("[PLAYBACK STARTUP] Initializing persistent GStreamer pipeline for {norm_codec} ({parser} -> {decoder}) at t=0ms");
+        gst_args.extend([
+            "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), "blocksize=65536".to_string(), "!".to_string(),
+            parser.to_string(), "config-interval=-1".to_string(), "!".to_string(),
+            decoder.to_string(), "!".to_string(),
+        ]);
+    }
     gst_args.extend([
         "kmssink".to_string(), "driver-name=rockchip".to_string(),
         format!("connector-id={connector}"), format!("plane-id={plane}"),
@@ -106,7 +128,7 @@ pub fn start_persistent_playback(
 
     println!("[PLAYBACK STARTUP] Spawning continuous gst-launch-1.0 process...");
     let mut child = Command::new("gst-launch-1.0")
-        .env("GST_DEBUG", "v4l2slh265dec:4,h265parse:4,v4l2slh264dec:4,h264parse:4,kmssink:4")
+        .env("GST_DEBUG", "v4l2slh265dec:4,h265parse:4,v4l2slh264dec:4,h264parse:4,rawvideoparse:4,kmssink:4")
         .args(&gst_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -129,7 +151,10 @@ pub fn start_persistent_playback(
         });
     }
 
-    let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
+    // Raw dashboard frames can be large; keep only two queued so
+    // a stalled KMS sink cannot retain hundreds of megabytes of stale clocks.
+    let queue_capacity = if norm_codec == "raw" { 2 } else { 16 };
+    let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(queue_capacity);
     std::thread::spawn(move || {
         while let Ok(access_unit) = writer_rx.recv() {
             if stdin.write_all(&access_unit).and_then(|_| stdin.flush()).is_err() {
@@ -145,6 +170,8 @@ pub fn start_persistent_playback(
         child,
         writer_tx,
         current_codec: norm_codec.to_string(),
+        width,
+        height,
         render_rect: render_rect.map(str::to_owned),
         aspect_mode: aspect_mode.to_string(),
         dashboard_writer,

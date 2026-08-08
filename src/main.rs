@@ -50,13 +50,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (screen_w, screen_h, vrefresh, connector_id, render_rect, edid_info) = playback::autodetect_display_info();
     let signal_resolution = format!("{}x{}", screen_w, screen_h);
     let panel_resolution = edid_info.panel_res.clone();
+    let idle_dashboard_codec = dashboard::configured_dashboard_codec();
+    let (idle_width, idle_height) = if idle_dashboard_codec == "raw" {
+        dashboard::raw_dashboard_dimensions(screen_w, screen_h)
+    } else {
+        (screen_w, screen_h)
+    };
+    println!("[IDLE DASHBOARD] Mode={} render={}x{} display={}x{}", idle_dashboard_codec, idle_width, idle_height, screen_w, screen_h);
 
     // 2. Start single persistent GStreamer pipeline
     let mut playback_engine = playback::start_persistent_playback(
-        "hevc",
+        &idle_dashboard_codec,
         &connector_id,
         render_rect.as_deref(),
         "dashboard",
+        idle_width,
+        idle_height,
     )?;
 
     let streaming_active = Arc::new(AtomicBool::new(false));
@@ -69,10 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let active_aspect_mode = Arc::new(Mutex::new(String::new()));
     let active_content_rect = Arc::new(Mutex::new(String::new()));
 
-    // 3. Background feeder thread for native HEVC clock/IP dashboard
+    // 3. Background feeder thread for the idle clock/IP dashboard
     dashboard::spawn_idle_dashboard_thread(
-        screen_w,
-        screen_h,
+        idle_width,
+        idle_height,
         vrefresh,
         Arc::clone(&streaming_active),
         playback_engine.dashboard_writer.clone(),
@@ -99,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
                         if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
                         v4l2_decoder::reset_decoder_pipeline();
-                        let _ = playback_engine.ensure_configuration("hevc", &connector_id, render_rect.as_deref(), "dashboard");
+                        let _ = playback_engine.ensure_configuration(&idle_dashboard_codec, &connector_id, render_rect.as_deref(), "dashboard");
                         while rx.try_recv().is_ok() {}
                         let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                         let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
@@ -238,7 +247,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
                             if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
                             v4l2_decoder::reset_decoder_pipeline();
-                            let _ = playback_engine.ensure_configuration("hevc", &connector_id, render_rect.as_deref(), "dashboard");
+                            let _ = playback_engine.ensure_configuration(&idle_dashboard_codec, &connector_id, render_rect.as_deref(), "dashboard");
                             while rx.try_recv().is_ok() {}
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                             let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
@@ -369,7 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
                              if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
-                            let _ = playback_engine.ensure_configuration("hevc", &connector_id, render_rect.as_deref(), "dashboard");
+                            let _ = playback_engine.ensure_configuration(&idle_dashboard_codec, &connector_id, render_rect.as_deref(), "dashboard");
                             while rx.try_recv().is_ok() {}
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
                             let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
