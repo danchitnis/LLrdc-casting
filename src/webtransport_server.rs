@@ -57,7 +57,7 @@ pub async fn run_server_with_identity(
     let server = Endpoint::server(config)?;
     println!("\n=====================================================");
     println!(" [WEBTRANSPORT SERVER] Listening on UDP 0.0.0.0:{wt_port}");
-    println!(" Ready for incoming WebTransport QUIC screen sharing!");
+    println!(" Ready for incoming LLrdc Casting stream!");
     println!("=====================================================\n");
 
     // Spawn companion UDP listener for direct UDP video frame packets

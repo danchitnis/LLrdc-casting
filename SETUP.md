@@ -62,7 +62,7 @@ ssh <BOARD_IP> "ls -l /dev/video*"
 
 ---
 
-### Step 4: Launch WebTransport Screen Sharing Server
+### Step 4: Launch LLrdc Casting Server
 To build the Docker image locally and transfer it to the board in background mode:
 
 ```bash

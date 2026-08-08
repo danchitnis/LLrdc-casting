@@ -1,6 +1,6 @@
 /*
  * Lightweight HTTPS & HTTP Server Module with Integrated Independent WebSocket Control Socket
- * Serves the embedded screen sharing web client (client/index.html)
+ * Serves the embedded LLrdc-casting web client (client/index.html)
  * and independent control/telemetry WebSocket endpoint at /ws.
  */
 

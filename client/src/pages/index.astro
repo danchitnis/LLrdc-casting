@@ -127,13 +127,13 @@ import LogConsole from '../components/LogConsole.astro';
   <SettingsCard />
 
   <div class="action-container">
-    <button id="toggleBtn" class="btn-primary" onclick="toggleScreenShare()">
+    <button id="toggleBtn" class="btn-primary" onclick="toggleCasting()">
       <svg id="toggleIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
         <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
         <line x1="8" y1="21" x2="16" y2="21"></line>
         <line x1="12" y1="17" x2="12" y2="21"></line>
       </svg>
-      <span id="toggleText">Start Screen Sharing</span>
+      <span id="toggleText">Start Casting</span>
     </button>
   </div>
 
@@ -143,17 +143,17 @@ import LogConsole from '../components/LogConsole.astro';
 </div>
 
 <script>
-  import { toggleScreenShare, initControlSocket, log } from '../lib/streamer';
+  import { toggleCasting, initControlSocket, log } from '../lib/streamer';
   import { onResolutionChange, onCodecChange, checkBrowserCodecCapabilities } from '../lib/guardrails';
 
   declare global {
     interface Window {
-      toggleScreenShare: typeof toggleScreenShare;
+      toggleCasting: typeof toggleCasting;
     }
   }
 
-  // Expose toggleScreenShare globally for HTML button onclick
-  window.toggleScreenShare = toggleScreenShare;
+  // Expose toggleCasting globally for HTML button onclick
+  window.toggleCasting = toggleCasting;
 
   window.addEventListener('DOMContentLoaded', async () => {
     initControlSocket();

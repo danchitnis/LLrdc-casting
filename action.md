@@ -1,12 +1,12 @@
-# Action Plan: Resolving Choppy Video Streaming & Latency Optimization in LLrdc-Sharing
+# Action Plan: Resolving Choppy Video Streaming & Latency Optimization in LLrdc-casting
 
-This document outlines the step-by-step action plan to eliminate choppy video streaming, reduce end-to-end latency, and improve video presentation quality in `LLrdc-sharing`, incorporating architectural insights and best practices from `LLrdc`.
+This document outlines the step-by-step action plan to eliminate choppy video streaming, reduce end-to-end latency, and improve video presentation quality in `LLrdc-casting`, incorporating architectural insights and best practices from `LLrdc`.
 
 ---
 
 ## 1. Executive Summary & Root Cause Analysis
 
-Based on deep analysis of `LLrdc-sharing` and comparative benchmarking against `LLrdc`, four primary root causes were identified for the current choppy streaming behavior:
+Based on deep analysis of `LLrdc-casting` and comparative benchmarking against `LLrdc`, four primary root causes were identified for the current choppy streaming behavior:
 
 1. **Destructive Delta-Frame Discarding in Receiver (`src/main.rs`):**
    - The loop in `main.rs` drains the MPSC channel using `while let Ok(newer) = rx.try_recv() { frame = newer; }`.

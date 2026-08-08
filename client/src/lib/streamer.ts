@@ -294,7 +294,7 @@ export async function stopStreaming(): Promise<void> {
     const toggleBtn = document.getElementById('toggleBtn');
     const toggleText = document.getElementById('toggleText');
     if (toggleBtn && toggleText) {
-      toggleText.textContent = 'Start Screen Sharing';
+      toggleText.textContent = 'Start Casting';
       toggleBtn.className = 'btn-primary';
       (toggleBtn as HTMLButtonElement).disabled = false;
     }
@@ -302,10 +302,10 @@ export async function stopStreaming(): Promise<void> {
     setSettingsDisabled(false);
   }
 
-  log('[STOPPED] Screen sharing session closed.');
+  log('[STOPPED] Casting session closed.');
 }
 
-export async function toggleScreenShare(): Promise<void> {
+export async function toggleCasting(): Promise<void> {
   if (isRemoteStreaming) return;
   if (isStreaming) {
     await stopStreaming();
@@ -418,7 +418,7 @@ export async function toggleScreenShare(): Promise<void> {
     activeVideoTrack = mediaStream.getVideoTracks()[0] || null;
     if (activeVideoTrack) {
       activeVideoTrack.onended = () => {
-        log('[SCREEN CAPTURE] User stopped screen sharing.');
+        log('[SCREEN CAPTURE] User stopped casting.');
         stopStreaming();
       };
     }
@@ -611,7 +611,7 @@ export async function toggleScreenShare(): Promise<void> {
     const toggleBtn = document.getElementById('toggleBtn');
     const toggleText = document.getElementById('toggleText');
     if (toggleBtn && toggleText) {
-      toggleText.textContent = 'Stop Screen Sharing';
+      toggleText.textContent = 'Stop Casting';
       toggleBtn.className = 'btn-primary stop';
     }
 
@@ -780,7 +780,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
       updateStatus('active', 'STREAMING');
       setSettingsDisabled(true);
       if (toggleBtn && toggleText) {
-        toggleText.textContent = 'Stop Screen Sharing';
+        toggleText.textContent = 'Stop Casting';
         toggleBtn.className = 'btn-primary stop';
         (toggleBtn as HTMLButtonElement).disabled = false;
       }
@@ -789,7 +789,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
       updateStatus('active', 'STREAMING (IN USE)');
       setSettingsDisabled(true);
       if (toggleBtn && toggleText) {
-        toggleText.textContent = 'Screen Sharing Active (In Use)';
+        toggleText.textContent = 'Casting Active (In Use)';
         toggleBtn.className = 'btn-primary stop';
         (toggleBtn as HTMLButtonElement).disabled = true;
       }
@@ -815,7 +815,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
       }
       setSettingsDisabled(false);
       if (toggleBtn && toggleText) {
-        toggleText.textContent = 'Start Screen Sharing';
+        toggleText.textContent = 'Start Casting';
         toggleBtn.className = 'btn-primary';
         (toggleBtn as HTMLButtonElement).disabled = false;
       }

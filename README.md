@@ -1,18 +1,18 @@
 # LLrdc Casting
 
-LLrdc Casting turns a compatible ARM board into a low-latency screen-sharing
+LLrdc Casting turns a compatible ARM board into a low-latency casting
 receiver. Share a screen, window, or browser tab from Chrome and show it on a
 connected HDMI display without sending the content through a cloud service.
 
 ## Features
 
-- **Browser-to-display sharing:** Start sharing directly from Chrome without a
+- **Browser-to-display casting:** Start casting directly from Chrome without a
   separate capture application or desktop client.
 - **Very low latency:** Designed for presentations, demonstrations, remote
   control, interactive content, and other activities where immediate feedback
   matters.
 - **Local and private:** Screen content stays on the local network between the
-  sharing computer and the receiver.
+  sender computer and the receiver.
 - **Display-aware output:** The receiver reports the connected display and lets
   you preserve the source aspect ratio or fill the display.
 - **Flexible quality:** Choose 720p, 1080p, 1440p, or 4K UHD, with 30 or 60 FPS
@@ -32,14 +32,14 @@ connected HDMI display without sending the content through a cloud service.
 - Docker installed and running
 - An HDMI display connected to the board
 
-### Sharing computer
+### Sender computer
 
 - Docker, SSH, and `scp` for deployment
 - Access to this project directory
-- Google Chrome for screen sharing
+- Google Chrome for casting
 - A network connection to the receiver
 
-The sharing computer and receiver must be able to communicate over the local
+The sender computer and receiver must be able to communicate over the local
 network.
 
 ## Set Up the Board
@@ -65,7 +65,7 @@ These steps are required once for a new board.
    Log in again after installation if your user was added to the `docker`
    group, then verify with `docker info`.
 
-4. On the sharing computer, set the receiver address in `config.yaml`:
+4. On the sender computer, set the receiver address in `config.yaml`:
 
    ```yaml
    board:
@@ -77,13 +77,13 @@ These steps are required once for a new board.
 
 ## Build and Start the Server
 
-Run this from the project directory on the sharing computer:
+Run this from the project directory on the sender computer:
 
 ```bash
 ./server.sh --start
 ```
 
-The command builds the receiver software on the sharing computer, transfers
+The command builds the receiver software on the sender computer, transfers
 what is needed to the board, and starts the receiver. The HDMI display should
 show the LLrdc waiting screen when the receiver is ready.
 
@@ -99,7 +99,7 @@ To stop the receiver:
 BOARD_IP=<receiver-ip> ./server.sh --stop
 ```
 
-## Start Screen Sharing
+## Start Casting
 
 1. Open the casting page in Chrome:
 
@@ -110,12 +110,12 @@ BOARD_IP=<receiver-ip> ./server.sh --stop
 2. The first visit may show a certificate warning. This is expected for a
    receiver using its local certificate.
 3. Select the source and picture settings you want to use.
-4. Select **Start Screen Sharing**.
+4. Select **Start Casting**.
 5. Choose the screen, window, or browser tab to share, then approve the
    browser permission prompt.
 6. Confirm that the shared content appears on the HDMI display.
 
-Select **Stop Screen Sharing** when finished. The receiver returns to its
+Select **Stop Casting** when finished. The receiver returns to its
 waiting screen after the stream becomes inactive.
 
 ## Available Controls
@@ -129,7 +129,7 @@ Before starting a stream, you can choose:
 - Video quality and bandwidth preference
 - Ultra-low-latency, balanced, or quality-focused encoding
 
-Settings are locked while sharing is active. Stop sharing before changing
+Settings are locked while casting is active. Stop casting before changing
 them.
 
 ## License
