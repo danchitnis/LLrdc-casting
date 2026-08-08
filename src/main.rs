@@ -311,9 +311,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                      encoded_resolution: String::new(),
                                      aspect_mode: String::new(),
                                      content_rect: String::new(),
-                                     signal_resolution: signal_resolution.clone(),
-                                     panel_resolution: panel_resolution.clone(),
-                                 });
+                                      signal_resolution: signal_resolution.clone(),
+                                      panel_resolution: panel_resolution.clone(),
+                                  });
                             }
                         }
 
@@ -354,9 +354,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                      encoded_resolution: String::new(),
                                      aspect_mode: String::new(),
                                      content_rect: String::new(),
-                                     signal_resolution: signal_resolution.clone(),
-                                     panel_resolution: panel_resolution.clone(),
-                                 });
+                                      signal_resolution: signal_resolution.clone(),
+                                      panel_resolution: panel_resolution.clone(),
+                                   });
                         }
                     }
                     Ok(None) => break, // Channel closed
@@ -368,7 +368,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
-                            if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
+                             if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
                             let _ = playback_engine.ensure_configuration("hevc", &connector_id, render_rect.as_deref(), "dashboard");
                             while rx.try_recv().is_ok() {}
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
@@ -392,9 +392,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 encoded_resolution: String::new(),
                                 aspect_mode: String::new(),
                                 content_rect: String::new(),
-                                signal_resolution: signal_resolution.clone(),
-                                panel_resolution: panel_resolution.clone(),
-                            });
+                                 signal_resolution: signal_resolution.clone(),
+                                 panel_resolution: panel_resolution.clone(),
+                             });
                         }
                     }
                 }

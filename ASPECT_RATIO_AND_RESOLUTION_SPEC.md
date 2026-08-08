@@ -12,8 +12,8 @@ The central rule is that four different geometries must not be confused:
 3. The negotiated HDMI signal geometry.
 4. The physical panel geometry.
 
-The resolution selector controls only the second item. It does not change the
-Chrome capture size, the HDMI signal mode, or the physical panel size.
+The encoder-resolution selector controls only the second item. It does not change
+the Chrome capture size, the HDMI signal mode, or the physical panel size.
 
 ## Geometry Spaces
 
@@ -57,17 +57,17 @@ aspect-ratio processing.
 
 ### 2. Encoded Frame Space
 
-The resolution selector chooses the dimensions of the frame submitted to
+The encoder-resolution selector chooses the dimensions of the frame submitted to
 WebCodecs and transmitted to the board.
 
-| Label | Encoded dimensions | Aspect | Typical use |
-| --- | ---: | ---: | --- |
-| `720p` | `1280x720` | `16:9` | Lower bandwidth |
-| `1080p` | `1920x1080` | `16:9` | Default/full HD |
-| `1440p` | `2560x1440` | `16:9` | Higher detail |
-| `2160p / 4K UHD` | `3840x2160` | `16:9` | Maximum selected stream size |
+| Label | Encoded dimensions | Typical use |
+| --- | ---: | --- |
+| `720p` | `1280x720` | Lower bandwidth |
+| `1080p` | `1920x1080` | Default/full HD |
+| `1440p` | `2560x1440` | Higher detail |
+| `2160p / 4K UHD` | `3840x2160` | Maximum selected stream size |
 
-The selected dimensions control:
+The calculated encoded dimensions control:
 
 - The `OffscreenCanvas` size.
 - The `VideoEncoder` width and height.
@@ -82,9 +82,19 @@ The selected dimensions do not control:
 - The physical display panel.
 - The KMS render rectangle.
 
-All current selectable encoder resolutions are `16:9`. Therefore they have
-the same aspect-ratio behavior and differ primarily in pixel count, detail,
-bitrate, and encoder workload.
+Stretch output uses the active HDMI signal aspect, so it intentionally stretches
+the source when the source aspect differs from the signal. Preserve output uses
+the selected encoder canvas and adjusts the browser-composed content rectangle
+to the physical panel aspect so the source can be preserved through the
+HDMI-to-panel scale.
+
+Preserve is a browser-compositor operation. It does not change the KMS
+destination rectangle. KMS always presents the decoded frame at 100% of the
+active HDMI signal, including 100% of its height:
+
+```text
+KMS render rectangle: <0,0,signal_width,signal_height>
+```
 
 ### 3. HDMI Signal Space
 
@@ -115,6 +125,9 @@ KMS render rectangle: <0,0,3840,2160>
 
 KMS does not calculate aspect ratio from the laptop capture dimensions. It
 only scales the already-composed encoded frame across the active HDMI signal.
+The selected encoder resolution is not a KMS display mode and does not change
+the KMS rectangle. For example, `1280x720`, `1920x1080`, `2560x1440`, and
+`3840x2160` are all presented into the same full HDMI signal rectangle.
 
 ### 4. Physical Panel Space
 
@@ -150,7 +163,7 @@ Browser OffscreenCanvas compositor
         |
         v
 WebCodecs VideoEncoder
-    1280x720, 1920x1080, 2560x1440, or 3840x2160
+    fixed encoder resolution selected in the UI
         |
         v
 WebTransport / QUIC
@@ -176,14 +189,29 @@ There are two scaling operations after the browser compositor:
 1. KMS scales the selected encoded frame to the active HDMI signal.
 2. The monitor scales the HDMI signal to the physical panel.
 
-Preserve mode compensates for both operations before encoding. Stretch mode
-does not preserve the source aspect and fills every available rectangle.
+The custom encoder resolution changes the amount of data processed by the
+browser encoder, transport, decoder, and KMS input plane. It can therefore
+change bandwidth, encoder workload, decoder workload, and frame-buffer traffic.
+It does not create a custom HDMI mode, apply a second aspect-ratio decision, or
+change the KMS destination rectangle. KMS only receives the decoded frame and
+scales it to the full active signal.
+
+Preserve mode compensates for the signal-to-panel scaling before encoding. The
+encoded canvas uses the physical panel aspect, so KMS can scale it to the
+16:9 HDMI signal and the monitor can scale that signal back to the panel without
+changing the source aspect. Stretch mode does not preserve the source aspect
+and fills the encoded canvas.
 
 ## Aspect Modes
 
 ### Stretch
 
-Stretch mode fills the selected encoded frame:
+Stretch mode ignores the source aspect ratio when drawing into the encoder
+canvas. It fills the entire encoded frame, so a source with a different aspect
+ratio is geometrically stretched. KMS then presents that already-stretched
+frame across the full HDMI signal.
+
+For a `1920x1080` encoder frame:
 
 ```text
 Encoded content rectangle: <0,0,encoded_width,encoded_height>
@@ -191,11 +219,9 @@ HDMI signal content:       <0,0,signal_width,signal_height>
 Panel content:             <0,0,panel_width,panel_height>
 ```
 
-The source is drawn across the complete encoded canvas even if its aspect
-ratio differs from the encoded frame. The source may therefore appear wider
-or narrower on the physical panel.
-
-For `3456x2234` captured to `1920x1080`:
+For `3456x2234` captured into a `1920x1080` encoder frame, the source is drawn
+across all `1920x1080` pixels and is therefore stretched from approximately
+`1.547:1` to `16:9`.
 
 ```text
 Source:  3456x2234
@@ -205,18 +231,24 @@ Content: 1920x1080
 
 ### Preserve
 
-Preserve mode keeps the native source aspect ratio on the physical panel.
-Black bars are created in the encoded frame where the source does not fill the
-physical panel aspect.
+Preserve mode keeps the native source aspect ratio on the physical panel. The
+compositor first fits the source to the physical panel aspect, then projects
+that rectangle backward into the HDMI signal and encoder spaces. Black bars are
+created in the encoded frame where the source does not fill the panel-shaped
+content area.
 
-Preserve mode is not calculated by simply fitting the source into the selected
-`16:9` encoded frame. If it were, the monitor would then perform
-its own `16:9 -> 16:10` scaling, which can make the image look too
-narrow or squeezed.
+For `3456x2234` captured into a `1920x1080` encoder frame:
 
-Instead, the compositor calculates the layout in physical panel coordinates
-first, then projects that layout backward through the HDMI signal and the
-selected encoded frame.
+```text
+Source:  3456x2234        approximately 1.547:1
+Encoded: 1920x1080        16:9 canvas
+Content: approximately <32,0,1857,1080>
+```
+
+The content rectangle preserves the source aspect. The encoded canvas may have
+a different aspect from the source because it is pre-compensated for the
+`3840x2160` HDMI signal being mapped to the physical `3840x2400` panel. KMS
+still uses the complete HDMI rectangle in both Preserve and Stretch modes.
 
 ## Preserve Calculation
 
@@ -265,8 +297,7 @@ panel_content_x      = 0
 panel_content_y      = floor((Hp - panel_content_height) / 2)
 ```
 
-The source is now correctly fitted against the physical panel, not against
-the HDMI signal.
+The source is now correctly fitted against the physical panel.
 
 ### Step 3: Project the Physical Layout to HDMI Signal Space
 
@@ -284,8 +315,6 @@ panel.
 
 ### Step 4: Project the Signal Layout to the Encoded Frame
 
-The signal rectangle is mapped to the selected encoded frame:
-
 ```text
 encoded_content_x      = round(signal_content_x * We / Wg)
 encoded_content_y      = round(signal_content_y * He / Hg)
@@ -294,9 +323,8 @@ encoded_content_height = round(signal_content_height * He / Hg)
 ```
 
 The source is drawn into this encoded rectangle. The encoded rectangle may be
-intentionally non-proportional to the source because the monitor will apply a
-non-uniform signal-to-panel scale later. This is pre-compensation, not an
-aspect-ratio bug.
+intentionally non-proportional to the source because KMS scales the encoded
+frame to the signal. This is the required signal pre-compensation, not a crop.
 
 ## Worked Example
 
@@ -305,6 +333,7 @@ Assume:
 ```text
 Native source:       3456x2234
 Selected encoding:   1920x1080
+Encoded output:     1920x1080 (preserve canvas)
 HDMI signal:         3840x2160
 Physical panel:      3840x2400
 Mode:                preserve
@@ -313,9 +342,9 @@ Mode:                preserve
 The compositor calculates approximately:
 
 ```text
-Physical panel content: <63,0,3713,2400>
-HDMI signal content:    <63,0,3713,2160>
-Encoded content:        approximately <32,0,1857,1080>
+Physical panel content: approximately <249,0,3713,2400>
+HDMI signal content:    approximately <249,0,3713,2160>
+Encoded content:        approximately <112,0,1671,1080>
 ```
 
 The one-pixel difference between implementations or telemetry displays is
@@ -324,18 +353,19 @@ normal because the layout uses integer pixel rounding and centering.
 The intended physical result is:
 
 ```text
-Panel content:  approximately 3713x2400
-Side bars:      approximately 63px each
+Signal content: approximately 3713x2160
+Side bars:      approximately 63px each on the HDMI signal
 Source aspect:  preserved at approximately 1.547
 ```
 
-The encoded frame is transmitted as `1920x1080`. The HDMI signal remains
+The encoded frame is transmitted at the selected encoder resolution. The HDMI signal remains
 `3840x2160`, and the monitor maps that signal to the physical `3840x2400`
 panel.
 
 ## Why the Old Calculation Produced Excessive Side Bars
 
-The old preserve calculation fit the source directly into the selected
+The old preserve calculation fit the source directly into a fixed `16:9`
+selected frame:
 
 ```text
 3456x2234 -> 1920x1080
@@ -347,8 +377,8 @@ That result was correct only if the encoded `16:9` frame was displayed on a
 physical `16:9` panel. In this system, the physical panel is `16:10` and the
 monitor performs an additional signal-to-panel scaling step.
 
-The current calculation fits against the physical panel first and then
-pre-compensates the encoded frame.
+The current calculation uses a panel-shaped encoded canvas, fits the source in
+that canvas, and projects the resulting rectangle through the HDMI signal.
 
 ## Runtime Geometry Discovery
 

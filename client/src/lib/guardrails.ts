@@ -5,6 +5,15 @@ export interface CodecCapabilityStatus {
   h264Supported: boolean;
 }
 
+export interface EncodedDimensions {
+  width: number;
+  height: number;
+}
+
+export function isCodecResolutionAllowed(codec: string, dimensions: EncodedDimensions): boolean {
+  return codec === 'H265' || (dimensions.width <= 1920 && dimensions.height <= 1080);
+}
+
 let lastCapabilityStatus: CodecCapabilityStatus | null = null;
 
 export function updateEncoderHWStatus(caps?: CodecCapabilityStatus | null): void {
@@ -179,13 +188,9 @@ export function onResolutionChange(logFn?: (msg: string, isError?: boolean) => v
   const resStr = resSelect.value;
   const [w = 1920] = resStr.split('x').map(n => parseInt(n, 10));
   const codecSelect = document.getElementById('codec') as HTMLSelectElement | null;
-  if (codecSelect) {
-    if (w >= 2560) {
-      const h265Option = codecSelect.querySelector('option[value="H265"]') as HTMLOptionElement | null;
-      if (h265Option && !h265Option.disabled) {
-        codecSelect.value = 'H265';
-      }
-    }
+  if (codecSelect && w >= 2560) {
+    const h265Option = codecSelect.querySelector('option[value="H265"]') as HTMLOptionElement | null;
+    if (h265Option && !h265Option.disabled) codecSelect.value = 'H265';
   }
   updateCodecAndResolutionGuardrails(logFn);
   updateEncoderHWStatus();

@@ -8,7 +8,11 @@ import {
   type AspectMode,
   type DisplayGeometry,
 } from './compositor';
-import { calculateTargetBitrate, getCodecString } from './guardrails';
+import {
+  calculateTargetBitrate,
+  getCodecString,
+  isCodecResolutionAllowed,
+} from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
 
 export interface WebTransportDatagramStream {
@@ -323,7 +327,13 @@ export async function toggleScreenShare(): Promise<void> {
   const bitrateSelect = document.getElementById('bitrate') as HTMLSelectElement | null;
   const latencySelect = document.getElementById('latencyMode') as HTMLSelectElement | null;
 
-  const resStr = resSelect.value;
+  const resolution = parseResolution(resSelect.value);
+  if (!resolution) {
+    log(`[ERROR] Invalid output resolution: ${resSelect.value}`, true);
+    await stopStreaming();
+    return;
+  }
+  const [selectedWidth, selectedHeight] = resolution;
   const aspectMode = aspectModeSelect?.value === 'stretch' ? 'stretch' : 'preserve';
   const targetFps = parseInt(fpsSelect.value, 10);
   const selectedCodec = codecSelect.value;
@@ -341,29 +351,6 @@ export async function toggleScreenShare(): Promise<void> {
     return;
   }
 
-  const [width = 1920, height = 1080] = resStr.split('x').map(n => parseInt(n, 10));
-  const targetBitrate = calculateTargetBitrate(bitrateSetting, wireCodec, width, targetFps);
-  const targetMbps = (targetBitrate / 1_000_000).toFixed(1);
-
-  const webcodecsLatencyMode = (latencySetting === 'quality') ? 'quality' : 'realtime';
-  const keyframeInterval = (latencySetting === 'quality')
-    ? targetFps * 2
-    : (latencySetting === 'balanced' ? targetFps : Math.max(5, Math.floor(targetFps / 2)));
-
-  const encoderModeLabel = (latencySetting === 'quality')
-    ? 'High Quality (Buffered)'
-    : (latencySetting === 'balanced' ? 'Balanced LAN' : 'ULL (Ultra Low Latency)');
-
-  const statRes = document.getElementById('statResolution');
-  const statCodec = document.getElementById('statCodec');
-  const statBitrate = document.getElementById('statBitrate');
-  const statEncoderMode = document.getElementById('statEncoderMode');
-  if (statRes) statRes.textContent = `${resStr} @ ${targetFps} FPS`;
-  if (statCodec) statCodec.textContent = wireCodec === 'H265' ? 'HEVC / H.265' : (isSWRequested ? 'H.264 (Software)' : 'H.264');
-  if (statBitrate) statBitrate.textContent = `${targetMbps} Mbps (${bitrateSetting === 'auto' ? 'Auto' : 'Custom'})`;
-  if (statEncoderMode) statEncoderMode.textContent = encoderModeLabel;
-
-  log(`[CONFIG] Codec: ${wireCodec} (${isSWRequested ? 'SW' : 'HW'}) | Res: ${resStr} @ ${targetFps} FPS | Aspect: ${aspectMode} | Bandwidth: ${targetMbps} Mbps | Priority: ${encoderModeLabel}`);
   log(`[CONNECTING] WebTransport -> https://${boardIp}:${boardPort}`);
   updateStatus('connecting', 'CONNECTING');
 
@@ -397,10 +384,12 @@ export async function toggleScreenShare(): Promise<void> {
     const videoSource = videoSourceSelect.value;
 
     if (videoSource === 'synthetic') {
-      log(`[SOURCE] Using Bouncing Orb / Test Pattern (${width}x${height} @ ${targetFps} FPS)`);
-      mediaStream = createSyntheticScreenStream(width, height, targetFps, () => isStreaming);
+      const syntheticWidth = 1920;
+      const syntheticHeight = 1080;
+      log(`[SOURCE] Using Bouncing Orb / Test Pattern (${syntheticWidth}x${syntheticHeight} native @ ${targetFps} FPS)`);
+      mediaStream = createSyntheticScreenStream(syntheticWidth, syntheticHeight, targetFps, () => isStreaming);
     } else {
-      log(`[SOURCE] Requesting full native monitor capture (target ${width}x${height} @ ${targetFps} FPS)...`);
+      log(`[SOURCE] Requesting full native monitor capture (output ${resSelect.value} @ ${targetFps} FPS)...`);
       try {
         const displayMediaOptions = {
           video: {
@@ -439,10 +428,37 @@ export async function toggleScreenShare(): Promise<void> {
     if (videoSource !== 'synthetic' && displaySurface !== 'monitor') {
       throw new Error(`A full monitor is required; Chrome returned ${displaySurface || 'unknown'} capture`);
     }
-    const rawWidth = (videoSource === 'synthetic') ? width : (trackSettings.width || width);
-    const rawHeight = (videoSource === 'synthetic') ? height : (trackSettings.height || height);
-    const activeWidth = width;
-    const activeHeight = height;
+    const rawWidth = trackSettings.width;
+    const rawHeight = trackSettings.height;
+    if (!rawWidth || !rawHeight) {
+      throw new Error('Chrome did not report native capture dimensions');
+    }
+    const activeWidth = selectedWidth;
+    const activeHeight = selectedHeight;
+    const encodedDimensions = { width: activeWidth, height: activeHeight };
+    const encodedResolution = `${activeWidth}x${activeHeight}`;
+    const targetBitrate = calculateTargetBitrate(bitrateSetting, wireCodec, activeWidth, targetFps);
+    const targetMbps = (targetBitrate / 1_000_000).toFixed(1);
+    const webcodecsLatencyMode = (latencySetting === 'quality') ? 'quality' : 'realtime';
+    const keyframeInterval = (latencySetting === 'quality')
+      ? targetFps * 2
+      : (latencySetting === 'balanced' ? targetFps : Math.max(5, Math.floor(targetFps / 2)));
+    const encoderModeLabel = (latencySetting === 'quality')
+      ? 'High Quality (Buffered)'
+      : (latencySetting === 'balanced' ? 'Balanced LAN' : 'ULL (Ultra Low Latency)');
+
+    const statRes = document.getElementById('statEncodedOutput');
+    const statScale = document.getElementById('statScale');
+    const statCodec = document.getElementById('statCodec');
+    const statBitrate = document.getElementById('statBitrate');
+    const statEncoderMode = document.getElementById('statEncoderMode');
+    if (statRes) statRes.textContent = `${encodedResolution} @ ${targetFps} FPS`;
+    if (statScale) statScale.textContent = resSelect.value;
+    if (statCodec) statCodec.textContent = wireCodec === 'H265' ? 'HEVC / H.265' : (isSWRequested ? 'H.264 (Software)' : 'H.264');
+    if (statBitrate) statBitrate.textContent = `${targetMbps} Mbps (${bitrateSetting === 'auto' ? 'Auto' : 'Custom'})`;
+    if (statEncoderMode) statEncoderMode.textContent = encoderModeLabel;
+
+    log(`[CONFIG] Codec: ${wireCodec} (${isSWRequested ? 'SW' : 'HW'}) | Encoder resolution: ${resSelect.value} | Encoded: ${encodedResolution} @ ${targetFps} FPS | Aspect: ${aspectMode} | KMS: 100% HDMI signal | Bandwidth: ${targetMbps} Mbps | Priority: ${encoderModeLabel}`);
     const compositorAspectMode: AspectMode = aspectMode;
     const initialLayout = calculateCompositorLayout(
       rawWidth,
@@ -505,6 +521,12 @@ export async function toggleScreenShare(): Promise<void> {
       return;
     }
 
+    if (!isCodecResolutionAllowed(wireCodec, encodedDimensions)) {
+      log(`[ERROR] ${wireCodec} output ${encodedResolution} exceeds the 1920x1080 decoder limit; choose a smaller encoder resolution.`, true);
+      await stopStreaming();
+      return;
+    }
+
     if (selectedCodec === 'H265' && !isHWAccelerated) {
       log(`[ERROR] H.265 software encoding is blocked to prevent heavy CPU usage. Please select H.264.`, true);
       await stopStreaming();
@@ -516,7 +538,7 @@ export async function toggleScreenShare(): Promise<void> {
         controlWs.send(JSON.stringify({
           type: 'start',
           codec: wireCodec,
-          resolution: resStr,
+          resolution: encodedResolution,
           fps: targetFps,
           bitrate_mbps: parseFloat(targetMbps),
           latency_mode: latencySetting,
@@ -531,9 +553,9 @@ export async function toggleScreenShare(): Promise<void> {
           signal_width: displayGeometry.signalWidth,
           signal_height: displayGeometry.signalHeight,
           panel_width: displayGeometry.panelWidth,
-          panel_height: displayGeometry.panelHeight
-        }));
-        log(`[CONTROL SOCKET] Geometry: capture ${rawWidth}x${rawHeight}, encoded ${activeWidth}x${activeHeight}, content ${contentRect}`);
+           panel_height: displayGeometry.panelHeight,
+         }));
+         log(`[CONTROL SOCKET] Geometry: capture ${rawWidth}x${rawHeight}, encoded ${activeWidth}x${activeHeight}, KMS 100% HDMI signal, content ${contentRect}`);
       } catch (e) {}
     }
 
@@ -644,6 +666,11 @@ export async function toggleScreenShare(): Promise<void> {
         if (videoEncoder && videoEncoder.encodeQueueSize > 8) {
           rawFrame.close();
         } else if (videoEncoder) {
+          if (frameCount === 1 && frameCompositor) {
+            const frameLayout = frameCompositor.layoutFor(rawFrame.displayWidth, rawFrame.displayHeight);
+            const visibleRect = rawFrame.visibleRect;
+            log(`[FRAME GEOMETRY] VideoFrame coded=${rawFrame.codedWidth}x${rawFrame.codedHeight}, display=${rawFrame.displayWidth}x${rawFrame.displayHeight}, visible=${visibleRect ? `${visibleRect.width}x${visibleRect.height}@${visibleRect.x},${visibleRect.y}` : 'none'}, draw=<${frameLayout.contentX},${frameLayout.contentY},${frameLayout.contentWidth},${frameLayout.contentHeight}>`);
+          }
           const composedFrame = frameCompositor?.compose(rawFrame);
           if (!composedFrame) {
             rawFrame.close();
@@ -722,6 +749,10 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
     const statEncoded = document.getElementById('statEncoded');
     if (statEncoded) statEncoded.textContent = msg.encoded_resolution;
   }
+  if (msg.encoded_resolution) {
+    const statScale = document.getElementById('statScale');
+    if (statScale) statScale.textContent = msg.encoded_resolution;
+  }
   if (msg.content_rect) {
     const statLayout = document.getElementById('statLayout');
     if (statLayout) statLayout.textContent = `${msg.aspect_mode || 'preserve'}: ${msg.content_rect}`;
@@ -764,7 +795,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
       }
     }
     if (msg.resolution && msg.resolution !== '0x0') {
-      const statRes = document.getElementById('statResolution');
+      const statRes = document.getElementById('statEncodedOutput');
       if (statRes) {
         if (msg.resolution.includes('@')) {
           statRes.textContent = msg.resolution;
@@ -814,7 +845,7 @@ export function initControlSocket(): void {
       try {
         const msg = JSON.parse(event.data) as ServerStatusMessage;
         if (msg.type === 'status') {
-          log(`[TELEMETRY] Device State: ${msg.state} | Res: ${msg.resolution} | Display: ${msg.display_resolution || 'N/A'} @ ${msg.display_fps || 0}FPS | Frames: ${msg.frames_submitted}`);
+           log(`[TELEMETRY] Device State: ${msg.state} | Encoded: ${msg.resolution} | Display: ${msg.display_resolution || 'N/A'} @ ${msg.display_fps || 0}FPS | Frames: ${msg.frames_submitted}`);
           handleServerStatusUpdate(msg);
         } else if (msg.type === 'pong') {
           log(`[CONTROL SOCKET] Received pong from device`);
