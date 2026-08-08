@@ -433,8 +433,10 @@ export async function toggleCasting(): Promise<void> {
     if (!rawWidth || !rawHeight) {
       throw new Error('Chrome did not report native capture dimensions');
     }
-    const activeWidth = selectedWidth;
-    const activeHeight = selectedHeight;
+    // RK3399 HEVC surfaces are macroblock-aligned; 1080p must be encoded as
+    // 1920x1088 even though the user-facing preset remains 1920x1080.
+    const activeWidth = Math.ceil(selectedWidth / 16) * 16;
+    const activeHeight = Math.ceil(selectedHeight / 16) * 16;
     const encodedDimensions = { width: activeWidth, height: activeHeight };
     const encodedResolution = `${activeWidth}x${activeHeight}`;
     const targetBitrate = calculateTargetBitrate(bitrateSetting, wireCodec, activeWidth, targetFps);

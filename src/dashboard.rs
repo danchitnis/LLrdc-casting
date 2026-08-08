@@ -18,13 +18,9 @@ pub fn configured_dashboard_codec() -> String {
 }
 
 pub fn raw_dashboard_dimensions(screen_w: u32, screen_h: u32) -> (u32, u32) {
-    if screen_w <= 1920 {
-        return (screen_w, screen_h);
-    }
-
-    let width = 1920;
-    let height = ((screen_h as u64 * width as u64) / screen_w as u64) as u32;
-    (width, height & !1)
+    // Render at the active signal size so the idle screen reports and fills the
+    // actual HDMI mode. KMS can scale the frame when a smaller mode is selected.
+    (screen_w, screen_h & !1)
 }
 
 pub struct RawDashboardFeeder {
@@ -184,4 +180,15 @@ pub fn spawn_idle_dashboard_thread(
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::raw_dashboard_dimensions;
+
+    #[test]
+    fn idle_dashboard_preserves_active_signal_resolution() {
+        assert_eq!(raw_dashboard_dimensions(3840, 2160), (3840, 2160));
+        assert_eq!(raw_dashboard_dimensions(1920, 1080), (1920, 1080));
+    }
 }
