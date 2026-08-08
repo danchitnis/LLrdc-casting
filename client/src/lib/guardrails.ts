@@ -11,7 +11,21 @@ export interface EncodedDimensions {
 }
 
 export function isCodecResolutionAllowed(codec: string, dimensions: EncodedDimensions): boolean {
-  return codec === 'H265' || (dimensions.width <= 1920 && dimensions.height <= 1080);
+  return codec === 'H265' || (dimensions.width <= 1920 && dimensions.height <= 1088);
+}
+
+export function alignEncoderDimensions(
+  codec: string,
+  width: number,
+  height: number,
+): EncodedDimensions {
+  if (codec === 'H264') {
+    return { width, height: Math.ceil(height / 16) * 16 };
+  }
+  return {
+    width: Math.ceil(width / 16) * 16,
+    height: Math.ceil(height / 16) * 16,
+  };
 }
 
 let lastCapabilityStatus: CodecCapabilityStatus | null = null;
@@ -64,12 +78,13 @@ export async function checkBrowserCodecCapabilities(
     return result;
   }
 
-  // Probe H.265 (HEVC)
+  // Probe H.265 with the browser's hardware preference. WebCodecs exposes
+  // preference, not a portable post-encode hardware confirmation API.
   try {
     const h265Config: VideoEncoderConfig = {
       codec: 'hev1.1.6.L150.B0',
       width: 1920,
-      height: 1080,
+      height: 1088,
       bitrate: 6_000_000,
       framerate: 30,
       hardwareAcceleration: 'prefer-hardware'
@@ -77,25 +92,37 @@ export async function checkBrowserCodecCapabilities(
     const resH265 = await VideoEncoder.isConfigSupported(h265Config);
     if (resH265.supported) {
       result.h265Supported = true;
-      result.h265HW = resH265.config?.hardwareAcceleration === 'prefer-hardware' || resH265.supported;
+      result.h265HW = true;
     }
   } catch (e) {}
 
-  // Probe H.264 (AVC)
+  // Probe H.264 hardware and software independently.
   try {
     const h264Config: VideoEncoderConfig = {
       codec: 'avc1.42e028',
       width: 1920,
-      height: 1080,
+      height: 1088,
       bitrate: 8_000_000,
       framerate: 30,
       hardwareAcceleration: 'prefer-hardware'
     };
     const resH264 = await VideoEncoder.isConfigSupported(h264Config);
     if (resH264.supported) {
-      result.h264Supported = true;
-      result.h264HW = resH264.config?.hardwareAcceleration === 'prefer-hardware' || resH264.supported;
+      result.h264HW = true;
     }
+  } catch (e) {}
+
+  try {
+    const h264SoftwareConfig: VideoEncoderConfig = {
+      codec: 'avc1.42e028',
+      width: 1920,
+      height: 1088,
+      bitrate: 8_000_000,
+      framerate: 30,
+      hardwareAcceleration: 'prefer-software'
+    };
+    const resH264Software = await VideoEncoder.isConfigSupported(h264SoftwareConfig);
+    result.h264Supported = !!resH264Software.supported;
   } catch (e) {}
 
   lastCapabilityStatus = result;
@@ -225,7 +252,7 @@ export function calculateTargetBitrate(
   }
 }
 
-export function getCodecString(codec: string, width: number, _fps?: number): string {
+export function getCodecString(codec: string, width: number, fps = 30): string {
   if (codec === 'H265') {
     return 'hev1.1.6.L150.B0';
   } else {
@@ -234,6 +261,6 @@ export function getCodecString(codec: string, width: number, _fps?: number): str
     } else if (width >= 2560) {
       return 'avc1.42e032';
     }
-    return 'avc1.42e028';
+    return fps >= 60 ? 'avc1.42e02a' : 'avc1.42e028';
   }
 }

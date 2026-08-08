@@ -8,6 +8,7 @@
     "start": "node client.mjs",
     "serve": "node server.mjs",
     "test:compositor": "node --experimental-strip-types src/lib/compositor.test.ts",
+    "test:guardrails": "node --experimental-strip-types src/lib/guardrails.test.ts",
     "check": "astro check && tsc --noEmit",
     "build": "astro build"
   },

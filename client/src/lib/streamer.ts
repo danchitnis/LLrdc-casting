@@ -11,6 +11,7 @@ import {
 import {
   calculateTargetBitrate,
   getCodecString,
+  alignEncoderDimensions,
   isCodecResolutionAllowed,
 } from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
@@ -433,10 +434,11 @@ export async function toggleCasting(): Promise<void> {
     if (!rawWidth || !rawHeight) {
       throw new Error('Chrome did not report native capture dimensions');
     }
-    // RK3399 HEVC surfaces are macroblock-aligned; 1080p must be encoded as
-    // 1920x1088 even though the user-facing preset remains 1920x1080.
-    const activeWidth = Math.ceil(selectedWidth / 16) * 16;
-    const activeHeight = Math.ceil(selectedHeight / 16) * 16;
+    // Both RK3399 decoders consume macroblock-aligned coded surfaces. H.264
+    // 1080p is therefore coded as 1920x1088 while remaining a 1080p preset.
+    const alignedDimensions = alignEncoderDimensions(wireCodec, selectedWidth, selectedHeight);
+    const activeWidth = alignedDimensions.width;
+    const activeHeight = alignedDimensions.height;
     const encodedDimensions = { width: activeWidth, height: activeHeight };
     const encodedResolution = `${activeWidth}x${activeHeight}`;
     const targetBitrate = calculateTargetBitrate(bitrateSetting, wireCodec, activeWidth, targetFps);
@@ -513,7 +515,7 @@ export async function toggleCasting(): Promise<void> {
           hardwareAcceleration: hardwarePref
         });
         isSupported = !!supportCheck.supported;
-        isHWAccelerated = supportCheck.config?.hardwareAcceleration === 'prefer-hardware' && !isSWRequested;
+        isHWAccelerated = !!supportCheck.supported && !isSWRequested;
       } catch (e) {}
     }
 
@@ -524,7 +526,7 @@ export async function toggleCasting(): Promise<void> {
     }
 
     if (!isCodecResolutionAllowed(wireCodec, encodedDimensions)) {
-      log(`[ERROR] ${wireCodec} output ${encodedResolution} exceeds the 1920x1080 decoder limit; choose a smaller encoder resolution.`, true);
+      log(`[ERROR] ${wireCodec} output ${encodedResolution} exceeds the 1920x1088 decoder limit; choose a smaller encoder resolution.`, true);
       await stopStreaming();
       return;
     }
