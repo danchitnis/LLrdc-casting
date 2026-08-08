@@ -1,76 +1,137 @@
-# Radxa ROCK 4C+ HEVC HDMI Playback Smoke Test
+# LLrdc Casting
 
-This project is a low-latency video-playback smoke test for a **Radxa ROCK 4C+ (RK3399)**. It builds an ARM64 container locally, sends it to the board, receives Annex-B HEVC over UDP, uses the RK3399 `rkvdec` stateless V4L2 decoder, and presents video through DRM/KMS on HDMI.
+LLrdc Casting turns a compatible ARM board into a low-latency screen-sharing
+receiver. Share a screen, window, or browser tab from Chrome and show it on a
+connected HDMI display without sending the content through a cloud service.
 
-Desktop sharing is not in scope yet.
+## Features
 
-## Normal workflow
+- **Browser-to-display sharing:** Start sharing directly from Chrome without a
+  separate capture application or desktop client.
+- **Very low latency:** Designed for presentations, demonstrations, remote
+  control, interactive content, and other activities where immediate feedback
+  matters.
+- **Local and private:** Screen content stays on the local network between the
+  sharing computer and the receiver.
+- **Display-aware output:** The receiver reports the connected display and lets
+  you preserve the source aspect ratio or fill the display.
+- **Flexible quality:** Choose 720p, 1080p, 1440p, or 4K UHD, with 30 or 60 FPS
+  and selectable quality and latency preferences.
+- **Hardware-assisted playback:** The receiver is designed to use the board's
+  video capabilities so the sharing computer does not have to do all the
+  playback work.
+- **Idle status screen:** See the receiver's network and display status while
+  no content is being shared.
 
-Start the receiver from the workstation:
+## Requirements
+
+### Receiver board
+
+- A Radxa ROCK 4C+ / RK3399 or compatible ARM64 board with an HDMI output
+- Linux or Armbian installed and reachable over SSH
+- Docker installed and running
+- An HDMI display connected to the board
+
+### Sharing computer
+
+- Docker, SSH, and `scp` for deployment
+- Access to this project directory
+- Google Chrome for screen sharing
+- A network connection to the receiver
+
+The sharing computer and receiver must be able to communicate over the local
+network.
+
+## Set Up the Board
+
+These steps are required once for a new board.
+
+1. Connect the board to the network and HDMI display. Note its IP address.
+2. Confirm SSH access and Docker:
+
+   ```bash
+   ssh <user>@<receiver-ip> "uname -m && docker info"
+   ```
+
+   The board should report an ARM64 architecture and Docker should return its
+   system information.
+
+3. If Docker is not installed, install it on the board:
+
+   ```bash
+   ssh -t <user>@<receiver-ip> "sudo apt update && sudo apt install -y docker.io docker-cli && sudo systemctl enable --now docker"
+   ```
+
+   Log in again after installation if your user was added to the `docker`
+   group, then verify with `docker info`.
+
+4. On the sharing computer, set the receiver address in `config.yaml`:
+
+   ```yaml
+   board:
+     ip: "<receiver-ip>"
+   ```
+
+   You can instead provide `BOARD_IP` on the command line when starting the
+   server.
+
+## Build and Start the Server
+
+Run this from the project directory on the sharing computer:
 
 ```bash
 ./server.sh --start
 ```
 
-The idle HDMI screen shows:
+The command builds the receiver software on the sharing computer, transfers
+what is needed to the board, and starts the receiver. The HDMI display should
+show the LLrdc waiting screen when the receiver is ready.
 
-- `LLrdc Casting // DEVICE IPS`
-- Board IPv4 addresses
-- Detected HDMI output mode, for example `3840X2160 @ 60 HZ`
-
-The first incoming HEVC frame replaces the dashboard with video playback.
-
-Run the default 4K60 HEVC smoke test:
+To use an address without editing `config.yaml`:
 
 ```bash
-./test.sh
+BOARD_IP=<receiver-ip> ./server.sh --start
 ```
 
-To stream manually (without the test wrapper):
+To stop the receiver:
 
 ```bash
-./stream.sh --4k --fps 60 --duration 20
+BOARD_IP=<receiver-ip> ./server.sh --stop
 ```
 
-Useful variants:
+## Start Screen Sharing
 
-```bash
-./test.sh --1080p --fps 60 --duration 20
-./test.sh --720p --fps 30 --duration 10
-./test.sh --res 2560x1440 --fps 50
-./test.sh --deploy
-```
+1. Open the casting page in Chrome:
 
-Prepare a missing HEVC Annex-B stream:
+   ```text
+   https://<receiver-ip>:8080/
+   ```
 
-```bash
-./prepare_stream.sh --h265 --res 3840x2160 --fps 60
-```
+2. The first visit may show a certificate warning. This is expected for a
+   receiver using its local certificate.
+3. Select the source and picture settings you want to use.
+4. Select **Start Screen Sharing**.
+5. Choose the screen, window, or browser tab to share, then approve the
+   browser permission prompt.
+6. Confirm that the shared content appears on the HDMI display.
 
-Stop the receiver:
+Select **Stop Screen Sharing** when finished. The receiver returns to its
+waiting screen after the stream becomes inactive.
 
-```bash
-./server.sh --stop
-```
+## Available Controls
 
-## Playback path
+Before starting a stream, you can choose:
 
-```text
-workstation UDP sender
-        ↓
-bounded Annex-B HEVC access-unit reassembly
-        ↓
-RK3399 rkvdec (V4L2 stateless decoder)
-        ↓
-NV12 DMA-BUF
-        ↓
-DRM/KMS HDMI plane
-```
+- Screen capture or the built-in test pattern
+- Output resolution from 720p through 4K UHD
+- Preserved aspect ratio or stretched output
+- 30 or 60 frames per second
+- Video quality and bandwidth preference
+- Ultra-low-latency, balanced, or quality-focused encoding
 
-The receiver retains only a small bounded compressed-frame queue in normal RAM. The current HDMI dashboard is an idle screen; it is released before the playback pipeline takes DRM ownership.
+Settings are locked while sharing is active. Stop sharing before changing
+them.
 
-## Commands
+## License
 
-`server.sh --start` enables the dashboard by default; use `--no-dashboard` only when an idle HDMI screen is not wanted.
-
-`test.sh` is HEVC-only. It selects `client/assets/stream_<resolution>_<fps>fps_h265.265` unless `--file` is supplied.
+This project is distributed under the terms in [LICENSE](LICENSE).
