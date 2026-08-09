@@ -2,12 +2,36 @@ interface CapturableCanvas extends HTMLCanvasElement {
   captureStream(frameRate?: number): MediaStream;
 }
 
+export interface SyntheticStreamConfig {
+  width: number;
+  height: number;
+  encodedWidth: number;
+  encodedHeight: number;
+  fps: number;
+  codec: 'H264' | 'H265';
+  hardwarePreference: 'prefer-hardware' | 'prefer-software';
+  bitrate: number;
+  aspectMode: 'preserve' | 'stretch';
+  latencyMode: 'ULL' | 'balanced' | 'quality';
+}
+
+export function formatSyntheticStatus(config: SyntheticStreamConfig, frame: number): string[] {
+  const codecName = config.codec === 'H265' ? 'HEVC / H.265' : 'H.264';
+  const acceleration = config.hardwarePreference === 'prefer-software' ? 'SW / CPU' : 'HW preferred';
+  return [
+    `${codecName} (${acceleration})`,
+    `Source: ${config.width}x${config.height} | Coded: ${config.encodedWidth}x${config.encodedHeight}`,
+    `Output: ${config.fps} FPS | Bitrate: ${(config.bitrate / 1_000_000).toFixed(1)} Mbps | Aspect: ${config.aspectMode}`,
+    `Priority: ${config.latencyMode}`,
+    `Frame #${frame} | Time: ${(frame / config.fps).toFixed(2)}s`,
+  ];
+}
+
 export function createSyntheticScreenStream(
-  width: number,
-  height: number,
-  fps: number,
+  config: SyntheticStreamConfig,
   isStreamingCheck: () => boolean
 ): MediaStream {
+  const { width, height, fps } = config;
   let canvas = document.getElementById('screenCanvas') as HTMLCanvasElement | null;
   if (!canvas) {
     canvas = document.createElement('canvas');
@@ -49,12 +73,18 @@ export function createSyntheticScreenStream(
     ctx.fillStyle = grad;
     ctx.beginPath(); ctx.arc(x, y, 120, 0, Math.PI * 2); ctx.fill();
 
+    const margin = Math.max(24, Math.round(Math.min(width, height) * 0.05));
+    const titleSize = Math.max(24, Math.round(Math.min(width, height) * 0.045));
+    const detailSize = Math.max(18, Math.round(titleSize * 0.62));
+    const lineHeight = Math.round(detailSize * 1.5);
+    const statusLines = formatSyntheticStatus(config, frame);
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 48px monospace';
-    ctx.fillText(`LLrdc Casting HARDWARE HEVC STREAM`, 100, 120);
-    ctx.font = '36px monospace';
-    ctx.fillText(`Resolution: ${width}x${height} @ ${fps} FPS`, 100, 180);
-    ctx.fillText(`Frame #${frame} | Time: ${time.toFixed(2)}s`, 100, 240);
+    ctx.font = `bold ${titleSize}px monospace`;
+    ctx.fillText('LLrdc CASTING TEST PATTERN', margin, margin + titleSize);
+    ctx.font = `${detailSize}px monospace`;
+    statusLines.forEach((line, index) => {
+      ctx.fillText(line, margin, margin + titleSize + lineHeight * (index + 1));
+    });
   }, intervalMs);
 
   return (canvas as CapturableCanvas).captureStream(fps);

@@ -384,11 +384,37 @@ export async function toggleCasting(): Promise<void> {
     const videoSourceSelect = document.getElementById('videoSource') as HTMLSelectElement;
     const videoSource = videoSourceSelect.value;
 
+    // Resolve the selected output before creating the synthetic source so the
+    // test pattern and the encoded stream use the same configuration.
+    const alignedDimensions = alignEncoderDimensions(wireCodec, selectedWidth, selectedHeight);
+    const activeWidth = alignedDimensions.width;
+    const activeHeight = alignedDimensions.height;
+    const encodedDimensions = { width: activeWidth, height: activeHeight };
+    const encodedResolution = `${activeWidth}x${activeHeight}`;
+    const targetBitrate = calculateTargetBitrate(bitrateSetting, wireCodec, activeWidth, targetFps);
+    const targetMbps = (targetBitrate / 1_000_000).toFixed(1);
+    const webcodecsLatencyMode = (latencySetting === 'quality') ? 'quality' : 'realtime';
+    const keyframeInterval = (latencySetting === 'quality')
+      ? targetFps * 2
+      : (latencySetting === 'balanced' ? targetFps : Math.max(5, Math.floor(targetFps / 2)));
+    const encoderModeLabel = (latencySetting === 'quality')
+      ? 'High Quality (Buffered)'
+      : (latencySetting === 'balanced' ? 'Balanced LAN' : 'ULL (Ultra Low Latency)');
+
     if (videoSource === 'synthetic') {
-      const syntheticWidth = 1920;
-      const syntheticHeight = 1080;
-      log(`[SOURCE] Using Bouncing Orb / Test Pattern (${syntheticWidth}x${syntheticHeight} native @ ${targetFps} FPS)`);
-      mediaStream = createSyntheticScreenStream(syntheticWidth, syntheticHeight, targetFps, () => isStreaming);
+      log(`[SOURCE] Using Bouncing Orb / Test Pattern (${selectedWidth}x${selectedHeight} native, ${wireCodec} ${isSWRequested ? 'SW' : 'HW preferred'}, ${targetMbps} Mbps, ${aspectMode} @ ${targetFps} FPS)`);
+      mediaStream = createSyntheticScreenStream({
+        width: selectedWidth,
+        height: selectedHeight,
+        encodedWidth: activeWidth,
+        encodedHeight: activeHeight,
+        fps: targetFps,
+        codec: wireCodec,
+        hardwarePreference: isSWRequested ? 'prefer-software' : 'prefer-hardware',
+        bitrate: targetBitrate,
+        aspectMode,
+        latencyMode: latencySetting as 'ULL' | 'balanced' | 'quality',
+      }, () => isStreaming);
     } else {
       log(`[SOURCE] Requesting full native monitor capture (output ${resSelect.value} @ ${targetFps} FPS)...`);
       try {
@@ -434,23 +460,6 @@ export async function toggleCasting(): Promise<void> {
     if (!rawWidth || !rawHeight) {
       throw new Error('Chrome did not report native capture dimensions');
     }
-    // Both RK3399 decoders consume macroblock-aligned coded surfaces. H.264
-    // 1080p is therefore coded as 1920x1088 while remaining a 1080p preset.
-    const alignedDimensions = alignEncoderDimensions(wireCodec, selectedWidth, selectedHeight);
-    const activeWidth = alignedDimensions.width;
-    const activeHeight = alignedDimensions.height;
-    const encodedDimensions = { width: activeWidth, height: activeHeight };
-    const encodedResolution = `${activeWidth}x${activeHeight}`;
-    const targetBitrate = calculateTargetBitrate(bitrateSetting, wireCodec, activeWidth, targetFps);
-    const targetMbps = (targetBitrate / 1_000_000).toFixed(1);
-    const webcodecsLatencyMode = (latencySetting === 'quality') ? 'quality' : 'realtime';
-    const keyframeInterval = (latencySetting === 'quality')
-      ? targetFps * 2
-      : (latencySetting === 'balanced' ? targetFps : Math.max(5, Math.floor(targetFps / 2)));
-    const encoderModeLabel = (latencySetting === 'quality')
-      ? 'High Quality (Buffered)'
-      : (latencySetting === 'balanced' ? 'Balanced LAN' : 'ULL (Ultra Low Latency)');
-
     const statRes = document.getElementById('statEncodedOutput');
     const statScale = document.getElementById('statScale');
     const statCodec = document.getElementById('statCodec');
