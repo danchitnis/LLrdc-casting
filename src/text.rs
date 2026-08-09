@@ -147,6 +147,31 @@ pub fn draw_string_argb(
     }
 }
 
+fn fit_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let value: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() && max_chars > 3 {
+        format!("{}...", value.chars().take(max_chars - 3).collect::<String>())
+    } else {
+        value
+    }
+}
+
+fn draw_fitted_string_argb(
+    buf: &mut [u32],
+    width: u32,
+    height: u32,
+    x: usize,
+    y: usize,
+    text: &str,
+    color: u32,
+    scale: usize,
+    max_width: usize,
+) {
+    let max_chars = max_width / (8 * scale).max(1);
+    draw_string_argb(buf, width, height, x, y, &fit_text(text, max_chars), color, scale);
+}
+
 /// Render the IP Dashboard onto ARGB8888 buffer
 pub fn draw_ip_dashboard_argb(
     buf: &mut [u32],
@@ -187,7 +212,7 @@ pub fn draw_ip_dashboard_argb(
 
     // Header Title
     let title = "LLrdc Casting // DEVICE IPS";
-    draw_string_argb(
+    draw_fitted_string_argb(
         buf,
         width,
         height,
@@ -196,10 +221,11 @@ pub fn draw_ip_dashboard_argb(
         title,
         0xFFFFFFFF,
         scale,
+        box_w.saturating_sub(40 * scale),
     );
 
     let hdmi_line = format!("HDMI OUTPUT: {}X{} @ {} HZ", width, height, refresh_hz);
-    draw_string_argb(
+    draw_fitted_string_argb(
         buf,
         width,
         height,
@@ -208,6 +234,7 @@ pub fn draw_ip_dashboard_argb(
         &hdmi_line,
         0xFF00E5FF,
         scale,
+        box_w.saturating_sub(40 * scale),
     );
 
     // Real-Time Clock in Corner
@@ -223,7 +250,7 @@ pub fn draw_ip_dashboard_argb(
     };
 
     let clock_x = box_x + box_w - (time_str.len() * 8 * scale) - 20 * scale / 2;
-    draw_string_argb(
+    draw_fitted_string_argb(
         buf,
         width,
         height,
@@ -232,6 +259,7 @@ pub fn draw_ip_dashboard_argb(
         &time_str,
         0xFFFFCC00, // Bright Gold Clock
         scale,
+        box_w.saturating_sub(40 * scale),
     );
 
     // Frame Border
@@ -264,7 +292,7 @@ pub fn draw_ip_dashboard_argb(
         let ip = ips.first().map(|(_, ip)| ip.as_str()).unwrap_or("RECEIVER-IP");
         format!("OPEN: HTTPS://{}:8080", ip)
     };
-    draw_string_argb(
+    draw_fitted_string_argb(
         buf,
         width,
         height,
@@ -273,21 +301,38 @@ pub fn draw_ip_dashboard_argb(
         &pairing_url,
         0xFFFFFFFF,
         scale,
+        box_w.saturating_sub(60 * scale / 2),
     );
     current_y += line_height;
-    let code_text = format!("PAIRING CODE: {}", pairing_code.unwrap_or("----"));
-    draw_string_argb(
+    let code_label = "PAIRING CODE";
+    draw_fitted_string_argb(
         buf,
         width,
         height,
         box_x + 30 * scale / 2,
         current_y,
-        &code_text,
+        code_label,
         0xFFFFCC00,
         scale,
+        box_w.saturating_sub(60 * scale / 2),
     );
     current_y += line_height;
+    let code_scale = (scale * 2).max(2);
+    let code_value = pairing_code.unwrap_or("----");
+    let code_width = code_value.chars().count() * 8 * code_scale;
+    let code_x = box_x + box_w.saturating_sub(code_width) / 2;
     draw_string_argb(
+        buf,
+        width,
+        height,
+        code_x,
+        current_y,
+        code_value,
+        0xFFFFCC00,
+        code_scale,
+    );
+    current_y += 10 * code_scale;
+    draw_fitted_string_argb(
         buf,
         width,
         height,
@@ -296,6 +341,7 @@ pub fn draw_ip_dashboard_argb(
         &format!("STATUS: {}", pairing_status),
         0xFF00FF88,
         scale,
+        box_w.saturating_sub(60 * scale / 2),
     );
     current_y += line_height * 2;
 
@@ -310,7 +356,7 @@ pub fn draw_ip_dashboard_argb(
                 0xFF00E5FF // Cyan for docker/virtual
             };
 
-        draw_string_argb(
+        draw_fitted_string_argb(
             buf,
             width,
             height,
@@ -319,6 +365,7 @@ pub fn draw_ip_dashboard_argb(
             &line_text,
             color,
             scale,
+            box_w.saturating_sub(60 * scale / 2),
         );
 
         current_y += line_height;
@@ -327,20 +374,4 @@ pub fn draw_ip_dashboard_argb(
         }
     }
 
-    // Footer
-    let footer_text = format!(
-        "HDMI: {}X{} // V4L2 HEVC DECODER -> DMA-BUF -> DRM KMS",
-        width, height
-    );
-    let footer_scale = (scale * 3) / 4;
-    draw_string_argb(
-        buf,
-        width,
-        height,
-        box_x + 30 * scale / 2,
-        box_y + box_h - 25 * scale,
-        &footer_text,
-        0xFF8899A6,
-        footer_scale.max(1),
-    );
 }

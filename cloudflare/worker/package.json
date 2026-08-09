@@ -6,8 +6,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "dev": "wrangler dev",
-    "build:ui": "npm --prefix ../../client run build",
-    "deploy": "npm run build:ui && wrangler deploy",
+    "deploy": "wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply cast-pairing --local",
     "db:migrate:remote": "wrangler d1 migrations apply cast-pairing --remote"
   },

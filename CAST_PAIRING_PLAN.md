@@ -23,7 +23,7 @@ Optional Cloudflare mode:
 
 ```text
 Receiver -> Cloudflare Worker/D1: registration metadata only
-Browser  -> https://cast.llrdc.com: static UI and optional lookup
+Browser  -> https://cast.llrdc.com: minimal bootstrap and optional lookup
 Browser  -> Receiver private IP: local-code-authenticated WebTransport
 ```
 ```
@@ -50,7 +50,7 @@ Optional Cloudflare flow:
 
 1. The Worker looks up the receiver using the entered code.
 2. The page receives the LAN endpoint and certificate fingerprint.
-3. The page opens direct WebTransport with both the local four-digit code and optional short-lived Worker token.
+3. The bootstrap opens direct WebTransport with both the local four-digit code and optional short-lived Worker token, requests the full receiver UI over that connection, and replaces the bootstrap document without changing `window.location`.
 4. The receiver still validates the local code. The Worker token is an additional optional authorization check, never the only local requirement.
 
 The visible page remains `https://cast.llrdc.com`, protected by Cloudflare's normal certificate. The receiver's short-lived self-signed certificate is authenticated through WebTransport certificate pinning, so no browser certificate warning is shown.
@@ -72,7 +72,7 @@ The visible page remains `https://cast.llrdc.com`, protected by Cloudflare's nor
 These tasks are required only for the optional fixed-URL mode. They are not required for direct-IP LAN mode.
 
 1. Add `cast.llrdc.com` to Cloudflare DNS as a proxied hostname.
-2. Deploy the Cloudflare Worker static asset site in `cloudflare/worker/`, serving the built casting UI at `https://cast.llrdc.com`.
+2. Deploy the Cloudflare Worker in `cloudflare/worker/`, serving only a fixed minimal pairing bootstrap at `https://cast.llrdc.com`.
 3. Create a Cloudflare Worker for pairing and registration APIs.
 4. Create a D1 database and bind it to the Worker.
 5. Create Worker secrets:

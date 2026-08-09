@@ -26,7 +26,7 @@ impl PairingState {
             inner: Arc::new(Mutex::new(PairingData {
                 snapshot: PairingSnapshot {
                     code: None,
-                    status: "Waiting for network".to_string(),
+                    status: "WAITING FOR NETWORK".to_string(),
                 },
                 expires_at: None,
                 failed_attempts: HashMap::new(),
@@ -39,7 +39,7 @@ impl PairingState {
         let ttl = pairing_code_ttl_seconds();
         if let Ok(mut data) = self.inner.lock() {
             data.snapshot.code = Some(code.clone());
-            data.snapshot.status = "Ready - enter code at the receiver IP".to_string();
+            data.snapshot.status = "READY".to_string();
             data.expires_at = Some(Instant::now() + Duration::from_secs(ttl));
             data.failed_attempts.clear();
         }
@@ -56,12 +56,12 @@ impl PairingState {
         let Ok(mut data) = self.inner.lock() else {
             return PairingSnapshot {
                 code: None,
-                status: "Pairing unavailable".to_string(),
+                status: "PAIRING UNAVAILABLE".to_string(),
             };
         };
         if data.expires_at.is_some_and(|expires_at| expires_at <= Instant::now()) {
             data.snapshot.code = None;
-            data.snapshot.status = "Pairing code expired".to_string();
+            data.snapshot.status = "CODE EXPIRED".to_string();
         }
         data.snapshot.clone()
     }

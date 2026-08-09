@@ -1,11 +1,13 @@
 # CAST Pairing Worker
 
 This package implements the optional Cloudflare discovery control plane from
-`CAST_PAIRING_PLAN.md`. It also serves the built Astro casting page at
-`https://cast.llrdc.com`. It is not required for direct-IP LAN casting. A
-receiver must continue to work with no Internet connection when this Worker is
-absent. D1 stores the active receiver, replay nonces, and rate-limit counters.
-No media or WebTransport traffic passes through this Worker.
+`CAST_PAIRING_PLAN.md`. It serves only a small fixed pairing bootstrap at
+`https://cast.llrdc.com`; the full casting page is fetched from the receiver
+over the authenticated LAN WebTransport session and replaces the bootstrap
+without changing the browser URL. It is not required for direct-IP LAN
+casting. A receiver must continue to work with no Internet connection when this
+Worker is absent. D1 stores the active receiver, replay nonces, and rate-limit
+counters. No media or WebTransport traffic passes through this Worker.
 
 ## Deploy
 
@@ -32,8 +34,8 @@ If setup stops after creating D1, run the same command again, reuse the existing
 `eada85fc-cd08-4378-bb67-13edabf5ae6c`.
 
 1. Copy `wrangler.toml.example` to `wrangler.toml` and set the D1 database ID.
-2. Build and deploy from this directory. The deploy script builds the Astro UI
-   into `../../client/dist` before uploading the Worker assets.
+2. Deploy from this directory. The Worker contains only the fixed bootstrap;
+   receiver UI changes are embedded and deployed with the receiver binary.
 3. Create the database and apply the migration:
 
    ```sh
@@ -62,7 +64,7 @@ npm run db:migrate:local
 npm run dev
 ```
 
-Check that `/` serves the casting page and `/api/pair` rejects malformed
+Check that `/` serves the minimal pairing bootstrap and `/api/pair` rejects malformed
 requests without exposing receiver data. A complete pairing test requires a
 running receiver configured with `CLOUD_DISCOVERY_ENABLED=1`, its unique
 `RECEIVER_ID`, the receiver-specific registration HMAC key, and the matching
@@ -75,10 +77,11 @@ curl -i -X POST https://cast.llrdc.com/api/pair \
   --data '{"code":"0000"}'
 ```
 
-The first request must return the UI with a trusted certificate. The second
+The first request must return the small pairing bootstrap with a trusted certificate. The second
 must return a generic invalid-code response until a receiver has registered a
 matching code. Do not test WebTransport through the Worker: the browser must
-connect to the private LAN address returned by `/api/pair`.
+connect directly to the private LAN address returned by `/api/pair` after the
+bootstrap has loaded the receiver UI.
 
 `RECEIVER_REGISTRATION_SECRET` is a base64url-encoded random root key of at
 least 32 bytes. A receiver is provisioned with the derived device key, not the

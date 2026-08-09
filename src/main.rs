@@ -14,6 +14,7 @@ mod local_pairing;
 mod playback;
 mod sys_monitor;
 mod text;
+mod ui_delivery;
 mod v4l2_decoder;
 mod webtransport_server;
 

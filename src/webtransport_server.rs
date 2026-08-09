@@ -260,6 +260,25 @@ async fn handle_control_stream(
     mut recv_stream: wtransport::RecvStream,
     control_channel: crate::control::ControlChannel,
 ) {
+    let mut length = [0u8; 4];
+    if recv_stream.read_exact(&mut length).await.is_err() {
+        return;
+    }
+    let size = u32::from_be_bytes(length) as usize;
+    if size == 0 || size > 64 * 1024 {
+        return;
+    }
+    let mut first_payload = vec![0u8; size];
+    if recv_stream.read_exact(&mut first_payload).await.is_err() {
+        return;
+    }
+    if crate::ui_delivery::is_ui_request(&first_payload) {
+        if let Err(error) = crate::ui_delivery::send_embedded_ui(&mut send_stream).await {
+            eprintln!("[WEBTRANSPORT UI] Failed to send embedded UI: {error}");
+        }
+        return;
+    }
+
     let mut telemetry_rx = control_channel.telemetry_tx.subscribe();
     let telemetry_task = tokio::spawn(async move {
         while let Ok(message) = telemetry_rx.recv().await {
@@ -279,6 +298,9 @@ async fn handle_control_stream(
         .cmd_tx
         .send(crate::control::ControlCommand::GetStatus)
         .await;
+    if let Ok(command) = serde_json::from_slice::<crate::control::ControlCommand>(&first_payload) {
+        let _ = control_channel.cmd_tx.send(command).await;
+    }
     loop {
         let mut length = [0u8; 4];
         if recv_stream.read_exact(&mut length).await.is_err() {

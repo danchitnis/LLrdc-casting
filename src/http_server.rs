@@ -19,6 +19,10 @@ use crate::control::{ControlChannel, ControlCommand};
 
 static INDEX_HTML: &str = include_str!("../client/index.html");
 
+pub fn embedded_index_html() -> &'static str {
+    INDEX_HTML
+}
+
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, Box<dyn Error + Send + Sync>> {
     let certfile = File::open(path)?;
     let mut reader = BufReader::new(certfile);

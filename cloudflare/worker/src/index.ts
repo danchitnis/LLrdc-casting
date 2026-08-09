@@ -1,6 +1,7 @@
+import { bootstrapResponse } from "./bootstrap";
+
 interface Env {
   DB: D1Database;
-  ASSETS: Fetcher;
   RECEIVER_REGISTRATION_SECRET: string;
   PAIRING_TOKEN_PRIVATE_KEY: string;
 }
@@ -548,8 +549,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (path.startsWith("/api/")) {
     return jsonResponse({ error: "not found" }, 404);
   }
-  if (request.method === "GET" || request.method === "HEAD") {
-    return env.ASSETS.fetch(request);
+  if ((request.method === "GET" || request.method === "HEAD") && (path === "/" || path === "/index.html")) {
+    return bootstrapResponse();
   }
   return jsonResponse({ error: "method not allowed" }, 405, { allow: "GET, HEAD, POST" });
 }

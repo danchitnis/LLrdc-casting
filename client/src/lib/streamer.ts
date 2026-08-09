@@ -37,6 +37,14 @@ export interface WebTransportSession {
   close(): void;
 }
 
+export interface BootstrapConnection {
+  ip: string;
+  port: number;
+  certHash: string;
+  code: string;
+  token?: string;
+}
+
 export interface WebTransportOptions {
   serverCertificateHashes?: Array<{
     algorithm: string;
@@ -80,6 +88,8 @@ declare global {
   interface Window {
     MediaStreamTrackProcessor?: TrackProcessorConstructor;
     WebTransport?: new (url: string, options?: WebTransportOptions) => WebTransportSession;
+    __LLRDC_BOOTSTRAP_CONNECTION__?: BootstrapConnection;
+    __LLRDC_BOOTSTRAP_TRANSPORT__?: WebTransportSession;
   }
 }
 
@@ -97,7 +107,7 @@ let isRemoteStreaming = false;
 let seqNum = 0;
 let controlWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let controlReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-let pairedConnection: { ip: string; port: number; certHash: string; code: string; token?: string } | null = null;
+let pairedConnection: BootstrapConnection | null = null;
 let nalCache: NalCache = createNalCache();
 
 function parseResolution(value: string | undefined): [number, number] | null {
@@ -263,15 +273,19 @@ async function openPairedTransport(): Promise<void> {
   if (!pairedConnection) throw new Error('Enter the four-digit receiver code first');
   if (!window.WebTransport) throw new Error('WebTransport is not supported in this browser');
 
-  const certBytes = parseCertHash(pairedConnection.certHash);
-  if (!certBytes) throw new Error('Receiver certificate fingerprint is invalid');
-  const options: WebTransportOptions = {
-    serverCertificateHashes: [{ algorithm: 'sha-256', value: certBytes.buffer as ArrayBuffer }],
-  };
-  const query = new URLSearchParams({ code: pairedConnection.code });
-  if (pairedConnection.token) query.set('token', pairedConnection.token);
-  const url = `https://${pairedConnection.ip}:${pairedConnection.port}/?${query.toString()}`;
-  transport = new window.WebTransport(url, options);
+  transport = window.__LLRDC_BOOTSTRAP_TRANSPORT__ ?? null;
+  delete window.__LLRDC_BOOTSTRAP_TRANSPORT__;
+  if (!transport) {
+    const certBytes = parseCertHash(pairedConnection.certHash);
+    if (!certBytes) throw new Error('Receiver certificate fingerprint is invalid');
+    const options: WebTransportOptions = {
+      serverCertificateHashes: [{ algorithm: 'sha-256', value: certBytes.buffer as ArrayBuffer }],
+    };
+    const query = new URLSearchParams({ code: pairedConnection.code });
+    if (pairedConnection.token) query.set('token', pairedConnection.token);
+    const url = `https://${pairedConnection.ip}:${pairedConnection.port}/?${query.toString()}`;
+    transport = new window.WebTransport(url, options);
+  }
   await transport.ready;
   const control = await transport.createBidirectionalStream();
   controlWriter = control.writable.getWriter();
@@ -305,29 +319,35 @@ export async function pairWithCode(rawCode: string): Promise<void> {
       code,
     };
   } else {
-    const response = await fetch('/api/pair', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      cache: 'no-store',
-      body: JSON.stringify({ code }),
-    });
-    if (!response.ok) throw new Error('Code invalid or receiver unavailable.');
-    const result = await response.json() as {
-      ip_address?: string;
-      webtransport_port?: number;
-      cert_hash_hex?: string;
-      connection_token?: string;
-    };
-    if (!result.ip_address || !result.webtransport_port || !result.cert_hash_hex || !result.connection_token) {
-      throw new Error('Pairing response was incomplete.');
+    const bootstrapped = window.__LLRDC_BOOTSTRAP_CONNECTION__;
+    if (bootstrapped?.code === code) {
+      pairedConnection = bootstrapped;
+      delete window.__LLRDC_BOOTSTRAP_CONNECTION__;
+    } else {
+      const response = await fetch('/api/pair', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ code }),
+      });
+      if (!response.ok) throw new Error('Code invalid or receiver unavailable.');
+      const result = await response.json() as {
+        ip_address?: string;
+        webtransport_port?: number;
+        cert_hash_hex?: string;
+        connection_token?: string;
+      };
+      if (!result.ip_address || !result.webtransport_port || !result.cert_hash_hex || !result.connection_token) {
+        throw new Error('Pairing response was incomplete.');
+      }
+      pairedConnection = {
+        ip: result.ip_address,
+        port: result.webtransport_port,
+        certHash: result.cert_hash_hex,
+        code,
+        token: result.connection_token,
+      };
     }
-    pairedConnection = {
-      ip: result.ip_address,
-      port: result.webtransport_port,
-      certHash: result.cert_hash_hex,
-      code,
-      token: result.connection_token,
-    };
   }
   try {
     await openPairedTransport();
@@ -344,7 +364,7 @@ export async function pairWithCode(rawCode: string): Promise<void> {
   const button = document.getElementById('toggleBtn') as HTMLButtonElement | null;
   if (button) button.disabled = false;
   const status = document.getElementById('pairStatus');
-  if (status) status.textContent = 'Paired to receiver on this LAN';
+  if (status) status.textContent = 'PAIRED';
 }
 
 export function initPairing(): void {
@@ -907,7 +927,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
       }
     } else {
       isRemoteStreaming = true;
-      updateStatus('active', 'STREAMING (IN USE)');
+      updateStatus('active', 'IN USE');
       setSettingsDisabled(true);
       if (toggleBtn && toggleText) {
         toggleText.textContent = 'Casting Active (In Use)';

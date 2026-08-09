@@ -130,9 +130,10 @@ existing `sudo` access only to install the public pairing key.
 7. Confirm that the shared content appears on the HDMI display.
 
 This direct-IP workflow works without Internet access or Cloudflare. The
-optional `https://cast.llrdc.com` workflow serves the same casting UI and uses
-the Worker only for pairing discovery; WebTransport video and control traffic
-still goes directly over the LAN. Configure
+optional `https://cast.llrdc.com` workflow serves a minimal pairing page. It
+uses the Worker only for pairing discovery, then loads the full casting UI from
+the receiver over the authenticated LAN WebTransport connection; WebTransport
+video and control traffic still goes directly over the LAN. Configure
 `CLOUD_DISCOVERY_ENABLED=1` and the Worker credentials described in
 [`cloudflare/worker/README.md`](cloudflare/worker/README.md) only when that
 optional workflow is wanted.

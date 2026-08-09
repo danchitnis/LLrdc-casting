@@ -76,10 +76,6 @@ done
 echo "Checking Wrangler authentication..."
 (cd "$WORKER_DIR" && npx wrangler whoami) || die "Wrangler is not logged in. Run: npx wrangler login"
 
-if [[ ! -d "${SCRIPT_DIR}/client/node_modules" ]]; then
-  echo "Installing client dependencies..."
-  (cd "${SCRIPT_DIR}/client" && npm ci)
-fi
 if [[ ! -d "${WORKER_DIR}/node_modules" ]]; then
   echo "Installing Worker dependencies..."
   (cd "$WORKER_DIR" && npm ci)
@@ -210,7 +206,7 @@ EOF
 chmod 600 "$RECEIVER_ENV"
 
 echo
-echo "Deploying ${DOMAIN}..."
+echo "Deploying the minimal pairing bootstrap at ${DOMAIN}..."
 (cd "$WORKER_DIR" && npm run check && npm run deploy -- --config "$WORKER_CONFIG" --domains "$DOMAIN")
 
 echo

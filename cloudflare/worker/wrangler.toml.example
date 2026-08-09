@@ -2,10 +2,6 @@ name = "cast-pairing-worker"
 main = "src/index.ts"
 compatibility_date = "2026-08-08"
 
-[assets]
-directory = "../../client/dist"
-binding = "ASSETS"
-
 # The setup script replaces this file with a project-specific copy.
 
 [[d1_databases]]

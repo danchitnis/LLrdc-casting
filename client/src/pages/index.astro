@@ -116,6 +116,10 @@ import LogConsole from '../components/LogConsole.astro';
       margin-top: 12px;
       color: var(--color-text-muted);
       font-size: 0.85rem;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     @media (max-width: 520px) {
@@ -246,12 +250,12 @@ import LogConsole from '../components/LogConsole.astro';
       event.preventDefault();
       if (!pairCode || !pairBtn) return;
       pairBtn.disabled = true;
-      if (pairStatus) pairStatus.textContent = 'Connecting to receiver on this LAN...';
+      if (pairStatus) pairStatus.textContent = 'PAIRING';
       try {
         await pairWithCode(pairCode.value);
-        if (pairStatus) pairStatus.textContent = 'Paired to receiver on this LAN';
+        if (pairStatus) pairStatus.textContent = 'PAIRED';
       } catch (error) {
-        if (pairStatus) pairStatus.textContent = (error as Error).message;
+        if (pairStatus) pairStatus.textContent = 'PAIR FAILED';
         log(`[PAIRING] ${(error as Error).message}`, true);
       } finally {
         pairBtn.disabled = false;
@@ -270,7 +274,16 @@ import LogConsole from '../components/LogConsole.astro';
 
     await checkBrowserCodecCapabilities(log);
 
-    log('[PAIRING] Enter the code shown on the receiver HDMI screen.');
+    log('[PAIRING] Enter the HDMI code.');
+    const bootstrapConnection = window.__LLRDC_BOOTSTRAP_CONNECTION__;
+    if (bootstrapConnection) {
+      if (pairCode) pairCode.value = bootstrapConnection.code;
+      try {
+        await pairWithCode(bootstrapConnection.code);
+      } catch {
+        if (pairStatus) pairStatus.textContent = 'PAIR FAILED';
+      }
+    }
   });
 </script>
 
