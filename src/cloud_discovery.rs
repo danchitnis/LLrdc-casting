@@ -107,25 +107,30 @@ pub fn cloud_discovery_enabled() -> bool {
 }
 
 pub fn spawn_registration(state: PairingState, cert_hash: String) {
+    state.set_cloud_ip(None);
+    state.set_cloud_status("WAITING");
     tokio::spawn(async move {
         let worker_url = match std::env::var("PAIRING_WORKER_URL") {
             Ok(value) if !value.trim().is_empty() => value.trim_end_matches('/').to_string(),
             _ => {
-                state.set_status("CLOUD OFF");
+                state.set_cloud_ip(None);
+                state.set_cloud_status("NO URL");
                 return;
             }
         };
         let receiver_id = match std::env::var("RECEIVER_ID") {
             Ok(value) if !value.is_empty() => value,
             _ => {
-                state.set_status("CLOUD ID MISSING");
+                state.set_cloud_ip(None);
+                state.set_cloud_status("NO ID");
                 return;
             }
         };
         let key = match std::env::var("RECEIVER_REGISTRATION_SECRET").ok().and_then(|value| URL_SAFE_NO_PAD.decode(value).ok()) {
             Some(value) if value.len() >= 32 => value,
             _ => {
-                state.set_status("CLOUD KEY MISSING");
+                state.set_cloud_ip(None);
+                state.set_cloud_status("NO KEY");
                 return;
             }
         };
@@ -134,11 +139,14 @@ pub fn spawn_registration(state: PairingState, cert_hash: String) {
         let mut retry_delay = Duration::from_secs(2);
         loop {
             let Some(ip) = crate::net::get_preferred_private_ipv4() else {
-                state.set_status("WAITING FOR NETWORK");
+                state.set_cloud_ip(None);
+                state.set_cloud_status("WAITING");
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             };
             let Some(code) = state.snapshot().code else {
+                state.set_cloud_ip(None);
+                state.set_cloud_status("WAITING");
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             };
@@ -169,8 +177,9 @@ pub fn spawn_registration(state: PairingState, cert_hash: String) {
                 .await;
             match result {
                 Ok(response) if response.status().is_success() => {
-                    println!("[CLOUD DISCOVERY] Receiver registration succeeded");
-                    state.set_status("READY");
+                    println!("[CLOUD DISCOVERY] Receiver registration succeeded via {ip}");
+                    state.set_cloud_ip(Some(ip));
+                    state.set_cloud_status("READY");
                     retry_delay = Duration::from_secs(2);
                     tokio::time::sleep(Duration::from_secs(45)).await;
                 }
@@ -180,13 +189,15 @@ pub fn spawn_registration(state: PairingState, cert_hash: String) {
                     eprintln!(
                         "[CLOUD DISCOVERY] Receiver registration rejected: HTTP {status} ({detail})"
                     );
-                    state.set_status("CLOUD OFF");
+                    state.set_cloud_ip(None);
+                    state.set_cloud_status("FAILED");
                     tokio::time::sleep(retry_delay).await;
                     retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                 }
                 Err(error) => {
                     eprintln!("[CLOUD DISCOVERY] Receiver registration request failed: {error}");
-                    state.set_status("CLOUD OFF");
+                    state.set_cloud_ip(None);
+                    state.set_cloud_status("FAILED");
                     tokio::time::sleep(retry_delay).await;
                     retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                 }

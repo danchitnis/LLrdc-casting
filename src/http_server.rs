@@ -253,7 +253,7 @@ pub async fn run_server(
     let shared_cert_hash = Arc::new(cert_hash_hex);
 
     println!("\n=====================================================");
-    println!(" [HTTP/HTTPS SERVER] Listening on port {port}");
+    println!(" [HTTP/HTTPS SERVER] Listening on 0.0.0.0:{port}");
     println!(" Control Socket : wss://<BOARD_IP>:{port}/ws");
     println!(" Web Share UI   : https://<BOARD_IP>:{port}/");
     println!("=====================================================\n");

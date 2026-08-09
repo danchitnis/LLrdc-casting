@@ -202,6 +202,61 @@ fn draw_fitted_string_argb(
     draw_string_argb(buf, width, height, x, y, &fit_text(text, max_chars), color, scale);
 }
 
+fn status_color(status: &str) -> u32 {
+    match status {
+        "READY" => 0xFF00FF88,
+        "DISABLED" => 0xFF94A3B8,
+        "WAITING" => 0xFFFFCC00,
+        _ => 0xFFF87171,
+    }
+}
+
+fn draw_cloud_icon_argb(
+    buf: &mut [u32],
+    width: u32,
+    height: u32,
+    x: usize,
+    y: usize,
+    color: u32,
+    scale: usize,
+) {
+    // 1 draws a pixel and 0 leaves it transparent.
+    const CLOUD: [&str; 10] = [
+        "00000011000000000000",
+        "00001111100001100000",
+        "00011100110011110000",
+        "00110000011100111000",
+        "01100000000000111000",
+        "11000000000000001100",
+        "11000000000000001110",
+        "01000000000000001100",
+        "00111111111111111000",
+        "00011111111111110000",
+    ];
+    let width = width as usize;
+    let height = height as usize;
+
+    for row in 0..CLOUD.len() {
+        for col in 0..20 {
+            if CLOUD[row].as_bytes()[col] != b'1' {
+                continue;
+            }
+            for sy in 0..scale {
+                for sx in 0..scale {
+                    let px = x + col * scale + sx;
+                    let py = y + row * scale + sy;
+                    if px < width && py < height {
+                        let index = py * width + px;
+                        if index < buf.len() {
+                            buf[index] = color;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Render the IP Dashboard onto ARGB8888 buffer
 pub fn draw_ip_dashboard_argb(
     buf: &mut [u32],
@@ -210,7 +265,9 @@ pub fn draw_ip_dashboard_argb(
     refresh_hz: u32,
     ips: &[(String, String)],
     pairing_code: Option<&str>,
-    pairing_status: &str,
+    local_status: &str,
+    cloud_status: &str,
+    cloud_ip: Option<&str>,
 ) {
     let bg_color = 0xFF0E1017; // Midnight dark blue/gray
     buf.fill(bg_color);
@@ -333,24 +390,27 @@ pub fn draw_ip_dashboard_argb(
         scale,
         box_w.saturating_sub(60 * scale / 2),
     );
-    current_y += line_height;
+    current_y += line_height * 2;
+    let code_scale = (scale * 2).max(2);
     let code_label = "PAIRING CODE";
-    draw_fitted_string_argb(
+    let code_value = pairing_code.unwrap_or("----");
+    let code_label_width = code_label.chars().count() * 8 * scale;
+    let code_width = code_value.chars().count() * 8 * code_scale;
+    let content_x = box_x + 30 * scale / 2;
+    let code_gap = 4 * scale;
+    let centered_code_x = box_x + box_w.saturating_sub(code_width) / 2;
+    let code_x = centered_code_x.max(content_x + code_label_width + code_gap);
+    let code_label_y = current_y + (8 * (code_scale - scale)) / 2;
+    draw_string_argb(
         buf,
         width,
         height,
-        box_x + 30 * scale / 2,
-        current_y,
+        content_x,
+        code_label_y,
         code_label,
         0xFFFFCC00,
         scale,
-        box_w.saturating_sub(60 * scale / 2),
     );
-    current_y += line_height;
-    let code_scale = (scale * 2).max(2);
-    let code_value = pairing_code.unwrap_or("----");
-    let code_width = code_value.chars().count() * 8 * code_scale;
-    let code_x = box_x + box_w.saturating_sub(code_width) / 2;
     draw_string_argb(
         buf,
         width,
@@ -362,16 +422,55 @@ pub fn draw_ip_dashboard_argb(
         code_scale,
     );
     current_y += 10 * code_scale;
+    current_y += line_height;
+    let status_x = box_x + 30 * scale / 2;
+    let status_width = box_w.saturating_sub(60 * scale / 2);
+    let status_column_width = status_width / 2;
+    let cloud_status_x = status_x + status_column_width;
     draw_fitted_string_argb(
         buf,
         width,
         height,
-        box_x + 30 * scale / 2,
+        status_x,
         current_y,
-        &format!("STATUS: {}", pairing_status),
-        0xFF00FF88,
+        "LOCAL",
+        0xFFFFFFFF,
         scale,
-        box_w.saturating_sub(60 * scale / 2),
+        status_column_width,
+    );
+    draw_fitted_string_argb(
+        buf,
+        width,
+        height,
+        cloud_status_x,
+        current_y,
+        "CLOUD",
+        0xFFFFFFFF,
+        scale,
+        status_column_width,
+    );
+    current_y += line_height;
+    draw_fitted_string_argb(
+        buf,
+        width,
+        height,
+        status_x,
+        current_y,
+        local_status,
+        status_color(local_status),
+        scale,
+        status_column_width,
+    );
+    draw_fitted_string_argb(
+        buf,
+        width,
+        height,
+        cloud_status_x,
+        current_y,
+        cloud_status,
+        status_color(cloud_status),
+        scale,
+        status_column_width,
     );
     current_y += line_height * 2;
 
@@ -386,17 +485,38 @@ pub fn draw_ip_dashboard_argb(
                 0xFF00E5FF // Cyan for docker/virtual
             };
 
-        draw_fitted_string_argb(
+        let cloud_connected = cloud_ip == Some(ip.as_str());
+        let line_x = box_x + 30 * scale / 2;
+        let line_width = box_w.saturating_sub(60 * scale / 2);
+        let icon_size = 20 * scale;
+        let icon_gap = 2 * scale;
+        let text_width = line_width.saturating_sub(if cloud_connected {
+            icon_size + icon_gap
+        } else {
+            0
+        });
+        let rendered_line = fit_text(&line_text, text_width / (8 * scale).max(1));
+        draw_string_argb(
             buf,
             width,
             height,
-            box_x + 30 * scale / 2,
+            line_x,
             current_y,
-            &line_text,
+            &rendered_line,
             color,
             scale,
-            box_w.saturating_sub(60 * scale / 2),
         );
+        if cloud_connected {
+            draw_cloud_icon_argb(
+                buf,
+                width,
+                height,
+                line_x + rendered_line.chars().count() * 8 * scale + icon_gap,
+                current_y,
+                0xFF67E8F9,
+                scale,
+            );
+        }
 
         current_y += line_height;
         if current_y + line_height > box_y + box_h - 40 * scale {

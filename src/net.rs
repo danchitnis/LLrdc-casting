@@ -8,7 +8,8 @@
 ///
 /// Interface names are intentionally restricted to Linux Ethernet and Wi-Fi
 /// naming families. This prevents loopback, Docker bridges, Tailscale, and
-/// other virtual addresses from becoming casting endpoints.
+/// other virtual addresses from becoming casting endpoints. Ethernet is sorted
+/// before Wi-Fi so cloud registration uses the wired address when available.
 pub fn get_active_ipv4_addresses() -> Vec<(String, String)> {
     let mut results = Vec::new();
 

@@ -9,7 +9,9 @@ const PAIRING_CODE_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 #[derive(Clone, Debug)]
 pub struct PairingSnapshot {
     pub code: Option<String>,
-    pub status: String,
+    pub local_status: String,
+    pub cloud_status: String,
+    pub cloud_ip: Option<String>,
 }
 
 struct PairingData {
@@ -41,7 +43,9 @@ impl PairingState {
             inner: Arc::new(Mutex::new(PairingData {
                 snapshot: PairingSnapshot {
                     code: None,
-                    status: "WAITING FOR NETWORK".to_string(),
+                    local_status: "WAITING".to_string(),
+                    cloud_status: "DISABLED".to_string(),
+                    cloud_ip: None,
                 },
                 expires_at: None,
                 failed_attempts: HashMap::new(),
@@ -60,7 +64,7 @@ impl PairingState {
             });
             let ttl = pairing_code_ttl_seconds();
             data.snapshot.code = Some(code.clone());
-            data.snapshot.status = "READY".to_string();
+            data.snapshot.local_status = "READY".to_string();
             data.expires_at = Some(Instant::now() + Duration::from_secs(ttl));
             data.failed_attempts.clear();
             return code;
@@ -68,9 +72,15 @@ impl PairingState {
         String::new()
     }
 
-    pub fn set_status(&self, status: impl Into<String>) {
+    pub fn set_cloud_status(&self, status: impl Into<String>) {
         if let Ok(mut data) = self.inner.lock() {
-            data.snapshot.status = status.into();
+            data.snapshot.cloud_status = status.into();
+        }
+    }
+
+    pub fn set_cloud_ip(&self, ip: Option<String>) {
+        if let Ok(mut data) = self.inner.lock() {
+            data.snapshot.cloud_ip = ip;
         }
     }
 
@@ -78,12 +88,14 @@ impl PairingState {
         let Ok(mut data) = self.inner.lock() else {
             return PairingSnapshot {
                 code: None,
-                status: "PAIRING UNAVAILABLE".to_string(),
+                local_status: "ERROR".to_string(),
+                cloud_status: "ERROR".to_string(),
+                cloud_ip: None,
             };
         };
         if data.expires_at.is_some_and(|expires_at| expires_at <= Instant::now()) {
             data.snapshot.code = None;
-            data.snapshot.status = "CODE EXPIRED".to_string();
+            data.snapshot.local_status = "EXPIRED".to_string();
         }
         data.snapshot.clone()
     }
@@ -155,6 +167,32 @@ mod tests {
         assert_eq!(state.rotate_code(), "AB12");
         assert!(state.validate_code("ab12", "peer").is_ok());
         assert!(state.validate_code("0000", "peer").is_err());
+    }
+
+    #[test]
+    fn local_and_cloud_statuses_are_independent() {
+        let state = PairingState::with_fixed_code(None).unwrap();
+
+        let initial = state.snapshot();
+        assert_eq!(initial.local_status, "WAITING");
+        assert_eq!(initial.cloud_status, "DISABLED");
+
+        state.set_cloud_status("READY");
+        state.set_cloud_ip(Some("wired-test-ip".to_string()));
+        assert_eq!(state.snapshot().local_status, "WAITING");
+
+        state.rotate_code();
+        let ready = state.snapshot();
+        assert_eq!(ready.local_status, "READY");
+        assert_eq!(ready.cloud_status, "READY");
+        assert_eq!(ready.cloud_ip.as_deref(), Some("wired-test-ip"));
+
+        state.set_cloud_status("FAILED");
+        state.set_cloud_ip(None);
+        let failed_cloud = state.snapshot();
+        assert_eq!(failed_cloud.local_status, "READY");
+        assert_eq!(failed_cloud.cloud_status, "FAILED");
+        assert_eq!(failed_cloud.cloud_ip, None);
     }
 
     #[test]

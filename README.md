@@ -42,6 +42,13 @@ connected HDMI display without sending the content through a cloud service.
 The sender computer and receiver must be able to communicate over the local
 network.
 
+The HTTP, WebTransport, and direct UDP receiver listeners bind to `0.0.0.0`,
+so they accept connections through any address available on the receiver. The
+idle IP screen intentionally displays only usable private IPv4 addresses on
+physical Ethernet or Wi-Fi interfaces; loopback, Docker, Tailscale, link-local,
+and other virtual addresses are filtered out. Cloud registration prefers
+Ethernet and falls back to Wi-Fi when Ethernet is unavailable.
+
 ## Set Up the Board
 
 These steps are required once for a new board.

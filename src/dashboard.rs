@@ -50,6 +50,11 @@ impl RawDashboardFeeder {
         let ips = crate::net::get_active_ipv4_addresses();
         let mut pixels = vec![0u32; (self.width * self.height) as usize];
         let pairing = self.pairing_state.snapshot();
+        let local_status = if ips.is_empty() {
+            "NO NET"
+        } else {
+            pairing.local_status.as_str()
+        };
         crate::text::draw_ip_dashboard_argb(
             &mut pixels,
             self.width,
@@ -57,7 +62,9 @@ impl RawDashboardFeeder {
             vrefresh,
             &ips,
             pairing.code.as_deref(),
-            &pairing.status,
+            local_status,
+            &pairing.cloud_status,
+            pairing.cloud_ip.as_deref(),
         );
 
         let raw_bytes =
@@ -158,6 +165,11 @@ impl PersistentDashboardEncoder {
         let ips = crate::net::get_active_ipv4_addresses();
         let mut pixels = vec![0u32; (self.width * self.height) as usize];
         let pairing = self.pairing_state.snapshot();
+        let local_status = if ips.is_empty() {
+            "NO NET"
+        } else {
+            pairing.local_status.as_str()
+        };
         crate::text::draw_ip_dashboard_argb(
             &mut pixels,
             self.width,
@@ -165,7 +177,9 @@ impl PersistentDashboardEncoder {
             vrefresh,
             &ips,
             pairing.code.as_deref(),
-            &pairing.status,
+            local_status,
+            &pairing.cloud_status,
+            pairing.cloud_ip.as_deref(),
         );
 
         let raw_bytes: &[u8] =

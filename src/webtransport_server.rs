@@ -57,6 +57,7 @@ pub async fn run_server_with_identity(
         .and_then(|p| p.parse().ok())
         .unwrap_or(30);
 
+    // Use the wildcard bind so every receiver interface accepts WebTransport.
     let config = ServerConfig::builder()
         .with_bind_default(wt_port)
         .with_identity(identity)
