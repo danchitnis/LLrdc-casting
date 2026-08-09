@@ -308,6 +308,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
+                        // Stop the idle feeder before replacing its raw KMS pipeline,
+                        // otherwise a dashboard frame can block the stream handoff.
+                        if frame.seq <= 1 {
+                            streaming_active.store(true, Ordering::Relaxed);
+                        }
+
                         // The client has already composed the encoded frame, including any
                         // preserve-mode bars. KMS only scales that frame across the display.
                         let _ = playback_engine.ensure_configuration(
