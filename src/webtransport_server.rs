@@ -143,10 +143,7 @@ async fn handle_connection(
     pairing_state: PairingState,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let session_request = incoming_session.await?;
-    println!(
-        "[WEBTRANSPORT] Connection requested from path: '{}'",
-        session_request.path()
-    );
+    println!("[WEBTRANSPORT] Connection request received");
 
     let (code, token) = connection_query(session_request.path());
     let Some(code) = code else {

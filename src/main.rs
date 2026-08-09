@@ -4,6 +4,7 @@
 #![deny(dead_code)]
 
 mod cert;
+mod admin;
 mod cloud_discovery;
 mod control;
 mod dashboard;
@@ -24,6 +25,12 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("admin") {
+        let command = args.next();
+        return admin::run_client(command.as_deref(), args.next().is_some()).await;
+    }
+
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     sys_monitor::spawn_dmesg_kernel_monitor();
     let _ = drm_kms::inspect_live_scanout_status();
@@ -36,11 +43,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| e as Box<dyn std::error::Error>)?;
     let cert_hash_hex = webtransport_server::extract_cert_hash_hex(&identity);
-    let pairing_state = local_pairing::PairingState::new();
+    let fixed_pairing_code = std::env::var("PAIRING_CODE_FIXED")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let cloud_discovery_enabled = cloud_discovery::cloud_discovery_enabled();
+    if fixed_pairing_code.is_some() && cloud_discovery_enabled {
+        return Err("fixed pairing codes cannot be used with Cloudflare discovery enabled".into());
+    }
+    let pairing_state = local_pairing::PairingState::with_fixed_code(fixed_pairing_code)?;
     local_pairing::spawn_local_pairing(pairing_state.clone());
-    if cloud_discovery::cloud_discovery_enabled() {
+    if cloud_discovery_enabled {
         cloud_discovery::spawn_registration(pairing_state.clone(), cert_hash_hex.clone());
     }
+
+    let admin_pairing_state = pairing_state.clone();
+    tokio::spawn(async move {
+        if let Err(error) = admin::run_server(admin_pairing_state).await {
+            eprintln!("[ADMIN SOCKET] Server stopped: {error}");
+        }
+    });
 
     let http_cert_hash = cert_hash_hex.clone();
     let http_control_channel = control_channel.clone();

@@ -198,10 +198,10 @@ import LogConsole from '../components/LogConsole.astro';
 
   <section class="pairing-card" aria-labelledby="pairingTitle">
     <h2 id="pairingTitle">Connect to a receiver</h2>
-    <p>Enter the four-digit code shown on the receiver's HDMI screen. Video stays on the local network.</p>
+    <p>Enter the four-character code shown on the receiver's HDMI screen. Video stays on the local network.</p>
     <form id="pairForm">
       <div class="pairing-row">
-        <input id="pairCode" name="code" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="one-time-code" placeholder="0000" aria-label="Four-digit receiver code" required />
+        <input id="pairCode" name="code" inputmode="text" pattern="[A-Za-z0-9]{4}" maxlength="4" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="A78Q" aria-label="Four-character receiver code" required />
         <button id="pairBtn" type="submit">Connect</button>
       </div>
     </form>

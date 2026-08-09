@@ -122,7 +122,14 @@ existing `sudo` access only to install the public pairing key.
    ```
 
 2. Accept the receiver's local certificate warning, as in the previous workflow.
-3. Enter the four-digit code shown on the receiver's HDMI idle screen.
+3. Retrieve the live pairing code over SSH when HDMI access is unavailable:
+
+   ```bash
+   pairing_code="$(./server.sh --get-pairing-code)"
+   ```
+
+   Enter that value in the browser. This works without Cloudflare. The HDMI
+   idle screen is the manual fallback.
 4. Select the source and picture settings you want to use.
 5. Select **Start Casting**.
 6. Choose the screen, window, or browser tab to share, then approve the
@@ -137,6 +144,15 @@ video and control traffic still goes directly over the LAN. Configure
 `CLOUD_DISCOVERY_ENABLED=1` and the Worker credentials described in
 [`cloudflare/worker/README.md`](cloudflare/worker/README.md) only when that
 optional workflow is wanted.
+
+For deliberate local stress testing, use a fixed code for one deployment:
+
+```bash
+CLOUD_DISCOVERY_ENABLED=0 ./server.sh --start --pairing-code=0000
+```
+
+Random rotating pairing codes remain the default. Fixed-code mode is rejected
+when Cloudflare discovery is enabled and should not be persisted in configuration.
 
 Select **Stop Casting** when finished. The receiver returns to its
 waiting screen after the stream becomes inactive.

@@ -69,6 +69,21 @@ To build the Docker image locally and transfer it to the board in background mod
 ./server.sh --start
 ```
 
+Retrieve the active local pairing code over SSH without Cloudflare:
+
+```bash
+pairing_code="$(./server.sh --get-pairing-code)"
+```
+
+For deliberate local stress testing, a fixed code can be selected for one
+deployment:
+
+```bash
+CLOUD_DISCOVERY_ENABLED=0 ./server.sh --start --pairing-code=0000
+```
+
+Random rotating codes remain the default.
+
 To stop the server container on the board:
 
 ```bash

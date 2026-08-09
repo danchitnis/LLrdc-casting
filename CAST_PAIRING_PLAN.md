@@ -4,7 +4,7 @@
 
 Keep the existing direct-IP LAN workflow as the mandatory, offline-capable mode. Optionally provide a fixed `https://cast.llrdc.com` entry point using Cloudflare discovery when the user enables it.
 
-The receiver always displays a four-digit code on its HDMI idle screen. In direct-IP mode, the user opens `https://<receiver-ip>:8080/`, accepts the receiver's local certificate warning as before, enters the code, and streams without Internet access. In optional Cloudflare mode, the user may open `https://cast.llrdc.com`, enter the same code, and the page silently opens direct WebTransport to the LAN receiver.
+The receiver always displays a four-character uppercase alphanumeric code on its HDMI idle screen. In direct-IP mode, the user opens `https://<receiver-ip>:8080/`, accepts the receiver's local certificate warning as before, enters the code, and streams without Internet access. In optional Cloudflare mode, the user may open `https://cast.llrdc.com`, enter the same code, and the page silently opens direct WebTransport to the LAN receiver.
 
 All video, control, and WebTransport payloads travel directly between the browser and receiver on the LAN. Cloudflare is optional metadata discovery only and is never required for receiver startup or direct-IP streaming.
 
@@ -14,7 +14,7 @@ All video, control, and WebTransport payloads travel directly between the browse
 Mandatory offline mode:
 
 ```text
-Receiver -> HDMI dashboard: current LAN IP + four-digit code
+Receiver -> HDMI dashboard: current LAN IP + four-character alphanumeric code
 Browser  -> https://<receiver-ip>:8080/: local UI
 Browser  -> Receiver private IP: local code-authenticated WebTransport
 ```
@@ -34,13 +34,13 @@ Optional Cloudflare registration contains:
 - Current private IPv4 address
 - WebTransport UDP port
 - Current certificate SHA-256 fingerprint
-- Current four-digit pairing code
+- Current four-character alphanumeric pairing code
 - Code expiry
 - Registration expiry
 
 Direct-IP flow:
 
-1. The receiver generates and displays a local four-digit code.
+1. The receiver generates and displays a local four-character uppercase alphanumeric code.
 2. The browser loads the local page from the receiver IP.
 3. The browser fetches the local certificate fingerprint and opens direct WebTransport with the entered code.
 4. The receiver validates the code locally before accepting the session.
@@ -50,7 +50,7 @@ Optional Cloudflare flow:
 
 1. The Worker looks up the receiver using the entered code.
 2. The page receives the LAN endpoint and certificate fingerprint.
-3. The bootstrap opens direct WebTransport with both the local four-digit code and optional short-lived Worker token, requests the full receiver UI over that connection, and replaces the bootstrap document without changing `window.location`.
+3. The bootstrap opens direct WebTransport with both the local four-character code and optional short-lived Worker token, requests the full receiver UI over that connection, and replaces the bootstrap document without changing `window.location`.
 4. The receiver still validates the local code. The Worker token is an additional optional authorization check, never the only local requirement.
 
 The visible page remains `https://cast.llrdc.com`, protected by Cloudflare's normal certificate. The receiver's short-lived self-signed certificate is authenticated through WebTransport certificate pinning, so no browser certificate warning is shown.
@@ -127,7 +127,7 @@ POST /api/pair
 
 `POST /api/pair` requirements:
 
-- Accept a four-digit code.
+- Accept a four-character uppercase alphanumeric code.
 - Rate-limit invalid attempts.
 - Reject expired or unavailable receivers.
 - Atomically consume or rotate the submitted code.
@@ -169,7 +169,7 @@ Add `src/local_pairing.rs`. This module is mandatory and must not import Cloudfl
 
 The module must:
 
-1. Generate a cryptographically random four-digit code at startup.
+1. Generate a cryptographically random four-character uppercase alphanumeric code at startup.
 2. Display the code even when there is no Internet connection.
 3. Validate the code locally on the first WebTransport request.
 4. Expire and rotate the code locally.
@@ -198,7 +198,7 @@ Display:
 
 ```text
 CAST: https://cast.llrdc.com
-CODE: 4827
+CODE: A78Q
 STATUS: Ready
 ```
 
@@ -221,7 +221,7 @@ Update `src/webtransport_server.rs`.
 Before `session_request.accept()`:
 
 1. Parse the WebTransport request path and query string.
-2. Require and validate the local four-digit code in every mode.
+2. Require and validate the local four-character code in every mode.
 3. If an optional Cloudflare token is present and optional verification is configured, verify its signature, receiver ID, purpose, expiry, and token ID.
 4. Never reject direct-IP local mode because Cloudflare variables are missing.
 5. Log rejection reason without logging codes, tokens, or private addresses.
@@ -263,10 +263,10 @@ Required UI flow:
 
 1. Direct-IP page loads at `https://<receiver-ip>:8080/` and remains the existing offline path.
 2. Fixed-URL page loads at `https://cast.llrdc.com` only when optional Cloudflare mode is desired.
-3. Both pages show a four-digit code input before casting settings.
+3. Both pages show a four-character alphanumeric code input before casting settings.
 4. Direct-IP mode fetches `/cert_hash` locally and connects to the current page host on WebTransport.
 5. Cloudflare mode submits the code to `/api/pair`, then connects to the returned LAN endpoint.
-6. Both modes include the four-digit code in the WebTransport request.
+6. Both modes include the four-character code in the WebTransport request.
 7. Disable all casting controls until local code validation and WebTransport connection succeed.
 8. Never change `window.location` in Cloudflare mode.
 9. Keep endpoint, certificate hash, and optional token only in memory.
@@ -299,7 +299,7 @@ The public Cloudflare certificate applies only to the visible `cast.llrdc.com` p
 
 Test code generation:
 
-- Exactly four decimal digits.
+- Exactly four uppercase alphanumeric characters (`A-Z`, `0-9`).
 - Cryptographically secure source.
 - Collision retry behavior.
 - Expiry behavior.

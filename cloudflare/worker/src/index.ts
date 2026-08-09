@@ -31,6 +31,7 @@ interface RateLimitRow {
 
 const CODE_TTL_SECONDS = 3600;
 const REGISTRATION_TTL_SECONDS = 3600;
+const PAIRING_CODE_PATTERN = /^[A-Za-z0-9]{4}$/;
 const REGISTRATION_TIMESTAMP_SKEW_SECONDS = 300;
 const REGISTRATION_REPLAY_TTL_SECONDS = 600;
 const CONNECTION_TOKEN_TTL_SECONDS = 60;
@@ -120,7 +121,7 @@ function parseRegistration(body: JsonObject): ReceiverRegistration | null {
   if (!isString(certHash) || !/^[0-9a-fA-F]{64}$/.test(certHash)) {
     return null;
   }
-  if (!isString(pairingCode) || !/^\d{4}$/.test(pairingCode)) {
+  if (!isString(pairingCode) || !PAIRING_CODE_PATTERN.test(pairingCode)) {
     return null;
   }
 
@@ -129,7 +130,7 @@ function parseRegistration(body: JsonObject): ReceiverRegistration | null {
     ipAddress,
     webtransportPort: port,
     certHashHex: certHash.toLowerCase(),
-    pairingCode,
+    pairingCode: pairingCode.toUpperCase(),
   };
 }
 
@@ -484,10 +485,11 @@ async function handlePair(
     return jsonResponse({ error: "invalid request body" }, 400);
   }
   const body = parseJson(parsedBody.text);
-  const code = body?.code;
-  if (!isString(code) || !/^\d{4}$/.test(code)) {
+  const submittedCode = body?.code;
+  if (!isString(submittedCode) || !PAIRING_CODE_PATTERN.test(submittedCode)) {
     return jsonResponse({ error: "invalid pairing code" }, 400);
   }
+  const code = submittedCode.toUpperCase();
 
   const now = Math.floor(Date.now() / 1000);
   scheduleCleanup(ctx, env, now);

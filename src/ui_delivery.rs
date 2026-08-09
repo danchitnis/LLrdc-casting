@@ -25,6 +25,7 @@ pub async fn send_embedded_ui(
     stream.write_all(&length.to_be_bytes()).await?;
     stream.write_all(html).await?;
     stream.flush().await?;
+    stream.finish().await?;
     Ok(())
 }
 

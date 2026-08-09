@@ -74,7 +74,7 @@ RSA public key. After deployment, verify:
 curl -I https://cast.llrdc.com/
 curl -i -X POST https://cast.llrdc.com/api/pair \
   -H 'content-type: application/json' \
-  --data '{"code":"0000"}'
+  --data '{"code":"A78Q"}'
 ```
 
 The first request must return the small pairing bootstrap with a trusted certificate. The second
@@ -109,7 +109,7 @@ The receiver sends this JSON body, with no client-controlled expiry fields:
   "ip_address": "192.168.1.42",
   "webtransport_port": 4433,
   "cert_hash_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "pairing_code": "4827"
+  "pairing_code": "A78Q"
 }
 ```
 
@@ -135,8 +135,9 @@ collisions; a collision returns `409` without replacing the other receiver.
 
 ## Pairing API
 
-The browser sends `{ "code": "4827" }` to `/api/pair`. The code must be four
-decimal digits. The Worker applies D1-backed limits of 10 attempts per client IP
+The browser sends `{ "code": "A78Q" }` to `/api/pair`. The code must be four
+uppercase alphanumeric characters (`A-Z`, `0-9`); lowercase input is normalized
+to uppercase. The Worker applies D1-backed limits of 10 attempts per client IP
 and 5 attempts per code per 60 seconds. A successful match atomically clears the
 code before returning. Expired, missing, consumed, and unavailable codes use a
 generic error and never reveal another receiver's data.

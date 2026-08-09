@@ -21,9 +21,9 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <body>
   <main>
     <h1>Connect to receiver</h1>
-    <p>Enter the four-digit code shown on the receiver HDMI screen.</p>
+    <p>Enter the four-character code shown on the receiver HDMI screen.</p>
     <form id="pair-form">
-      <input id="pair-code" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="one-time-code" placeholder="0000" required>
+      <input id="pair-code" inputmode="text" pattern="[A-Za-z0-9]{4}" maxlength="4" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="A78Q" required>
       <button id="pair-button" type="submit">Connect</button>
     </form>
     <p id="status" role="status">Waiting for code</p>
@@ -96,8 +96,8 @@ const BOOTSTRAP_HTML = `<!doctype html>
 
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
-        const code = codeInput.value.trim();
-        if (!/^\\d{4}$/.test(code)) { status.textContent = 'Enter 4 digits'; return; }
+        const code = codeInput.value.trim().toUpperCase();
+        if (!/^[A-Z0-9]{4}$/.test(code)) { status.textContent = 'Enter 4 letters or numbers'; return; }
         button.disabled = true;
         status.textContent = 'Pairing';
         try {

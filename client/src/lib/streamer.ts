@@ -270,7 +270,7 @@ async function readControlMessages(reader: ReadableStreamDefaultReader<Uint8Arra
 }
 
 async function openPairedTransport(): Promise<void> {
-  if (!pairedConnection) throw new Error('Enter the four-digit receiver code first');
+  if (!pairedConnection) throw new Error('Enter the four-character receiver code first');
   if (!window.WebTransport) throw new Error('WebTransport is not supported in this browser');
 
   transport = window.__LLRDC_BOOTSTRAP_TRANSPORT__ ?? null;
@@ -304,8 +304,8 @@ function isDirectIpPage(): boolean {
 }
 
 export async function pairWithCode(rawCode: string): Promise<void> {
-  const code = rawCode.trim();
-  if (!/^\d{4}$/.test(code)) throw new Error('Enter the four-digit code shown on the receiver.');
+  const code = rawCode.trim().toUpperCase();
+  if (!/^[A-Z0-9]{4}$/.test(code)) throw new Error('Enter the four-character code shown on the receiver.');
   updateStatus('connecting', 'PAIRING');
   const localMode = isDirectIpPage();
   if (localMode) {

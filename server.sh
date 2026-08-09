@@ -60,7 +60,7 @@ IMAGE="llrdc-casting"
 CONNECTOR_ID="${PRE_CONNECTOR_ID:-${BOARD_DRM_CONNECTOR_ID:-${DRM_CONNECTOR_ID:-auto}}}"
 
 usage() {
-  echo "Usage: $0 --start [--dashboard|--no-dashboard] | --stop"
+  echo "Usage: $0 --start [--dashboard|--no-dashboard] [--pairing-code=<4 alphanumeric>] | --get-pairing-code | --stop"
 }
 
 action="${1:-}"
@@ -68,16 +68,41 @@ action="${1:-}"
 shift || true
 
 case "$action" in
+  --get-pairing-code)
+    (($# == 0)) || { usage; exit 2; }
+    ssh -o BatchMode=yes "$BOARD_IP" "docker exec '$IMAGE' /usr/local/bin/llrdc-casting admin pairing-code"
+    ;;
   --start)
     idle_dashboard=1
+    pairing_code_fixed=""
     while (($#)); do
       case "$1" in
         --dashboard) idle_dashboard=1 ;;
         --no-dashboard) idle_dashboard=0 ;;
+        --pairing-code=*)
+          pairing_code_fixed="${1#*=}"
+          if ! [[ "$pairing_code_fixed" =~ ^[A-Za-z0-9]{4}$ ]]; then
+            echo "Pairing code must be exactly four alphanumeric characters." >&2
+            exit 2
+          fi
+          pairing_code_fixed="$(printf '%s' "$pairing_code_fixed" | tr '[:lower:]' '[:upper:]')"
+          ;;
         *) usage; exit 2 ;;
       esac
       shift
     done
+
+    case "${SERVER_CLOUD_DISCOVERY_ENABLED:-0}" in
+      1|true|TRUE|yes|YES)
+        if [[ -n "$pairing_code_fixed" ]]; then
+          echo "Fixed pairing codes cannot be used with Cloudflare discovery enabled." >&2
+          exit 2
+        fi
+        ;;
+    esac
+    if [[ -n "$pairing_code_fixed" ]]; then
+      echo "[WARNING] Fixed pairing code mode is enabled for this local test deployment."
+    fi
 
     # Hash Dockerfile to detect if GStreamer / OS dependencies changed
     DOCKERFILE_HASH=$(shasum -a 256 "${SCRIPT_DIR}/Dockerfile" | awk '{print $1}')
@@ -104,7 +129,7 @@ case "$action" in
     scp -o BatchMode=yes /tmp/llrdc-casting "${BOARD_IP}:/var/tmp/llrdc-bin/llrdc-casting"
     rm -f /tmp/llrdc-casting
 
-    ssh -o BatchMode=yes "$BOARD_IP" "docker stop -t 2 '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; docker rm -f '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; sleep 1; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='${SERVER_DRM_CONNECTOR_ID:-${BOARD_DRM_CONNECTOR_ID:-${DRM_CONNECTOR_ID:-auto}}}' -e DRM_PLANE_ID='${SERVER_DRM_PLANE_ID:-${BOARD_DRM_PLANE_ID:-33}}' -e IDLE_DASHBOARD='${idle_dashboard:-${SERVER_IDLE_DASHBOARD:-${BOARD_IDLE_DASHBOARD:-1}}}' -e IDLE_DASHBOARD_MODE='${SERVER_IDLE_DASHBOARD_MODE:-${BOARD_IDLE_DASHBOARD_MODE:-raw}}' -e IDLE_TIMEOUT_SEC='${SERVER_IDLE_TIMEOUT_SEC:-${BOARD_IDLE_TIMEOUT_SEC:-30}}' -e PAIRING_CODE_TTL_SEC='${SERVER_PAIRING_CODE_TTL_SEC:-${BOARD_PAIRING_CODE_TTL_SEC:-3600}}' -e HTTP_PORT='${SERVER_HTTP_PORT:-${BOARD_HTTP_PORT:-8080}}' -e WEBTRANSPORT_PORT='${SERVER_WEBTRANSPORT_PORT:-${BOARD_WEBTRANSPORT_PORT:-4433}}' -e BOARD_PORT='${SERVER_PORT:-${BOARD_PORT:-4434}}' -e UDP_BUFFER_SIZE_MB='${SERVER_UDP_BUFFER_SIZE_MB:-${BOARD_UDP_BUFFER_SIZE_MB:-8}}' -e CERTS_DIR='${SERVER_CERT_DIR:-${BOARD_CERT_DIR:-/certs}}' -e CLOUD_DISCOVERY_ENABLED='${SERVER_CLOUD_DISCOVERY_ENABLED:-0}' -e PAIRING_WORKER_URL='${SERVER_PAIRING_WORKER_URL:-https://cast.llrdc.com}' -e RECEIVER_ID='${SERVER_RECEIVER_ID:-}' -e RECEIVER_REGISTRATION_SECRET='${SERVER_RECEIVER_REGISTRATION_SECRET:-}' -e PAIRING_TOKEN_PUBLIC_KEY_FILE='${SERVER_PAIRING_TOKEN_PUBLIC_KEY_FILE:-/pairing/public.pem}' -v /dev:/dev -v /var/lib/llrdc-certs:/certs -v /var/lib/llrdc-pairing:/pairing:ro -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
+    ssh -o BatchMode=yes "$BOARD_IP" "docker stop -t 2 '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; docker rm -f '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; sleep 1; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='${SERVER_DRM_CONNECTOR_ID:-${BOARD_DRM_CONNECTOR_ID:-${DRM_CONNECTOR_ID:-auto}}}' -e DRM_PLANE_ID='${SERVER_DRM_PLANE_ID:-${BOARD_DRM_PLANE_ID:-33}}' -e IDLE_DASHBOARD='${idle_dashboard:-${SERVER_IDLE_DASHBOARD:-${BOARD_IDLE_DASHBOARD:-1}}}' -e IDLE_DASHBOARD_MODE='${SERVER_IDLE_DASHBOARD_MODE:-${BOARD_IDLE_DASHBOARD_MODE:-raw}}' -e IDLE_TIMEOUT_SEC='${SERVER_IDLE_TIMEOUT_SEC:-${BOARD_IDLE_TIMEOUT_SEC:-30}}' -e PAIRING_CODE_TTL_SEC='${SERVER_PAIRING_CODE_TTL_SEC:-${BOARD_PAIRING_CODE_TTL_SEC:-3600}}' -e PAIRING_CODE_FIXED='$pairing_code_fixed' -e HTTP_PORT='${SERVER_HTTP_PORT:-${BOARD_HTTP_PORT:-8080}}' -e WEBTRANSPORT_PORT='${SERVER_WEBTRANSPORT_PORT:-${BOARD_WEBTRANSPORT_PORT:-4433}}' -e BOARD_PORT='${SERVER_PORT:-${BOARD_PORT:-4434}}' -e UDP_BUFFER_SIZE_MB='${SERVER_UDP_BUFFER_SIZE_MB:-${BOARD_UDP_BUFFER_SIZE_MB:-8}}' -e CERTS_DIR='${SERVER_CERT_DIR:-${BOARD_CERT_DIR:-/certs}}' -e CLOUD_DISCOVERY_ENABLED='${SERVER_CLOUD_DISCOVERY_ENABLED:-0}' -e PAIRING_WORKER_URL='${SERVER_PAIRING_WORKER_URL:-https://cast.llrdc.com}' -e RECEIVER_ID='${SERVER_RECEIVER_ID:-}' -e RECEIVER_REGISTRATION_SECRET='${SERVER_RECEIVER_REGISTRATION_SECRET:-}' -e PAIRING_TOKEN_PUBLIC_KEY_FILE='${SERVER_PAIRING_TOKEN_PUBLIC_KEY_FILE:-/pairing/public.pem}' -v /dev:/dev -v /var/lib/llrdc-certs:/certs -v /var/lib/llrdc-pairing:/pairing:ro -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
     ;;
   --stop)
     (($# == 0)) || { usage; exit 2; }
