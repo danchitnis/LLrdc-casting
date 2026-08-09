@@ -72,7 +72,7 @@ These steps are required once for a new board.
      ip: "<receiver-ip>"
    ```
 
-   You can instead provide `BOARD_IP` on the command line when starting the
+   You can instead provide `--board-ip=<receiver-ip>` when starting the
    server.
 
 ## Build and Start the Server
@@ -83,20 +83,48 @@ Run this from the project directory on the sender computer:
 ./server.sh --start
 ```
 
+Run all Rust unit tests locally without connecting to or changing the receiver:
+
+```bash
+./server.sh --test
+```
+
+The deployment build runs the same tests before compiling and transferring the
+release binary. A test failure stops the deployment before the receiver is
+stopped or replaced.
+
 The command builds the receiver software on the sender computer, transfers
 what is needed to the board, and starts the receiver. The HDMI display should
 show the LLrdc waiting screen when the receiver is ready.
 
+All server deployment settings can be provided as flags. See the complete
+list with:
+
+```bash
+./server.sh --help
+```
+
+For example:
+
+```bash
+./server.sh --start \
+  --board-ip=<receiver-ip> \
+  --http-port=8080 \
+  --webtransport-port=4433 \
+  --board-port=4434 \
+  --cloud=false
+```
+
 To use an address without editing `config.yaml`:
 
 ```bash
-BOARD_IP=<receiver-ip> ./server.sh --start
+./server.sh --start --board-ip=<receiver-ip>
 ```
 
 To stop the receiver:
 
 ```bash
-BOARD_IP=<receiver-ip> ./server.sh --stop
+./server.sh --stop --board-ip=<receiver-ip>
 ```
 
 ## Start Casting
@@ -140,15 +168,16 @@ This direct-IP workflow works without Internet access or Cloudflare. The
 optional `https://cast.llrdc.com` workflow serves a minimal pairing page. It
 uses the Worker only for pairing discovery, then loads the full casting UI from
 the receiver over the authenticated LAN WebTransport connection; WebTransport
-video and control traffic still goes directly over the LAN. Configure
-`CLOUD_DISCOVERY_ENABLED=1` and the Worker credentials described in
-[`cloudflare/worker/README.md`](cloudflare/worker/README.md) only when that
-optional workflow is wanted.
+video and control traffic still goes directly over the LAN. Enable discovery
+for a deployment with `./server.sh --start --cloud=true`. The Worker
+credentials described in
+[`cloudflare/worker/README.md`](cloudflare/worker/README.md) are required only
+when that optional workflow is wanted.
 
 For deliberate local stress testing, use a fixed code for one deployment:
 
 ```bash
-CLOUD_DISCOVERY_ENABLED=0 ./server.sh --start --pairing-code=0000
+./server.sh --start --cloud=false --pairing-code=0000
 ```
 
 Random rotating pairing codes remain the default. Fixed-code mode is rejected

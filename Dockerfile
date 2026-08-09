@@ -9,15 +9,20 @@ COPY client ./
 RUN npm run build
 
 # 2. Rust Binary Builder Stage
-FROM rust:1-slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS rust-base
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libdrm-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY client ./client
 COPY --from=html-builder /app/client/dist/index.html ./client/index.html
 COPY src ./src
 ARG BUILD_DATE=unknown
-RUN cargo build --release
+
+FROM rust-base AS tests
+RUN cargo test --locked
+
+FROM tests AS builder
+RUN cargo build --release --locked
 
 # 3. Runtime Stage
 # GStreamer 1.26 contains v4l2slh265dec, the userspace implementation of the

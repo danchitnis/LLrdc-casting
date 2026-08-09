@@ -26,8 +26,8 @@ mod font {
             45 => [0x00, 0x00, 0x00, 0xFE, 0x00, 0x00, 0x00, 0x00], // -
             46 => [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00], // .
             47 => [0x00, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x00, 0x00], // /
-            // Keep zero visibly different from O with a vertical interior stroke.
-            48 => [0x3C, 0x66, 0x76, 0x76, 0x76, 0x66, 0x3C, 0x00], // 0
+            // Zero uses the same outline weight as O; draw_char_argb adds the marker.
+            48 => [0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00], // 0
             49 => [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00], // 1
             50 => [0x3C, 0x66, 0x06, 0x1C, 0x30, 0x60, 0x7E, 0x00], // 2
             51 => [0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x3C, 0x00], // 3
@@ -120,6 +120,35 @@ pub fn draw_char_argb(
                             if idx < buf.len() {
                                 buf[idx] = color;
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Distinguish zero from O with a one-cell-thick diagonal slash that scales
+    // with the glyph without changing O's outline weight.
+    if ch == '0' {
+        let stroke = scale.max(1) as isize;
+        let x0 = (start_x + 2 * scale) as isize;
+        let y0 = (start_y + 5 * scale) as isize;
+        let x1 = (start_x + 6 * scale) as isize;
+        let y1 = (start_y + scale) as isize;
+        let steps = (x1 - x0).unsigned_abs().max((y1 - y0).unsigned_abs());
+
+        for step in 0..=steps {
+            let center_x = x0 + (x1 - x0) * step as isize / steps.max(1) as isize;
+            let center_y = y0 + (y1 - y0) * step as isize / steps.max(1) as isize;
+            let top = center_y - stroke / 2;
+            let left = center_x - stroke / 2;
+
+            for y in top..top + stroke {
+                for x in left..left + stroke {
+                    if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                        let idx = y as usize * w + x as usize;
+                        if idx < buf.len() {
+                            buf[idx] = color;
                         }
                     }
                 }
@@ -379,15 +408,98 @@ pub fn draw_ip_dashboard_argb(
 
 #[cfg(test)]
 mod tests {
-    use super::font;
+    use super::{draw_char_argb, font};
 
     #[test]
-    fn zero_and_uppercase_o_have_distinct_glyphs() {
+    fn zero_matches_o_outline_and_adds_a_slash() {
         let zero = font::get_glyph('0');
         let letter_o = font::get_glyph('O');
 
-        assert_ne!(zero, letter_o);
-        assert_ne!(zero[2] & 0x08, 0);
-        assert_eq!(letter_o[2] & 0x08, 0);
+        assert_eq!(zero, letter_o);
+
+        let scale = 4;
+        let size = 8 * scale;
+        let color = 0xAABBCCDD;
+        let mut zero_pixels = vec![0; size * size];
+        let mut o_pixels = vec![0; size * size];
+        draw_char_argb(&mut zero_pixels, size as u32, size as u32, 0, 0, '0', color, scale);
+        draw_char_argb(&mut o_pixels, size as u32, size as u32, 0, 0, 'O', color, scale);
+
+        let slash_x0 = 2 * scale;
+        let slash_y0 = 5 * scale;
+        let slash_x1 = 6 * scale;
+        let slash_y1 = scale;
+        for y in 0..size {
+            for x in 0..size {
+                let on_slash_region = x >= slash_x0
+                    .saturating_sub(scale)
+                    && x <= slash_x1 + scale
+                    && y >= slash_y1.saturating_sub(scale)
+                    && y <= slash_y0 + scale;
+                if !on_slash_region {
+                    assert_eq!(zero_pixels[y * size + x], o_pixels[y * size + x]);
+                }
+            }
+        }
+        assert_ne!(zero_pixels, o_pixels);
+        assert_eq!(zero_pixels[3 * size + 4 * scale], color);
+    }
+
+    #[test]
+    fn uppercase_o_scales_as_complete_bitmap_blocks() {
+        let glyph = font::get_glyph('O');
+        let color = 0xAABBCCDD;
+
+        for scale in [1usize, 2, 4] {
+            let size = 8 * scale;
+            let mut pixels = vec![0; size * size];
+            draw_char_argb(
+                &mut pixels,
+                size as u32,
+                size as u32,
+                0,
+                0,
+                'O',
+                color,
+                scale,
+            );
+
+            for row in 0..8 {
+                for col in 0..8 {
+                    let set = (glyph[row] & (1u8 << (7 - col))) != 0;
+                    for sy in 0..scale {
+                        for sx in 0..scale {
+                            let x = col * scale + sx;
+                            let y = row * scale + sy;
+                            assert_eq!(pixels[y * size + x] == color, set);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_slash_scales_with_the_glyph() {
+        let color = 0xAABBCCDD;
+
+        for scale in [2usize, 8, 16] {
+            let size = 8 * scale;
+            let mut pixels = vec![0; size * size];
+            draw_char_argb(
+                &mut pixels,
+                size as u32,
+                size as u32,
+                0,
+                0,
+                '0',
+                color,
+                scale,
+            );
+
+            assert_eq!(pixels[3 * scale * size + 4 * scale], color);
+            assert_eq!(pixels[5 * scale * size + 2 * scale], color);
+            assert_eq!(pixels[scale * size + 6 * scale], color);
+        }
     }
 }

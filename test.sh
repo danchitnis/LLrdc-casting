@@ -101,7 +101,7 @@ if [[ ! -s "$STREAM_FILE" ]]; then
   exit 2
 fi
 if (( DEPLOY )); then
-  BOARD_IP="$BOARD_IP" "${SCRIPT_DIR}/server.sh" --start
+  "${SCRIPT_DIR}/server.sh" --start --board-ip="$BOARD_IP"
   sleep 3
 fi
 if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$BOARD_IP" 'docker ps --format "{{.Names}}" | grep -qx llrdc-casting'; then

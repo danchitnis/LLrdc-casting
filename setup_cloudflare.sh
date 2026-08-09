@@ -211,7 +211,7 @@ echo "Deploying the minimal pairing bootstrap at ${DOMAIN}..."
 
 echo
 echo "Starting the receiver with Cloud discovery enabled..."
-(cd "$SCRIPT_DIR" && BOARD_IP="$BOARD_IP" ./server.sh --start)
+(cd "$SCRIPT_DIR" && ./server.sh --start --board-ip="$BOARD_IP" --cloud=true)
 
 echo
 echo "Running public endpoint smoke tests..."

@@ -69,6 +69,22 @@ To build the Docker image locally and transfer it to the board in background mod
 ./server.sh --start
 ```
 
+To run all Rust unit tests locally without deploying:
+
+```bash
+./server.sh --test
+```
+
+Deployment runs these tests before compiling the release binary.
+
+The deployment wrapper supports flags for all server settings, including
+`--board-ip`, `--drm-connector-id`, `--drm-plane-id`, `--dashboard-mode`,
+`--idle-timeout-sec`, `--pairing-code-ttl-sec`, `--http-port`,
+`--webtransport-port`, `--board-port`, `--udp-buffer-size-mb`, `--cert-dir`,
+`--cloud`, `--pairing-worker-url`, `--receiver-id`,
+`--receiver-registration-secret`, and `--pairing-token-public-key-file`.
+Run `./server.sh --help` for the complete syntax.
+
 Retrieve the active local pairing code over SSH without Cloudflare:
 
 ```bash
@@ -79,7 +95,7 @@ For deliberate local stress testing, a fixed code can be selected for one
 deployment:
 
 ```bash
-CLOUD_DISCOVERY_ENABLED=0 ./server.sh --start --pairing-code=0000
+./server.sh --start --cloud=false --pairing-code=0000
 ```
 
 Random rotating codes remain the default.
