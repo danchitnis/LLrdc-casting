@@ -12,7 +12,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
     p { color: #94a3b8; line-height: 1.45; }
     form { display: flex; gap: .5rem; }
     input, button { min-height: 2.75rem; border-radius: .5rem; border: 1px solid #334155; font: inherit; }
-    input { min-width: 0; flex: 1; padding: 0 .75rem; color: #fff; background: #0b1220; text-align: center; letter-spacing: .3em; font-weight: 700; }
+    input { min-width: 0; flex: 1; padding: 0 .75rem; color: #fff; background: #0b1220; text-align: center; text-transform: uppercase; letter-spacing: .3em; font-weight: 700; }
     button { padding: 0 1rem; color: #fff; background: #0284c7; font-weight: 700; }
     button:disabled { opacity: .6; }
     #status { min-height: 1.4em; margin-bottom: 0; font-size: .9rem; }
@@ -34,6 +34,10 @@ const BOOTSTRAP_HTML = `<!doctype html>
       const codeInput = document.getElementById('pair-code');
       const button = document.getElementById('pair-button');
       const status = document.getElementById('status');
+
+      codeInput.addEventListener('input', () => {
+        codeInput.value = codeInput.value.toUpperCase();
+      });
 
       function decodeHex(value) {
         if (!/^[0-9a-f]{64}$/i.test(value)) return null;
