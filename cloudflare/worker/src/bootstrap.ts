@@ -1,3 +1,5 @@
+import { BOOTSTRAP_LIMITS, PAIRING_CODE_LENGTH } from "./config";
+
 const BOOTSTRAP_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -21,9 +23,9 @@ const BOOTSTRAP_HTML = `<!doctype html>
 <body>
   <main>
     <h1>Connect to receiver</h1>
-    <p>Enter the four-character code shown on the receiver HDMI screen.</p>
+    <p>Enter the ${PAIRING_CODE_LENGTH}-character code shown on the receiver HDMI screen.</p>
     <form id="pair-form">
-      <input id="pair-code" inputmode="text" pattern="[A-Za-z0-9]{4}" maxlength="4" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="A78Q" required>
+      <input id="pair-code" inputmode="text" pattern="[A-Za-z0-9]{${PAIRING_CODE_LENGTH}}" maxlength="${PAIRING_CODE_LENGTH}" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="A78Q" required>
       <button id="pair-button" type="submit">Connect</button>
     </form>
     <p id="status" role="status">Waiting for code</p>
@@ -41,14 +43,14 @@ const BOOTSTRAP_HTML = `<!doctype html>
 
       function decodeHex(value) {
         if (!/^[0-9a-f]{64}$/i.test(value)) return null;
-        const bytes = new Uint8Array(32);
+        const bytes = new Uint8Array(${BOOTSTRAP_LIMITS.CERTIFICATE_HASH_BYTES});
         for (let i = 0; i < bytes.length; i += 1) bytes[i] = parseInt(value.slice(i * 2, i * 2 + 2), 16);
         return bytes;
       }
 
       function frame(payload) {
         const bytes = new TextEncoder().encode(JSON.stringify(payload));
-        const result = new Uint8Array(bytes.length + 4);
+        const result = new Uint8Array(bytes.length + ${BOOTSTRAP_LIMITS.FRAME_LENGTH_PREFIX_BYTES});
         new DataView(result.buffer).setUint32(0, bytes.length, false);
         result.set(bytes, 4);
         return result;
@@ -66,9 +68,9 @@ const BOOTSTRAP_HTML = `<!doctype html>
           pending = merged;
           if (pending.length < 4) continue;
           const length = new DataView(pending.buffer, pending.byteOffset, 4).getUint32(0, false);
-          if (length === 0 || length > 2 * 1024 * 1024) throw new Error('Invalid UI response');
-          if (pending.length < length + 4) continue;
-          return new TextDecoder().decode(pending.slice(4, length + 4));
+          if (length === 0 || length > ${BOOTSTRAP_LIMITS.MAX_UI_BYTES}) throw new Error('Invalid UI response');
+          if (pending.length < length + ${BOOTSTRAP_LIMITS.FRAME_LENGTH_PREFIX_BYTES}) continue;
+          return new TextDecoder().decode(pending.slice(${BOOTSTRAP_LIMITS.FRAME_LENGTH_PREFIX_BYTES}, length + ${BOOTSTRAP_LIMITS.FRAME_LENGTH_PREFIX_BYTES}));
         }
       }
 
@@ -101,7 +103,7 @@ const BOOTSTRAP_HTML = `<!doctype html>
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const code = codeInput.value.trim().toUpperCase();
-        if (!/^[A-Z0-9]{4}$/.test(code)) { status.textContent = 'Enter 4 letters or numbers'; return; }
+        if (!/^[A-Z0-9]{${PAIRING_CODE_LENGTH}}$/.test(code)) { status.textContent = 'Enter ${PAIRING_CODE_LENGTH} letters or numbers'; return; }
         button.disabled = true;
         status.textContent = 'Pairing';
         try {

@@ -15,6 +15,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
+use crate::config;
 use crate::control::{ControlChannel, ControlCommand};
 
 static INDEX_HTML: &str = include_str!("../client/index.html");
@@ -225,7 +226,7 @@ async fn redirect_http_to_https<S>(mut stream: S, https_port: u16) -> Result<(),
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; config::server::HTTP_REQUEST_BUFFER_BYTES];
     let n = stream.read(&mut buf).await?;
     if n == 0 {
         return Ok(());
@@ -252,7 +253,7 @@ async fn handle_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; config::server::HTTP_TLS_BUFFER_BYTES];
     let n = stream.read(&mut buf).await?;
     if n == 0 { return Ok(()); }
 
@@ -277,10 +278,7 @@ pub async fn run_server(
     cert_hash_hex: String,
     control_channel: ControlChannel,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let port: u16 = std::env::var("HTTP_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8080);
+    let port = config::env_or("HTTP_PORT", config::server::DEFAULT_HTTP_PORT);
 
     let (cert_path, key_path) = crate::cert::get_cert_and_key_paths();
 

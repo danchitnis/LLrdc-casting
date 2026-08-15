@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use time::{Duration, OffsetDateTime};
 use wtransport::Identity;
 
+use crate::config;
+
 pub fn get_cert_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("CERTS_DIR") {
         let p = PathBuf::from(dir);
@@ -18,7 +20,7 @@ pub fn get_cert_dir() -> PathBuf {
             return p;
         }
     }
-    let system_certs = PathBuf::from("/certs");
+    let system_certs = PathBuf::from(config::server::DEFAULT_CERTS_DIR);
     if system_certs.exists() || fs::create_dir_all(&system_certs).is_ok() {
         return system_certs;
     }
@@ -61,7 +63,7 @@ pub fn is_cert_valid(cert_path: &Path) -> bool {
     let now_secs = OffsetDateTime::now_utc().unix_timestamp();
 
     // Consider certificate expired if less than 24 hours remain
-    let buffer_secs = 24 * 3600;
+    let buffer_secs = config::certificate::VALIDITY_REFRESH_BUFFER_SEC as i64;
     if now_secs + buffer_secs >= not_after_secs {
         println!(
             "[CERT] Certificate at {:?} is expired or expires within 24h (not_after={}, now={})",
@@ -97,8 +99,8 @@ pub async fn get_or_create_identity() -> Result<Identity, Box<dyn Error + Send +
         let key_pair = rcgen::KeyPair::generate()?;
         let mut params = rcgen::CertificateParams::new(subject_alt_names)?;
         let now = OffsetDateTime::now_utc();
-        params.not_before = now - Duration::days(1);
-        params.not_after = now + Duration::days(13); // WebTransport spec limit: max 14 days
+        params.not_before = now - Duration::days(config::certificate::NOT_BEFORE_OFFSET_DAYS);
+        params.not_after = now + Duration::days(config::certificate::NOT_AFTER_OFFSET_DAYS); // WebTransport spec limit: max 14 days
 
         let cert = params.self_signed(&key_pair)?;
         let cert_pem = cert.pem();

@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const PAIRING_CODE_LENGTH: usize = 4;
-const PAIRING_CODE_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+use crate::config::pairing::{
+    PAIRING_ATTEMPT_LIMIT, PAIRING_ATTEMPT_WINDOW_SEC, PAIRING_CODE_ALPHABET,
+    PAIRING_CODE_LENGTH, PAIRING_CODE_TTL_SEC,
+};
 
 #[derive(Clone, Debug)]
 pub struct PairingSnapshot {
@@ -113,10 +115,10 @@ impl PairingState {
                 .is_some_and(|expected| expected.eq_ignore_ascii_case(code))
             && data.expires_at.is_some_and(|expires_at| expires_at > now);
         let attempts = data.failed_attempts.entry(peer.to_string()).or_insert((0, now));
-        if attempts.1 + Duration::from_secs(60) <= now {
+        if attempts.1 + Duration::from_secs(PAIRING_ATTEMPT_WINDOW_SEC) <= now {
             *attempts = (0, now);
         }
-        if attempts.0 >= 5 {
+        if attempts.0 >= PAIRING_ATTEMPT_LIMIT {
             return Err("too many pairing attempts");
         }
         if !valid {
@@ -128,11 +130,8 @@ impl PairingState {
 }
 
 pub fn pairing_code_ttl_seconds() -> u64 {
-    std::env::var("PAIRING_CODE_TTL_SEC")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(3600)
-        .max(3600)
+    crate::config::env_or("PAIRING_CODE_TTL_SEC", PAIRING_CODE_TTL_SEC)
+        .max(PAIRING_CODE_TTL_SEC)
 }
 
 fn is_valid_pairing_code(code: &str) -> bool {

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::config;
 use crate::local_pairing::PairingState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -51,7 +52,7 @@ impl ConnectionTokenVerifier {
         let public_key_pem = std::env::var("PAIRING_TOKEN_PUBLIC_KEY")
             .or_else(|_| {
                 let path = std::env::var("PAIRING_TOKEN_PUBLIC_KEY_FILE")
-                    .unwrap_or_else(|_| "/pairing/public.pem".to_string());
+                    .unwrap_or_else(|_| config::server::DEFAULT_PAIRING_PUBLIC_KEY_FILE.to_string());
                 std::fs::read_to_string(path).map_err(|_| std::env::VarError::NotPresent)
             })?;
         Ok(Self {
@@ -63,25 +64,35 @@ impl ConnectionTokenVerifier {
 
     pub fn verify(&self, token: &str) -> Result<(), &'static str> {
         let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() != 4 || parts[0] != "v1" {
+        if parts.len() != 4 || parts[0] != config::discovery::TOKEN_PREFIX {
             return Err("invalid token format");
         }
         let decode = |value: &str| URL_SAFE_NO_PAD.decode(value).map_err(|_| "invalid token encoding");
         let header: TokenHeader = serde_json::from_slice(&decode(parts[1])?).map_err(|_| "invalid token header")?;
         let payload: TokenPayload = serde_json::from_slice(&decode(parts[2])?).map_err(|_| "invalid token payload")?;
         let signature = decode(parts[3])?;
-        if header.alg != "PS256" || header.typ != "CAST-CONNECTION" || header.v != 1 {
+        if header.alg != config::discovery::TOKEN_ALGORITHM
+            || header.typ != config::discovery::TOKEN_TYPE
+            || header.v != config::discovery::TOKEN_VERSION
+        {
             return Err("unsupported token");
         }
-        if payload.receiver_id != self.receiver_id || payload.purpose != "webtransport-connect" {
+        if payload.receiver_id != self.receiver_id || payload.purpose != config::discovery::TOKEN_PURPOSE {
             return Err("token receiver mismatch");
         }
         let now = unix_seconds();
-        if payload.iat > now.saturating_add(30) || payload.exp <= now || payload.exp <= payload.iat || payload.exp - payload.iat > 60 {
+        if payload.iat > now.saturating_add(config::pairing::PAIRING_TOKEN_ISSUED_AT_SKEW_SEC as u64)
+            || payload.exp <= now
+            || payload.exp <= payload.iat
+            || payload.exp - payload.iat > config::pairing::PAIRING_TOKEN_MAX_LIFETIME_SEC as u64
+        {
             return Err("expired token");
         }
-        let signing_input = format!("v1.{}.{}", parts[1], parts[2]);
-        let verifying_key = VerifyingKey::<Sha256>::new_with_salt_len(self.public_key.clone(), 32);
+        let signing_input = format!("{}.{}.{}", config::discovery::TOKEN_PREFIX, parts[1], parts[2]);
+        let verifying_key = VerifyingKey::<Sha256>::new_with_salt_len(
+            self.public_key.clone(),
+            config::discovery::TOKEN_RSA_SALT_BYTES,
+        );
         let signature = rsa::pss::Signature::try_from(signature.as_slice())
             .map_err(|_| "invalid token signature")?;
         verifying_key
@@ -92,7 +103,7 @@ impl ConnectionTokenVerifier {
         if seen.contains_key(&payload.jti) {
             return Err("replayed token");
         }
-        if seen.len() >= 1024 {
+        if seen.len() >= config::pairing::PAIRING_REPLAY_CACHE_LIMIT {
             if let Some(oldest) = seen.iter().min_by_key(|(_, expires)| *expires).map(|(id, _)| id.clone()) {
                 seen.remove(&oldest);
             }
@@ -135,19 +146,22 @@ pub fn spawn_registration(state: PairingState, cert_hash: String) {
             }
         };
         let client = Client::new();
-        let port = std::env::var("WEBTRANSPORT_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(4433);
-        let mut retry_delay = Duration::from_secs(2);
+        let port = config::env_or(
+            "WEBTRANSPORT_PORT",
+            config::server::DEFAULT_WEBTRANSPORT_PORT,
+        );
+        let mut retry_delay = Duration::from_secs(config::discovery::REGISTRATION_INITIAL_RETRY_SEC);
         loop {
             let Some(ip) = crate::net::get_preferred_private_ipv4() else {
                 state.set_cloud_ip(None);
                 state.set_cloud_status("WAITING");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(config::discovery::REGISTRATION_NO_IP_RETRY_SEC)).await;
                 continue;
             };
             let Some(code) = state.snapshot().code else {
                 state.set_cloud_ip(None);
                 state.set_cloud_status("WAITING");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(config::discovery::REGISTRATION_NO_CODE_RETRY_SEC)).await;
                 continue;
             };
             let body = match serde_json::to_vec(&RegistrationBody {
@@ -180,8 +194,8 @@ pub fn spawn_registration(state: PairingState, cert_hash: String) {
                     println!("[CLOUD DISCOVERY] Receiver registration succeeded via {ip}");
                     state.set_cloud_ip(Some(ip));
                     state.set_cloud_status("READY");
-                    retry_delay = Duration::from_secs(2);
-                    tokio::time::sleep(Duration::from_secs(45)).await;
+                    retry_delay = Duration::from_secs(config::discovery::REGISTRATION_INITIAL_RETRY_SEC);
+                    tokio::time::sleep(Duration::from_secs(config::discovery::REGISTRATION_SUCCESS_RETRY_SEC)).await;
                 }
                 Ok(response) => {
                     let status = response.status();
@@ -192,14 +206,14 @@ pub fn spawn_registration(state: PairingState, cert_hash: String) {
                     state.set_cloud_ip(None);
                     state.set_cloud_status("FAILED");
                     tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(config::discovery::REGISTRATION_MAX_RETRY_SEC));
                 }
                 Err(error) => {
                     eprintln!("[CLOUD DISCOVERY] Receiver registration request failed: {error}");
                     state.set_cloud_ip(None);
                     state.set_cloud_status("FAILED");
                     tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(config::discovery::REGISTRATION_MAX_RETRY_SEC));
                 }
             }
         }
@@ -207,7 +221,7 @@ pub fn spawn_registration(state: PairingState, cert_hash: String) {
 }
 
 fn random_nonce() -> String {
-    let mut bytes = [0u8; 16];
+    let mut bytes = [0u8; config::discovery::REGISTRATION_NONCE_BYTES];
     rand::thread_rng().fill(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

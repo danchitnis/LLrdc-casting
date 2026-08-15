@@ -7,12 +7,16 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-const HEADER_LEN: usize = 16;
-const CHUNK_BYTES: usize = 1350;
-const MAX_ACCESS_UNIT_BYTES: usize = 8 * 1024 * 1024;
+use crate::config::packet::{
+    CHUNK_BYTES, H264_MAX_HEIGHT, H264_MAX_WIDTH, H265_MAX_HEIGHT, H265_MAX_WIDTH,
+    MAX_ACCESS_UNIT_BYTES, MAX_IN_FLIGHT_ACCESS_UNITS, PACKET_HEADER_BYTES,
+};
+use crate::config::transport::DATAGRAM_TAG_BYTES;
+
+const HEADER_LEN: usize = PACKET_HEADER_BYTES;
 const MAX_CHUNKS: usize = (MAX_ACCESS_UNIT_BYTES + CHUNK_BYTES - 1) / CHUNK_BYTES;
-const MAX_IN_FLIGHT: usize = 32;
-const ASSEMBLY_TTL: Duration = Duration::from_millis(50);
+const MAX_IN_FLIGHT: usize = MAX_IN_FLIGHT_ACCESS_UNITS;
+const ASSEMBLY_TTL: Duration = crate::config::packet::ACCESS_UNIT_ASSEMBLY_TTL;
 
 static LAST_COMPLETED_SEQ: AtomicU32 = AtomicU32::new(0);
 static STATS_CHUNKS: AtomicU64 = AtomicU64::new(0);
@@ -65,12 +69,16 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     if packet.len() <= HEADER_LEN { return None; }
     STATS_CHUNKS.fetch_add(1, Ordering::Relaxed);
 
-    let codec = match &packet[..4] {
+    let codec = match &packet[..DATAGRAM_TAG_BYTES] {
         b"H265" | b"HEVC" => "hevc",
         b"H264" | b"VIDC" => "h264",
         _ => return None,
     };
-    let seq = u32::from_be_bytes(packet[4..8].try_into().ok()?);
+    let seq = u32::from_be_bytes(
+        packet[DATAGRAM_TAG_BYTES..DATAGRAM_TAG_BYTES + 4]
+            .try_into()
+            .ok()?,
+    );
 
     // Drop stale chunks from older already-completed frames, but handle stream sequence resets
     let last_seq = LAST_COMPLETED_SEQ.load(Ordering::Relaxed);
@@ -83,11 +91,23 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
         }
     }
 
-    let chunk_index = u16::from_be_bytes(packet[8..10].try_into().ok()?);
-    let total_chunks = u16::from_be_bytes(packet[10..12].try_into().ok()?);
-    let width = u16::from_be_bytes(packet[12..14].try_into().ok()?);
-    let height = u16::from_be_bytes(packet[14..16].try_into().ok()?);
+    let chunk_index_offset = DATAGRAM_TAG_BYTES + 4;
+    let total_chunks_offset = chunk_index_offset + 2;
+    let width_offset = total_chunks_offset + 2;
+    let height_offset = width_offset + 2;
+    let chunk_index = u16::from_be_bytes(packet[chunk_index_offset..chunk_index_offset + 2].try_into().ok()?);
+    let total_chunks = u16::from_be_bytes(packet[total_chunks_offset..total_chunks_offset + 2].try_into().ok()?);
+    let width = u16::from_be_bytes(packet[width_offset..width_offset + 2].try_into().ok()?);
+    let height = u16::from_be_bytes(packet[height_offset..height_offset + 2].try_into().ok()?);
     if total_chunks == 0 || total_chunks as usize > MAX_CHUNKS || chunk_index >= total_chunks || width == 0 || height == 0 {
+        return None;
+    }
+    let (max_width, max_height) = if codec == "h264" {
+        (H264_MAX_WIDTH, H264_MAX_HEIGHT)
+    } else {
+        (H265_MAX_WIDTH, H265_MAX_HEIGHT)
+    };
+    if width as usize > max_width || height as usize > max_height {
         return None;
     }
     let payload = &packet[HEADER_LEN..];
@@ -144,7 +164,12 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
         let timeout_cnt = STATS_DROPPED_TIMEOUT.load(Ordering::Relaxed);
         let evicted_cnt = STATS_DROPPED_EVICTED.load(Ordering::Relaxed);
         let total_attempts = completed_count + timeout_cnt + evicted_cnt;
-        let rate = if total_attempts > 0 { (completed_count as f64 / total_attempts as f64) * 100.0 } else { 100.0 };
+        let rate = if total_attempts > 0 {
+            (completed_count as f64 / total_attempts as f64)
+                * crate::config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT as f64
+        } else {
+            crate::config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT as f64
+        };
         println!("[FRAME INTEGRITY] Completed={completed_count} DroppedTimeout={timeout_cnt} Evicted={evicted_cnt} TotalChunks={chunks_cnt} DeliveryRate={rate:.1}%");
     }
 

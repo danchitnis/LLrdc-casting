@@ -1,4 +1,13 @@
 import { bootstrapResponse } from "./bootstrap";
+import {
+  PAIRING_CODE_PATTERN,
+  PAIRING_CODE_TTL_SECONDS,
+  PAIRING_VALIDATION,
+  RATE_LIMITS,
+  REGISTRATION_TTL_SECONDS,
+  REQUEST_LIMITS,
+  TOKEN_CONFIG,
+} from "./config";
 
 interface Env {
   DB: D1Database;
@@ -29,20 +38,6 @@ interface RateLimitRow {
   attempt_count: number;
 }
 
-const CODE_TTL_SECONDS = 3600;
-const REGISTRATION_TTL_SECONDS = 3600;
-const PAIRING_CODE_PATTERN = /^[A-Za-z0-9]{4}$/;
-const REGISTRATION_TIMESTAMP_SKEW_SECONDS = 300;
-const REGISTRATION_REPLAY_TTL_SECONDS = 600;
-const CONNECTION_TOKEN_TTL_SECONDS = 60;
-const MAX_BODY_BYTES = 16 * 1024;
-
-const RATE_LIMITS = {
-  pairIp: { maxAttempts: 10, windowSeconds: 60 },
-  pairCode: { maxAttempts: 5, windowSeconds: 60 },
-  registration: { maxAttempts: 20, windowSeconds: 60 },
-} as const;
-
 const JSON_HEADERS = {
   "cache-control": "no-store",
   "content-type": "application/json; charset=utf-8",
@@ -68,12 +63,12 @@ async function readJsonBody(
   request: Request,
 ): Promise<{ text: string; bytes: Uint8Array } | null> {
   const contentLength = request.headers.get("content-length");
-  if (contentLength !== null && Number(contentLength) > MAX_BODY_BYTES) {
+  if (contentLength !== null && Number(contentLength) > REQUEST_LIMITS.MAX_BODY_BYTES) {
     return null;
   }
 
   const body = new Uint8Array(await request.arrayBuffer());
-  if (body.byteLength > MAX_BODY_BYTES) {
+  if (body.byteLength > REQUEST_LIMITS.MAX_BODY_BYTES) {
     return null;
   }
 
@@ -104,7 +99,7 @@ function parseRegistration(body: JsonObject): ReceiverRegistration | null {
   const certHash = body.cert_hash_hex;
   const pairingCode = body.pairing_code;
 
-  if (!isString(receiverId) || !/^[A-Za-z0-9_-]{1,128}$/.test(receiverId)) {
+  if (!isString(receiverId) || !PAIRING_VALIDATION.RECEIVER_ID_PATTERN.test(receiverId)) {
     return null;
   }
   if (!isString(ipAddress) || !isPrivateIpv4(ipAddress)) {
@@ -113,12 +108,12 @@ function parseRegistration(body: JsonObject): ReceiverRegistration | null {
   if (
     typeof port !== "number" ||
     !Number.isInteger(port) ||
-    port < 1 ||
-    port > 65535
+    port < PAIRING_VALIDATION.MIN_PORT ||
+    port > PAIRING_VALIDATION.MAX_PORT
   ) {
     return null;
   }
-  if (!isString(certHash) || !/^[0-9a-fA-F]{64}$/.test(certHash)) {
+  if (!isString(certHash) || !/^[0-9a-fA-F]+$/.test(certHash) || certHash.length !== REQUEST_LIMITS.CERTIFICATE_HASH_HEX_LENGTH) {
     return null;
   }
   if (!isString(pairingCode) || !PAIRING_CODE_PATTERN.test(pairingCode)) {
@@ -153,7 +148,7 @@ function isPrivateIpv4(value: string): boolean {
 }
 
 function parseTimestamp(value: string | null): number | null {
-  if (value === null || !/^\d{1,12}$/.test(value)) {
+  if (value === null || !new RegExp(`^\\d{1,${REQUEST_LIMITS.TIMESTAMP_MAX_DIGITS}}$`).test(value)) {
     return null;
   }
   const timestamp = Number(value);
@@ -161,7 +156,10 @@ function parseTimestamp(value: string | null): number | null {
 }
 
 function isValidNonce(value: string | null): value is string {
-  return value !== null && /^[A-Za-z0-9._~-]{8,128}$/.test(value);
+  return value !== null
+    && /^[A-Za-z0-9._~-]+$/.test(value)
+    && value.length >= TOKEN_CONFIG.NONCE_MIN_BYTES
+    && value.length <= TOKEN_CONFIG.NONCE_MAX_BYTES;
 }
 
 function hexToBytes(value: string): Uint8Array | null {
@@ -232,7 +230,7 @@ async function deriveRegistrationKey(
   receiverId: string,
 ): Promise<CryptoKey> {
   const root = base64UrlToBytes(rootSecret);
-  if (root.length < 32) {
+  if (root.length < REQUEST_LIMITS.MIN_RECEIVER_SECRET_BYTES) {
     throw new Error("registration secret is too short");
   }
   const rootKey = await crypto.subtle.importKey(
@@ -271,8 +269,8 @@ async function authenticateRegistration(
     timestamp === null ||
     !isValidNonce(nonce) ||
     signature === null ||
-    signature.length !== 32 ||
-    Math.abs(now - timestamp) > REGISTRATION_TIMESTAMP_SKEW_SECONDS
+    signature.length !== TOKEN_CONFIG.HMAC_SIGNATURE_BYTES ||
+    Math.abs(now - timestamp) > TOKEN_CONFIG.TIMESTAMP_SKEW_SECONDS
   ) {
     return false;
   }
@@ -320,7 +318,7 @@ function scheduleCleanup(ctx: ExecutionContext, env: Env, now: number): void {
   ctx.waitUntil(
     env.DB.batch([
       env.DB.prepare("DELETE FROM registration_replays WHERE expires_at <= ?").bind(now),
-      env.DB.prepare("DELETE FROM rate_limits WHERE window_started_at + ? <= ?").bind(3600, now),
+      env.DB.prepare("DELETE FROM rate_limits WHERE window_started_at + ? <= ?").bind(RATE_LIMITS.CLEANUP.WINDOW_SECONDS, now),
     ]).catch(() => undefined),
   );
 }
@@ -346,12 +344,12 @@ async function handleRegistration(
     !(await consumeRateLimit(
       env.DB,
       `registration:${registration.receiverId}`,
-      RATE_LIMITS.registration.maxAttempts,
-      RATE_LIMITS.registration.windowSeconds,
+      RATE_LIMITS.REGISTER_BY_IP.MAX_REQUESTS,
+      RATE_LIMITS.REGISTER_BY_IP.WINDOW_SECONDS,
       now,
     ))
   ) {
-    return jsonResponse({ error: "rate limit exceeded" }, 429, { "retry-after": "60" });
+    return jsonResponse({ error: "rate limit exceeded" }, 429, { "retry-after": String(RATE_LIMITS.REGISTER_BY_IP.WINDOW_SECONDS) });
   }
 
   if (!(await authenticateRegistration(parsedBody.bytes, registration.receiverId, request, env, now))) {
@@ -366,7 +364,7 @@ async function handleRegistration(
     await env.DB.prepare(
       "INSERT INTO registration_replays (receiver_id, nonce, expires_at) VALUES (?, ?, ?)",
     )
-      .bind(registration.receiverId, nonce, now + REGISTRATION_REPLAY_TTL_SECONDS)
+      .bind(registration.receiverId, nonce, now + TOKEN_CONFIG.REPLAY_TTL_SECONDS)
       .run();
   } catch (error) {
     if (error instanceof Error && /unique|constraint/i.test(error.message)) {
@@ -375,7 +373,7 @@ async function handleRegistration(
     throw error;
   }
 
-  const codeExpiresAt = now + CODE_TTL_SECONDS;
+  const codeExpiresAt = now + PAIRING_CODE_TTL_SECONDS;
   const registrationExpiresAt = now + REGISTRATION_TTL_SECONDS;
   try {
     await env.DB.batch([
@@ -456,18 +454,18 @@ async function createConnectionToken(
   now: number,
 ): Promise<{ token: string; expiresAt: number }> {
   const header = jsonBase64Url({ alg: "PS256", typ: "CAST-CONNECTION", v: 1 });
-  const expiresAt = now + CONNECTION_TOKEN_TTL_SECONDS;
+  const expiresAt = now + TOKEN_CONFIG.CONNECTION_TTL_SECONDS;
   const payload = jsonBase64Url({
     receiver_id: receiverId,
     purpose: "webtransport-connect",
     iat: now,
     exp: expiresAt,
-    jti: randomHex(16),
+    jti: randomHex(REQUEST_LIMITS.RANDOM_NONCE_BYTES),
   });
   const signingInput = `v1.${header}.${payload}`;
   const signature = new Uint8Array(
     await crypto.subtle.sign(
-      { name: "RSA-PSS", saltLength: 32 },
+      { name: "RSA-PSS", saltLength: TOKEN_CONFIG.RSA_PSS_SALT_LENGTH },
       privateKey,
       ownedArrayBuffer(utf8(signingInput)),
     ),
@@ -497,19 +495,19 @@ async function handlePair(
   const ipAllowed = await consumeRateLimit(
     env.DB,
     `pair:ip:${address}`,
-    RATE_LIMITS.pairIp.maxAttempts,
-    RATE_LIMITS.pairIp.windowSeconds,
+    RATE_LIMITS.PAIR_BY_IP.MAX_REQUESTS,
+    RATE_LIMITS.PAIR_BY_IP.WINDOW_SECONDS,
     now,
   );
   const codeAllowed = await consumeRateLimit(
     env.DB,
     `pair:code:${code}`,
-    RATE_LIMITS.pairCode.maxAttempts,
-    RATE_LIMITS.pairCode.windowSeconds,
+    RATE_LIMITS.PAIR_BY_CODE.MAX_REQUESTS,
+    RATE_LIMITS.PAIR_BY_CODE.WINDOW_SECONDS,
     now,
   );
   if (!ipAllowed || !codeAllowed) {
-    return jsonResponse({ error: "pairing temporarily unavailable" }, 429, { "retry-after": "60" });
+    return jsonResponse({ error: "pairing temporarily unavailable" }, 429, { "retry-after": String(RATE_LIMITS.PAIR_BY_IP.WINDOW_SECONDS) });
   }
 
   // Import before consuming the code so a broken signing secret does not consume a valid code.

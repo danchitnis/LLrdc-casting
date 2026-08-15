@@ -16,6 +16,13 @@ import {
   updateDisplayFpsGuardrails,
 } from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
+import {
+  CODEC_RESOLUTION_LIMITS,
+  ENCODER_GUARDRAILS,
+  PAIRING_CONFIG,
+  STREAM_DEFAULTS,
+  TRANSPORT_CONFIG,
+} from './config';
 
 export interface WebTransportDatagramStream {
   writable: WritableStream<Uint8Array>;
@@ -122,9 +129,9 @@ function parseResolution(value: string | undefined): [number, number] | null {
 }
 
 async function waitForOutputGeometry(): Promise<DisplayGeometry> {
-  const deadline = performance.now() + 5000;
+  const deadline = performance.now() + TRANSPORT_CONFIG.GEOMETRY_TIMEOUT_MS;
   while (!outputGeometry && performance.now() < deadline) {
-    await new Promise<void>(resolve => window.setTimeout(resolve, 100));
+    await new Promise<void>(resolve => window.setTimeout(resolve, TRANSPORT_CONFIG.GEOMETRY_POLL_INTERVAL_MS));
   }
   if (!outputGeometry) {
     throw new Error('Display geometry is unavailable; waiting for HDMI/EDID telemetry timed out');
@@ -208,21 +215,26 @@ async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number
   }
   if (!uniStreamWriter) return;
 
-  const packetLen = 16 + accessUnit.length;
-  const totalPayloadBytes = 4 + packetLen;
+  const packetLen = TRANSPORT_CONFIG.PACKET_HEADER_BYTES + accessUnit.length;
+  const totalPayloadBytes = TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + packetLen;
   const combinedBuf = new Uint8Array(totalPayloadBytes);
   const view = new DataView(combinedBuf.buffer);
 
   view.setUint32(0, packetLen, false);
 
-  for (let i = 0; i < 4; i++) combinedBuf[4 + i] = tag.charCodeAt(i);
-  view.setUint32(8, seq, false);
-  view.setUint16(12, 0, false);
-  view.setUint16(14, 1, false);
-  view.setUint16(16, width, false);
-  view.setUint16(18, height, false);
+  const packetOffset = TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES;
+  for (let i = 0; i < TRANSPORT_CONFIG.TAG_BYTES; i++) combinedBuf[packetOffset + i] = tag.charCodeAt(i);
+  view.setUint32(packetOffset + TRANSPORT_CONFIG.TAG_BYTES, seq, false);
+  const chunkIndexOffset = packetOffset + TRANSPORT_CONFIG.TAG_BYTES + 4;
+  const totalChunksOffset = chunkIndexOffset + 2;
+  const widthOffset = totalChunksOffset + 2;
+  const heightOffset = widthOffset + 2;
+  view.setUint16(chunkIndexOffset, 0, false);
+  view.setUint16(totalChunksOffset, TRANSPORT_CONFIG.SINGLE_PACKET_CHUNK_COUNT, false);
+  view.setUint16(widthOffset, width, false);
+  view.setUint16(heightOffset, height, false);
 
-  combinedBuf.set(accessUnit, 20);
+  combinedBuf.set(accessUnit, TRANSPORT_CONFIG.STOP_PACKET_BYTES);
 
   await uniStreamWriter.write(combinedBuf);
 }
@@ -234,9 +246,12 @@ function controlIsConnected(): boolean {
 async function sendControlMessage(message: object): Promise<void> {
   if (!controlWriter) return;
   const payload = new TextEncoder().encode(JSON.stringify(message));
-  const framed = new Uint8Array(4 + payload.length);
+  if (payload.length > TRANSPORT_CONFIG.MAX_CONTROL_MESSAGE_BYTES) {
+    throw new Error('Control message exceeds the configured maximum');
+  }
+  const framed = new Uint8Array(TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + payload.length);
   new DataView(framed.buffer).setUint32(0, payload.length, false);
-  framed.set(payload, 4);
+  framed.set(payload, TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES);
   await controlWriter.write(framed);
 }
 
@@ -250,12 +265,12 @@ async function readControlMessages(reader: ReadableStreamDefaultReader<Uint8Arra
       merged.set(pending);
       merged.set(result.value, pending.length);
       pending = merged;
-      while (pending.length >= 4) {
+      while (pending.length >= TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES) {
         const length = new DataView(pending.buffer, pending.byteOffset, 4).getUint32(0, false);
-        if (length === 0 || length > 64 * 1024) throw new Error('Invalid control message length');
-        if (pending.length < 4 + length) break;
-        const payload = pending.slice(4, 4 + length);
-        pending = pending.slice(4 + length);
+        if (length === 0 || length > TRANSPORT_CONFIG.MAX_CONTROL_MESSAGE_BYTES) throw new Error('Invalid control message length');
+        if (pending.length < TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + length) break;
+        const payload = pending.slice(TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES, TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + length);
+        pending = pending.slice(TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + length);
         const message = JSON.parse(new TextDecoder().decode(payload)) as ServerStatusMessage;
         if (message.type === 'status') handleServerStatusUpdate(message);
         if (message.type === 'pong') log('[CONTROL] Received pong from device');
@@ -272,7 +287,7 @@ async function readControlMessages(reader: ReadableStreamDefaultReader<Uint8Arra
 }
 
 async function openPairedTransport(): Promise<void> {
-  if (!pairedConnection) throw new Error('Enter the four-character receiver code first');
+  if (!pairedConnection) throw new Error(`Enter the ${PAIRING_CONFIG.CODE_LENGTH}-character receiver code first`);
   if (!window.WebTransport) throw new Error('WebTransport is not supported in this browser');
 
   transport = window.__LLRDC_BOOTSTRAP_TRANSPORT__ ?? null;
@@ -307,7 +322,7 @@ function isDirectIpPage(): boolean {
 
 export async function pairWithCode(rawCode: string): Promise<void> {
   const code = rawCode.trim().toUpperCase();
-  if (!/^[A-Z0-9]{4}$/.test(code)) throw new Error('Enter the four-character code shown on the receiver.');
+  if (!PAIRING_CONFIG.CODE_PATTERN.test(code)) throw new Error(`Enter the ${PAIRING_CONFIG.CODE_LENGTH}-character code shown on the receiver.`);
   updateStatus('connecting', 'PAIRING');
   const localMode = isDirectIpPage();
   if (localMode) {
@@ -316,7 +331,7 @@ export async function pairWithCode(rawCode: string): Promise<void> {
     const certHash = (await response.text()).trim();
     pairedConnection = {
       ip: window.location.hostname,
-      port: 4433,
+      port: PAIRING_CONFIG.DIRECT_WEBTRANSPORT_PORT,
       certHash,
       code,
     };
@@ -390,13 +405,10 @@ export async function stopStreaming(): Promise<void> {
 
   if (uniStreamWriter) {
     try {
-      const stopPacket = new Uint8Array(20);
+      const stopPacket = new Uint8Array(TRANSPORT_CONFIG.STOP_PACKET_BYTES);
       const view = new DataView(stopPacket.buffer);
-      view.setUint32(0, 16, false);
-      stopPacket[4] = 83;
-      stopPacket[5] = 84;
-      stopPacket[6] = 79;
-      stopPacket[7] = 80;
+      view.setUint32(0, TRANSPORT_CONFIG.PACKET_HEADER_BYTES, false);
+      stopPacket.set(TRANSPORT_CONFIG.STOP_TAG, TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES);
       uniStreamWriter.write(stopPacket).catch(() => {});
     } catch (e) {}
   }
@@ -493,13 +505,13 @@ export async function toggleCasting(): Promise<void> {
     return;
   }
   const [selectedWidth, selectedHeight] = resolution;
-  const aspectMode = aspectModeSelect?.value === 'stretch' ? 'stretch' : 'preserve';
+  const aspectMode = aspectModeSelect?.value === 'stretch' ? 'stretch' : STREAM_DEFAULTS.aspectMode;
   const targetFps = parseInt(fpsSelect.value, 10);
   const selectedCodec = codecSelect.value;
   const wireCodec = selectedCodec.startsWith('H264') ? 'H264' : 'H265';
   const isSWRequested = selectedCodec === 'H264_SW';
-  const bitrateSetting = bitrateSelect ? bitrateSelect.value : 'auto';
-  const latencySetting = latencySelect ? latencySelect.value : 'ULL';
+  const bitrateSetting = bitrateSelect ? bitrateSelect.value : STREAM_DEFAULTS.bitrate;
+  const latencySetting = latencySelect ? latencySelect.value : STREAM_DEFAULTS.latency;
   let displayGeometry: DisplayGeometry;
   try {
     displayGeometry = await waitForOutputGeometry();
@@ -526,7 +538,7 @@ export async function toggleCasting(): Promise<void> {
     const webcodecsLatencyMode = (latencySetting === 'quality') ? 'quality' : 'realtime';
     const keyframeInterval = (latencySetting === 'quality')
       ? targetFps * 2
-      : (latencySetting === 'balanced' ? targetFps : Math.max(5, Math.floor(targetFps / 2)));
+      : (latencySetting === 'balanced' ? targetFps : Math.max(ENCODER_GUARDRAILS.MIN_PERIODIC_KEYFRAME_INTERVAL, Math.floor(targetFps / 2)));
     const encoderModeLabel = (latencySetting === 'quality')
       ? 'High Quality (Buffered)'
       : (latencySetting === 'balanced' ? 'Balanced LAN' : 'ULL (Ultra Low Latency)');
@@ -542,7 +554,7 @@ export async function toggleCasting(): Promise<void> {
         encodedHeight: activeHeight,
         fps: targetFps,
         codec: wireCodec,
-        hardwarePreference: isSWRequested ? 'prefer-software' : 'prefer-hardware',
+        hardwarePreference: isSWRequested ? ENCODER_GUARDRAILS.SOFTWARE_ACCELERATION : ENCODER_GUARDRAILS.HARDWARE_ACCELERATION,
         bitrate: targetBitrate,
         aspectMode,
         latencyMode: latencySetting as 'ULL' | 'balanced' | 'quality',
@@ -640,7 +652,9 @@ export async function toggleCasting(): Promise<void> {
     }
 
     const codecString = getCodecString(wireCodec, activeWidth, targetFps);
-    const hardwarePref: HardwareAcceleration = isSWRequested ? 'prefer-software' : 'prefer-hardware';
+    const hardwarePref: HardwareAcceleration = isSWRequested
+      ? ENCODER_GUARDRAILS.SOFTWARE_ACCELERATION
+      : ENCODER_GUARDRAILS.HARDWARE_ACCELERATION;
 
     // Verify browser hardware acceleration capability
     let isHWAccelerated = false;
@@ -667,7 +681,13 @@ export async function toggleCasting(): Promise<void> {
     }
 
     if (!isCodecResolutionAllowed(wireCodec, encodedDimensions)) {
-      log(`[ERROR] ${wireCodec} output ${encodedResolution} exceeds the 1920x1088 decoder limit; choose a smaller encoder resolution.`, true);
+      const maxWidth = wireCodec === 'H265'
+        ? CODEC_RESOLUTION_LIMITS.H265_MAX_WIDTH
+        : CODEC_RESOLUTION_LIMITS.H264_MAX_WIDTH;
+      const maxHeight = wireCodec === 'H265'
+        ? CODEC_RESOLUTION_LIMITS.H265_MAX_HEIGHT
+        : CODEC_RESOLUTION_LIMITS.H264_MAX_HEIGHT;
+      log(`[ERROR] ${wireCodec} output ${encodedResolution} exceeds the ${maxWidth}x${maxHeight} decoder limit; choose a smaller encoder resolution.`, true);
       await stopStreaming();
       return;
     }
@@ -775,7 +795,7 @@ export async function toggleCasting(): Promise<void> {
           pingWriter.releaseLock();
         } catch(e) {}
       }
-    }, 1000);
+    }, TRANSPORT_CONFIG.KEEPALIVE_INTERVAL_MS);
 
     const TrackProcessorClass = window.MediaStreamTrackProcessor;
     if (!TrackProcessorClass || !activeVideoTrack) {
@@ -787,7 +807,7 @@ export async function toggleCasting(): Promise<void> {
 
     let frameCount = 0;
     let lastFrameTime = 0;
-    const minFrameIntervalMs = 1000 / targetFps - 2;
+    const minFrameIntervalMs = 1000 / targetFps - ENCODER_GUARDRAILS.FRAME_TIMING_SLACK_MS;
 
     while (isStreaming && trackProcessorReader) {
       try {
@@ -805,10 +825,10 @@ export async function toggleCasting(): Promise<void> {
         lastFrameTime = now;
 
         frameCount++;
-        const needKeyFrame = (frameCount <= 5 || frameCount % keyframeInterval === 0 || forceNextKeyframe);
+        const needKeyFrame = (frameCount <= ENCODER_GUARDRAILS.INITIAL_KEYFRAME_COUNT || frameCount % keyframeInterval === 0 || forceNextKeyframe);
         if (forceNextKeyframe) forceNextKeyframe = false;
 
-        if (videoEncoder && videoEncoder.encodeQueueSize > 8) {
+        if (videoEncoder && videoEncoder.encodeQueueSize > ENCODER_GUARDRAILS.MAX_ENCODER_QUEUE) {
           rawFrame.close();
         } else if (videoEncoder) {
           if (frameCount === 1 && frameCompositor) {
@@ -879,7 +899,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
     const statEdidMax = document.getElementById('statEdidMax');
     if (statEdidMax) {
       const fpsStr = msg.edid_max_fps ? ` @ ${msg.edid_max_fps} FPS` : '';
-      statEdidMax.textContent = `${msg.edid_max_res || '1920x1080'}${fpsStr}`;
+      statEdidMax.textContent = `${msg.edid_max_res || STREAM_DEFAULTS.resolution}${fpsStr}`;
     }
   }
 
@@ -905,7 +925,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
   }
   if (msg.content_rect) {
     const statLayout = document.getElementById('statLayout');
-    if (statLayout) statLayout.textContent = `${msg.aspect_mode || 'preserve'}: ${msg.content_rect}`;
+    if (statLayout) statLayout.textContent = `${msg.aspect_mode || STREAM_DEFAULTS.aspectMode}: ${msg.content_rect}`;
   }
 
   if (msg.bitrate_mbps && msg.bitrate_mbps > 0) {
@@ -950,7 +970,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
         if (msg.resolution.includes('@')) {
           statRes.textContent = msg.resolution;
         } else {
-          const fpsVal = msg.fps || 30;
+          const fpsVal = msg.fps || STREAM_DEFAULTS.fps;
           statRes.textContent = `${msg.resolution} @ ${fpsVal} FPS`;
         }
       }

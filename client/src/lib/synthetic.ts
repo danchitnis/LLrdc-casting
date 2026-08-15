@@ -1,3 +1,5 @@
+import { SYNTHETIC_PATTERN_CONFIG } from './config.ts';
+
 interface CapturableCanvas extends HTMLCanvasElement {
   captureStream(frameRate?: number): MediaStream;
 }
@@ -62,28 +64,28 @@ export function createSyntheticScreenStream(
     ctx.fillRect(0, 0, renderWidth, renderHeight);
 
     ctx.strokeStyle = '#1e293b';
-    ctx.lineWidth = 2;
-    for (let x = 0; x < renderWidth; x += 100) {
+    ctx.lineWidth = SYNTHETIC_PATTERN_CONFIG.GRID_LINE_WIDTH;
+    for (let x = 0; x < renderWidth; x += SYNTHETIC_PATTERN_CONFIG.GRID_STEP) {
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, renderHeight); ctx.stroke();
     }
-    for (let y = 0; y < renderHeight; y += 100) {
+    for (let y = 0; y < renderHeight; y += SYNTHETIC_PATTERN_CONFIG.GRID_STEP) {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(renderWidth, y); ctx.stroke();
     }
 
     const time = frame / fps;
-    const x = (renderWidth / 2) + Math.cos(time * 2) * (renderWidth / 3);
-    const y = (renderHeight / 2) + Math.sin(time * 3) * (renderHeight / 3);
+    const x = (renderWidth / 2) + Math.cos(time * SYNTHETIC_PATTERN_CONFIG.ORB_X_SPEED) * (renderWidth / 3);
+    const y = (renderHeight / 2) + Math.sin(time * SYNTHETIC_PATTERN_CONFIG.ORB_Y_SPEED) * (renderHeight / 3);
 
-    const grad = ctx.createRadialGradient(x, y, 10, x, y, 120);
+    const grad = ctx.createRadialGradient(x, y, SYNTHETIC_PATTERN_CONFIG.GRADIENT_RADIUS, x, y, SYNTHETIC_PATTERN_CONFIG.ORB_RADIUS);
     grad.addColorStop(0, '#38bdf8');
     grad.addColorStop(1, 'rgba(56, 189, 248, 0)');
     ctx.fillStyle = grad;
-    ctx.beginPath(); ctx.arc(x, y, 120, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, SYNTHETIC_PATTERN_CONFIG.ORB_RADIUS, 0, Math.PI * 2); ctx.fill();
 
-    const margin = Math.max(24, Math.round(Math.min(renderWidth, renderHeight) * 0.05));
-    const titleSize = Math.max(24, Math.round(Math.min(renderWidth, renderHeight) * 0.045));
-    const detailSize = Math.max(18, Math.round(titleSize * 0.62));
-    const lineHeight = Math.round(detailSize * 1.5);
+    const margin = Math.max(SYNTHETIC_PATTERN_CONFIG.LABEL_MARGIN_MAX_PX, Math.round(Math.min(renderWidth, renderHeight) * SYNTHETIC_PATTERN_CONFIG.LABEL_MARGIN_RATIO));
+    const titleSize = Math.max(SYNTHETIC_PATTERN_CONFIG.TITLE_MAX_PX, Math.round(Math.min(renderWidth, renderHeight) * SYNTHETIC_PATTERN_CONFIG.TITLE_RATIO));
+    const detailSize = Math.max(SYNTHETIC_PATTERN_CONFIG.DETAIL_MIN_PX, Math.round(titleSize * SYNTHETIC_PATTERN_CONFIG.DETAIL_RATIO));
+    const lineHeight = Math.round(detailSize * SYNTHETIC_PATTERN_CONFIG.LINE_HEIGHT);
     const statusLines = formatSyntheticStatus(config, frame);
     ctx.fillStyle = '#ffffff';
     ctx.font = `bold ${titleSize}px monospace`;

@@ -3,8 +3,9 @@ use std::error::Error;
 use tokio::io::AsyncWriteExt;
 use wtransport::SendStream;
 
+use crate::config::packet::MAX_UI_BYTES;
+
 const UI_REQUEST_TYPE: &str = "get_ui";
-const MAX_UI_BYTES: usize = 2 * 1024 * 1024;
 
 pub fn is_ui_request(payload: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(payload)

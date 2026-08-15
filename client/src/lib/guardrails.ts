@@ -1,3 +1,13 @@
+import {
+  BITRATE_THRESHOLDS,
+  CODEC_CONFIG,
+  CODEC_RESOLUTION_LIMITS,
+  ENCODER_GUARDRAILS,
+  FPS_THRESHOLDS,
+  H264_CODEC_STRINGS,
+  STREAM_DEFAULTS,
+} from './config.ts';
+
 export interface CodecCapabilityStatus {
   h265HW: boolean;
   h265Supported: boolean;
@@ -47,7 +57,11 @@ export function updateDisplayFpsGuardrails(displayRefreshFps?: number): void {
 }
 
 export function isCodecResolutionAllowed(codec: string, dimensions: EncodedDimensions): boolean {
-  return codec === 'H265' || (dimensions.width <= 1920 && dimensions.height <= 1088);
+  return codec === 'H265'
+    ? dimensions.width <= CODEC_RESOLUTION_LIMITS.H265_MAX_WIDTH
+      && dimensions.height <= CODEC_RESOLUTION_LIMITS.H265_MAX_HEIGHT
+    : dimensions.width <= CODEC_RESOLUTION_LIMITS.H264_MAX_WIDTH
+      && dimensions.height <= CODEC_RESOLUTION_LIMITS.H264_MAX_HEIGHT;
 }
 
 export function alignEncoderDimensions(
@@ -55,12 +69,12 @@ export function alignEncoderDimensions(
   width: number,
   height: number,
 ): EncodedDimensions {
-  if (codec === 'H264') {
-    return { width, height: Math.ceil(height / 16) * 16 };
+  if (codec === 'H264' || codec === 'H264_SW') {
+    return { width, height: Math.ceil(height / ENCODER_GUARDRAILS.ALIGNMENT) * ENCODER_GUARDRAILS.ALIGNMENT };
   }
   return {
-    width: Math.ceil(width / 16) * 16,
-    height: Math.ceil(height / 16) * 16,
+    width: Math.ceil(width / ENCODER_GUARDRAILS.ALIGNMENT) * ENCODER_GUARDRAILS.ALIGNMENT,
+    height: Math.ceil(height / ENCODER_GUARDRAILS.ALIGNMENT) * ENCODER_GUARDRAILS.ALIGNMENT,
   };
 }
 
@@ -118,12 +132,12 @@ export async function checkBrowserCodecCapabilities(
   // preference, not a portable post-encode hardware confirmation API.
   try {
     const h265Config: VideoEncoderConfig = {
-      codec: 'hev1.1.6.L150.B0',
-      width: 1920,
-      height: 1088,
-      bitrate: 6_000_000,
-      framerate: 30,
-      hardwareAcceleration: 'prefer-hardware'
+      codec: CODEC_CONFIG.H265.capabilityCodec,
+      width: CODEC_CONFIG.H265.capabilityWidth,
+      height: CODEC_CONFIG.H265.capabilityHeight,
+      bitrate: CODEC_CONFIG.H265.capabilityBitrate,
+      framerate: CODEC_CONFIG.H265.capabilityFramerate,
+      hardwareAcceleration: ENCODER_GUARDRAILS.HARDWARE_ACCELERATION,
     };
     const resH265 = await VideoEncoder.isConfigSupported(h265Config);
     if (resH265.supported) {
@@ -135,12 +149,12 @@ export async function checkBrowserCodecCapabilities(
   // Probe H.264 hardware and software independently.
   try {
     const h264Config: VideoEncoderConfig = {
-      codec: 'avc1.42e028',
-      width: 1920,
-      height: 1088,
-      bitrate: 8_000_000,
-      framerate: 30,
-      hardwareAcceleration: 'prefer-hardware'
+      codec: CODEC_CONFIG.H264.capabilityCodec,
+      width: CODEC_CONFIG.H264.capabilityWidth,
+      height: CODEC_CONFIG.H264.capabilityHeight,
+      bitrate: CODEC_CONFIG.H264.capabilityBitrate,
+      framerate: CODEC_CONFIG.H264.capabilityFramerate,
+      hardwareAcceleration: ENCODER_GUARDRAILS.HARDWARE_ACCELERATION,
     };
     const resH264 = await VideoEncoder.isConfigSupported(h264Config);
     if (resH264.supported) {
@@ -150,12 +164,12 @@ export async function checkBrowserCodecCapabilities(
 
   try {
     const h264SoftwareConfig: VideoEncoderConfig = {
-      codec: 'avc1.42e028',
-      width: 1920,
-      height: 1088,
-      bitrate: 8_000_000,
-      framerate: 30,
-      hardwareAcceleration: 'prefer-software'
+      codec: CODEC_CONFIG.H264.capabilityCodec,
+      width: CODEC_CONFIG.H264.capabilityWidth,
+      height: CODEC_CONFIG.H264.capabilityHeight,
+      bitrate: CODEC_CONFIG.H264.capabilityBitrate,
+      framerate: CODEC_CONFIG.H264.capabilityFramerate,
+      hardwareAcceleration: ENCODER_GUARDRAILS.SOFTWARE_ACCELERATION,
     };
     const resH264Software = await VideoEncoder.isConfigSupported(h264SoftwareConfig);
     result.h264Supported = !!resH264Software.supported;
@@ -249,9 +263,9 @@ export function onResolutionChange(logFn?: (msg: string, isError?: boolean) => v
   const resSelect = document.getElementById('resolution') as HTMLSelectElement | null;
   if (!resSelect) return;
   const resStr = resSelect.value;
-  const [w = 1920] = resStr.split('x').map(n => parseInt(n, 10));
+  const [w = Number.parseInt(STREAM_DEFAULTS.resolution.split('x')[0], 10)] = resStr.split('x').map(n => parseInt(n, 10));
   const codecSelect = document.getElementById('codec') as HTMLSelectElement | null;
-  if (codecSelect && w >= 2560) {
+  if (codecSelect && w >= CODEC_RESOLUTION_LIMITS.H265_AUTO_MIN_WIDTH) {
     const h265Option = codecSelect.querySelector('option[value="H265"]') as HTMLOptionElement | null;
     if (h265Option && !h265Option.disabled) codecSelect.value = 'H265';
   }
@@ -278,25 +292,23 @@ export function calculateTargetBitrate(
   }
 
   if (codec === 'H265') {
-    if (width >= 3840) return fps >= 60 ? 25_000_000 : 15_000_000;
-    if (width >= 2560) return fps >= 60 ? 14_000_000 : 9_000_000;
-    if (width >= 1920) return fps >= 60 ? 10_000_000 : 6_000_000;
-    return fps >= 60 ? 5_000_000 : 3_000_000;
-  } else {
-    if (width >= 1920) return fps >= 60 ? 16_000_000 : 10_000_000;
-    return fps >= 60 ? 8_000_000 : 5_000_000;
+    const threshold = BITRATE_THRESHOLDS.H265.find(entry => width >= entry.minWidth);
+    if (threshold) return fps >= FPS_THRESHOLDS.HIGH ? threshold.at60 : threshold.below60;
+    return fps >= FPS_THRESHOLDS.HIGH ? BITRATE_THRESHOLDS.fallback.at60 : BITRATE_THRESHOLDS.fallback.below60;
   }
+  const threshold = BITRATE_THRESHOLDS.H264.find(entry => width >= entry.minWidth);
+  if (threshold) return fps >= FPS_THRESHOLDS.HIGH ? threshold.at60 : threshold.below60;
+  return fps >= FPS_THRESHOLDS.HIGH ? BITRATE_THRESHOLDS.H264Fallback.at60 : BITRATE_THRESHOLDS.H264Fallback.below60;
 }
 
-export function getCodecString(codec: string, width: number, fps = 30): string {
+export function getCodecString(codec: string, width: number, fps: number = STREAM_DEFAULTS.fps): string {
   if (codec === 'H265') {
-    return 'hev1.1.6.L150.B0';
-  } else {
-    if (width >= 3840) {
-      return 'avc1.42e033';
-    } else if (width >= 2560) {
-      return 'avc1.42e032';
-    }
-    return fps >= 60 ? 'avc1.42e02a' : 'avc1.42e028';
+    return CODEC_CONFIG.H265.defaultCodec;
   }
+  if (width >= CODEC_RESOLUTION_LIMITS.H265_MAX_WIDTH) {
+    return H264_CODEC_STRINGS.UHD;
+  } else if (width >= CODEC_RESOLUTION_LIMITS.H265_AUTO_MIN_WIDTH) {
+    return H264_CODEC_STRINGS.QHD;
+  }
+  return fps >= FPS_THRESHOLDS.HIGH ? H264_CODEC_STRINGS.HD60 : H264_CODEC_STRINGS.HD;
 }

@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::config::telemetry::DEFAULT_TELEMETRY_CHANNEL_CAPACITY;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlCommand {
@@ -108,7 +110,7 @@ pub struct ControlChannel {
 
 impl ControlChannel {
     pub fn new(cmd_tx: mpsc::Sender<ControlCommand>) -> Self {
-        let (telemetry_tx, _) = broadcast::channel(100);
+        let (telemetry_tx, _) = broadcast::channel(DEFAULT_TELEMETRY_CHANNEL_CAPACITY);
         Self {
             cmd_tx,
             telemetry_tx,

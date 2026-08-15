@@ -14,7 +14,7 @@ use crate::playback::SharedWriter;
 pub fn configured_dashboard_codec() -> String {
     match std::env::var("IDLE_DASHBOARD_MODE").ok().as_deref() {
         Some("hevc") | Some("h265") => "hevc".to_string(),
-        _ => "raw".to_string(),
+        _ => crate::config::dashboard::DEFAULT_MODE.to_string(),
     }
 }
 
@@ -105,7 +105,7 @@ impl PersistentDashboardEncoder {
             .args([
                 "-y",
                 "-r",
-                "1",
+                crate::config::dashboard::RAW_FRAME_RATE,
                 "-f",
                 "rawvideo",
                 "-pixel_format",
@@ -123,7 +123,10 @@ impl PersistentDashboardEncoder {
                 "-flush_packets",
                 "1",
                 "-x265-params",
-                "keyint=3600:bframes=0:no-scenecut=1",
+                &format!(
+                    "keyint={}:bframes=0:no-scenecut=1",
+                    crate::config::dashboard::ENCODED_KEYFRAME_INTERVAL
+                ),
                 "-pix_fmt",
                 "yuv420p",
                 "-f",
@@ -140,7 +143,7 @@ impl PersistentDashboardEncoder {
 
         // Parallel reader thread: forwards stdout stream chunks directly to GStreamer writer_tx
         std::thread::spawn(move || {
-            let mut buf = [0u8; 131072];
+            let mut buf = [0u8; crate::config::dashboard::STDOUT_BUFFER_BYTES];
             while let Ok(n) = stdout.read(&mut buf) {
                 if n == 0 {
                     break;
@@ -256,7 +259,9 @@ pub fn spawn_idle_dashboard_thread(
                 println!("[IDLE THREAD] Streaming active; terminating fallback idle HEVC encoder process.");
                 encoder = None;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::config::dashboard::FEED_INTERVAL_MS,
+            ));
         }
     });
 }

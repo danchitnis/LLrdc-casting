@@ -7,6 +7,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use crate::config;
+
 pub type SharedWriter = Arc<Mutex<std::sync::mpsc::SyncSender<Vec<u8>>>>;
 
 // The RK3399 HDMI bridge advertises a 120x70 mm 4K mode. kmssink turns that
@@ -15,8 +17,6 @@ pub type SharedWriter = Arc<Mutex<std::sync::mpsc::SyncSender<Vec<u8>>>>;
 // propagates it onto its native DMA-BUF output, keeping the decoder -> KMS
 // path zero-copy. Applying it after decode with capssetter drops the
 // memory:DMABuf feature and forces a slow system-memory presentation path.
-const KMS_DEVICE_PIXEL_ASPECT_RATIO: &str = "15/16";
-
 pub struct PlaybackEngine {
     pub child: Child,
     pub writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
@@ -88,7 +88,14 @@ pub fn autodetect_display_info() -> (u32, u32, u32, String, Option<String>, crat
         }
         crate::drm_kms::drop_master(&card);
     }
-    (1920, 1080, 60, "54".into(), Some("<0,0,1920,1080>".to_string()), crate::drm_kms::EdidInfo::default())
+    (
+        config::playback::DEFAULT_DISPLAY_WIDTH,
+        config::playback::DEFAULT_DISPLAY_HEIGHT,
+        config::playback::DEFAULT_DISPLAY_FPS,
+        config::playback::DEFAULT_DISPLAY_PIXEL_ASPECT_RATIO.into(),
+        Some(config::playback::DEFAULT_DISPLAY_RECT.to_string()),
+        crate::drm_kms::EdidInfo::default(),
+    )
 }
 
 pub fn start_persistent_playback(
@@ -100,14 +107,14 @@ pub fn start_persistent_playback(
     height: u32,
 ) -> Result<PlaybackEngine, Box<dyn std::error::Error>> {
     let t_start = std::time::Instant::now();
-    let plane = std::env::var("DRM_PLANE_ID").unwrap_or_else(|_| "33".into());
+    let plane = config::env_string_or("DRM_PLANE_ID", config::server::DEFAULT_DRM_PLANE_ID);
     let norm_codec = normalize_codec(codec);
     let mut gst_args = vec!["-q".to_string()];
     if norm_codec == "raw" {
         println!("[PLAYBACK STARTUP] Initializing raw BGRA dashboard pipeline at {width}x{height} at t=0ms");
         gst_args.extend([
-            "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), "blocksize=65536".to_string(), "!".to_string(),
-            "rawvideoparse".to_string(), "format=bgra".to_string(), format!("width={width}"), format!("height={height}"), "framerate=1/1".to_string(), "!".to_string(),
+            "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), format!("blocksize={}", config::playback::RAW_PIPELINE_BLOCK_SIZE), "!".to_string(),
+            "rawvideoparse".to_string(), "format=bgra".to_string(), format!("width={width}"), format!("height={height}"), format!("framerate={}", config::playback::RAW_PIPELINE_FRAMERATE), "!".to_string(),
         ]);
     } else {
         let (parser, bitstream_caps, decoder) = if norm_codec == "h264" {
@@ -117,10 +124,10 @@ pub fn start_persistent_playback(
         };
         println!("[PLAYBACK STARTUP] Initializing persistent GStreamer pipeline for {norm_codec} ({parser} -> {decoder}) at t=0ms");
         gst_args.extend([
-            "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), "blocksize=65536".to_string(), "!".to_string(),
-            parser.to_string(), "config-interval=-1".to_string(), "!".to_string(),
+            "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), format!("blocksize={}", config::playback::RAW_PIPELINE_BLOCK_SIZE), "!".to_string(),
+            parser.to_string(), format!("config-interval={}", config::playback::ENCODED_CONFIG_INTERVAL), "!".to_string(),
             "capssetter".to_string(),
-            format!("caps={bitstream_caps},pixel-aspect-ratio=(fraction){KMS_DEVICE_PIXEL_ASPECT_RATIO}"),
+            format!("caps={bitstream_caps},pixel-aspect-ratio=(fraction){}", config::playback::KMS_DEVICE_PIXEL_ASPECT_RATIO),
             "replace=false".to_string(), "!".to_string(),
             decoder.to_string(), "!".to_string(),
         ]);
@@ -164,7 +171,11 @@ pub fn start_persistent_playback(
 
     // Raw dashboard frames can be large; keep only two queued so
     // a stalled KMS sink cannot retain hundreds of megabytes of stale clocks.
-    let queue_capacity = if norm_codec == "raw" { 2 } else { 16 };
+    let queue_capacity = if norm_codec == "raw" {
+        config::playback::RAW_QUEUE_CAPACITY
+    } else {
+        config::playback::ENCODED_QUEUE_CAPACITY
+    };
     let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(queue_capacity);
     std::thread::spawn(move || {
         while let Ok(access_unit) = writer_rx.recv() {

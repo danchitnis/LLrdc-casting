@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use wtransport::{Endpoint, Identity, ServerConfig};
 
 use crate::cloud_discovery::ConnectionTokenVerifier;
+use crate::config;
 use crate::local_pairing::PairingState;
 use crate::v4l2_decoder::VideoFrame;
 
@@ -40,26 +41,26 @@ pub async fn run_server_with_identity(
         );
     }
 
-    let wt_port: u16 = std::env::var("WEBTRANSPORT_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(4433);
+    let wt_port = config::env_or(
+        "WEBTRANSPORT_PORT",
+        config::server::DEFAULT_WEBTRANSPORT_PORT,
+    );
 
     let udp_port: u16 = std::env::var("BOARD_PORT")
         .or_else(|_| std::env::var("UDP_PORT"))
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(4434);
+        .unwrap_or(config::server::DEFAULT_BOARD_PORT);
 
     let buf_mb: usize = std::env::var("UDP_BUFFER_SIZE_MB")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8);
+        .unwrap_or(config::server::DEFAULT_UDP_BUFFER_SIZE_MB);
 
     let idle_timeout_sec: u64 = std::env::var("IDLE_TIMEOUT_SEC")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(30);
+        .unwrap_or(config::server::DEFAULT_IDLE_TIMEOUT_SEC);
 
     // Use the wildcard bind so every receiver interface accepts WebTransport.
     let config = ServerConfig::builder()
@@ -104,7 +105,7 @@ pub async fn run_server_with_identity(
                 eprintln!("[UDP RECEIVER] UDP_BUFFER_SIZE_MB is too large; keeping the OS default");
             }
 
-            let mut buf = [0u8; 65536];
+            let mut buf = [0u8; config::transport::DATAGRAM_BUFFER_BYTES];
             while let Ok((len, _addr)) = socket.recv_from(&mut buf).await {
                 if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&buf[..len]) {
                     if frame_tx_udp.send(video_frame).await.is_err() {
@@ -192,10 +193,10 @@ async fn handle_connection(
                     Ok(mut recv_stream) => {
                         let frame_tx_clone = frame_tx.clone();
                         tokio::spawn(async move {
-                            let mut len_buf = [0u8; 4];
+                            let mut len_buf = [0u8; config::transport::CONTROL_LENGTH_PREFIX_BYTES];
                             while recv_stream.read_exact(&mut len_buf).await.is_ok() {
                                 let len = u32::from_be_bytes(len_buf) as usize;
-                                if len == 0 || len > 16 * 1024 * 1024 { break; }
+                                if len == 0 || len > config::packet::MAX_UNI_STREAM_MESSAGE_BYTES { break; }
                                 let mut packet = vec![0u8; len];
                                 if recv_stream.read_exact(&mut packet).await.is_err() { break; }
                                 if let Some(video_frame) = crate::v4l2_decoder::process_udp_chunk(&packet) {
@@ -236,7 +237,7 @@ async fn handle_connection(
                     Err(e) => {
                         // Do not break loop on datagram channel closure; keep unidirectional stream active
                         println!("[WEBTRANSPORT] Datagram channel inactive ({})", e);
-                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(config::transport::DATAGRAM_ERROR_RETRY_SEC)).await;
                     }
                 }
             }
@@ -277,12 +278,12 @@ async fn handle_control_stream(
     mut recv_stream: wtransport::RecvStream,
     control_channel: crate::control::ControlChannel,
 ) {
-    let mut length = [0u8; 4];
+    let mut length = [0u8; config::transport::CONTROL_LENGTH_PREFIX_BYTES];
     if recv_stream.read_exact(&mut length).await.is_err() {
         return;
     }
     let size = u32::from_be_bytes(length) as usize;
-    if size == 0 || size > 64 * 1024 {
+    if size == 0 || size > config::packet::MAX_CONTROL_MESSAGE_BYTES {
         return;
     }
     let mut first_payload = vec![0u8; size];
@@ -319,12 +320,12 @@ async fn handle_control_stream(
         let _ = control_channel.cmd_tx.send(command).await;
     }
     loop {
-        let mut length = [0u8; 4];
+        let mut length = [0u8; config::transport::CONTROL_LENGTH_PREFIX_BYTES];
         if recv_stream.read_exact(&mut length).await.is_err() {
             break;
         }
         let size = u32::from_be_bytes(length) as usize;
-        if size == 0 || size > 64 * 1024 {
+        if size == 0 || size > config::packet::MAX_CONTROL_MESSAGE_BYTES {
             break;
         }
         let mut payload = vec![0u8; size];

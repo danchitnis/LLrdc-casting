@@ -1,3 +1,5 @@
+import { ANNEXB_CONFIG } from './config.ts';
+
 export interface NalCache {
   vps: Uint8Array | null;
   sps: Uint8Array | null;
@@ -27,24 +29,24 @@ export function parseDecoderDescription(
     const buffer: ArrayBuffer = descObj.buffer ? descObj.buffer : (description as ArrayBuffer);
     const byteOffset = descObj.byteOffset || 0;
     const byteLength = descObj.byteLength || descObj.size || 0;
-    if (byteLength < 7) return;
+    if (byteLength < ANNEXB_CONFIG.DECODER_DESCRIPTION_MIN_BYTES) return;
     const view = new DataView(buffer, byteOffset, byteLength);
 
     if (codec === 'H265') {
-      if (byteLength < 23) return;
-      const numOfArrays = view.getUint8(22);
-      let offset = 23;
+      if (byteLength <= ANNEXB_CONFIG.HEVC_NUM_ARRAYS_OFFSET) return;
+      const numOfArrays = view.getUint8(ANNEXB_CONFIG.HEVC_NUM_ARRAYS_OFFSET);
+      let offset = ANNEXB_CONFIG.HEVC_NUM_ARRAYS_OFFSET + 1;
 
       for (let i = 0; i < numOfArrays; i++) {
-        if (offset + 3 > byteLength) break;
+        if (offset + ANNEXB_CONFIG.HEVC_ARRAY_HEADER_BYTES > byteLength) break;
         const nalType = view.getUint8(offset) & 0x3f;
         const numNalus = view.getUint16(offset + 1, false);
-        offset += 3;
+        offset += ANNEXB_CONFIG.HEVC_ARRAY_HEADER_BYTES;
 
         for (let j = 0; j < numNalus; j++) {
-          if (offset + 2 > byteLength) break;
+          if (offset + ANNEXB_CONFIG.NAL_LENGTH_BYTES > byteLength) break;
           const nalLen = view.getUint16(offset, false);
-          offset += 2;
+          offset += ANNEXB_CONFIG.NAL_LENGTH_BYTES;
           if (offset + nalLen > byteLength) break;
 
           const nalData = new Uint8Array(buffer, byteOffset + offset, nalLen);
@@ -56,12 +58,12 @@ export function parseDecoderDescription(
       }
       logFn?.(`[HEADER PARSED] HEVC VPS=${!!cache.vps} (${cache.vps?.length}B) SPS=${!!cache.sps} (${cache.sps?.length}B) PPS=${!!cache.pps} (${cache.pps?.length}B)`);
     } else {
-      const numOfSps = view.getUint8(5) & 0x1f;
-      let offset = 6;
+      const numOfSps = view.getUint8(ANNEXB_CONFIG.AVC_NUM_SPS_OFFSET) & 0x1f;
+      let offset = ANNEXB_CONFIG.AVC_NUM_SPS_OFFSET + 1;
       for (let i = 0; i < numOfSps; i++) {
-        if (offset + 2 > byteLength) break;
+        if (offset + ANNEXB_CONFIG.NAL_LENGTH_BYTES > byteLength) break;
         const spsLen = view.getUint16(offset, false);
-        offset += 2;
+        offset += ANNEXB_CONFIG.NAL_LENGTH_BYTES;
         if (offset + spsLen > byteLength) break;
         cache.sps = new Uint8Array(buffer, byteOffset + offset, spsLen);
         offset += spsLen;
@@ -70,9 +72,9 @@ export function parseDecoderDescription(
       const numOfPps = view.getUint8(offset);
       offset += 1;
       for (let i = 0; i < numOfPps; i++) {
-        if (offset + 2 > byteLength) break;
+        if (offset + ANNEXB_CONFIG.NAL_LENGTH_BYTES > byteLength) break;
         const ppsLen = view.getUint16(offset, false);
-        offset += 2;
+        offset += ANNEXB_CONFIG.NAL_LENGTH_BYTES;
         if (offset + ppsLen > byteLength) break;
         cache.pps = new Uint8Array(buffer, byteOffset + offset, ppsLen);
         offset += ppsLen;
@@ -105,7 +107,7 @@ export function convertToAnnexB(
   let scanOffset = 0;
   while (scanOffset + 4 <= chunkBuffer.length) {
     const nalLen = view.getUint32(scanOffset, false);
-    scanOffset += 4;
+    scanOffset += ANNEXB_CONFIG.NAL_LENGTH_PREFIX_BYTES;
     if (nalLen === 0 || scanOffset + nalLen > chunkBuffer.length) break;
     const headerByte = chunkBuffer[scanOffset];
     const type = codec === 'H265' ? ((headerByte >> 1) & 0x3f) : (headerByte & 0x1f);
@@ -118,13 +120,13 @@ export function convertToAnnexB(
     const toHex = (arr: Uint8Array | null) => arr ? Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('') : 'NULL';
     logFn?.(`[KEYFRAME PREPEND HEX] seq=${seqNum} VPS=${toHex(cache.vps)} SPS=${toHex(cache.sps)} PPS=${toHex(cache.pps)}`);
   }
-  const startCode = new Uint8Array([0x00, 0x00, 0x00, 0x01]);
+  const startCode = new Uint8Array(ANNEXB_CONFIG.START_CODE);
   const nalParts: Uint8Array[] = [];
 
   if (codec === 'H265') {
-    nalParts.push(new Uint8Array([0x00, 0x00, 0x00, 0x01, 0x46, 0x01, 0x50]));
+    nalParts.push(new Uint8Array([...ANNEXB_CONFIG.START_CODE, 0x46, 0x01, 0x50]));
   } else {
-    nalParts.push(new Uint8Array([0x00, 0x00, 0x00, 0x01, 0x09, 0xf0]));
+    nalParts.push(new Uint8Array([...ANNEXB_CONFIG.START_CODE, ANNEXB_CONFIG.H264_AUD, 0xf0]));
   }
 
   if (isKey || seqNum === 1) {
@@ -141,7 +143,7 @@ export function convertToAnnexB(
   let offset = 0;
   while (offset + 4 <= chunkBuffer.length) {
     const nalLen = view.getUint32(offset, false);
-    offset += 4;
+    offset += ANNEXB_CONFIG.NAL_LENGTH_PREFIX_BYTES;
     if (nalLen === 0 || offset + nalLen > chunkBuffer.length) {
       if (chunkBuffer[0] === 0 && chunkBuffer[1] === 0 && (chunkBuffer[2] === 1 || (chunkBuffer[2] === 0 && chunkBuffer[3] === 1))) {
         nalParts.push(chunkBuffer);

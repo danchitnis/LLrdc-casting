@@ -7,6 +7,7 @@
 mod cert;
 mod admin;
 mod cloud_discovery;
+mod config;
 mod control;
 mod dashboard;
 mod drm_kms;
@@ -36,8 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sys_monitor::spawn_dmesg_kernel_monitor();
     let _ = drm_kms::inspect_live_scanout_status();
 
-    let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(64);
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<control::ControlCommand>(32);
+    let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(config::transport::FRAME_CHANNEL_CAPACITY);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<control::ControlCommand>(config::transport::CONTROL_CHANNEL_CAPACITY);
     let control_channel = control::ControlChannel::new(cmd_tx);
 
     let identity = webtransport_server::get_or_create_identity()
@@ -114,10 +115,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let streaming_active = Arc::new(AtomicBool::new(false));
-    let active_fps = Arc::new(AtomicU32::new(30));
-    let active_res = Arc::new(Mutex::new("1920x1080".to_string()));
-    let active_bitrate_mbps = Arc::new(Mutex::new(10.0f32));
-    let active_latency_mode = Arc::new(Mutex::new("ULL".to_string()));
+    let active_fps = Arc::new(AtomicU32::new(config::telemetry::DEFAULT_ACTIVE_FPS));
+    let active_res = Arc::new(Mutex::new(config::telemetry::DEFAULT_ACTIVE_RESOLUTION.to_string()));
+    let active_bitrate_mbps = Arc::new(Mutex::new(config::telemetry::DEFAULT_ACTIVE_BITRATE_MBPS));
+    let active_latency_mode = Arc::new(Mutex::new(config::telemetry::DEFAULT_ACTIVE_LATENCY_MODE.to_string()));
     let active_capture_resolution = Arc::new(Mutex::new(String::new()));
     let active_encoded_resolution = Arc::new(Mutex::new(String::new()));
     let active_aspect_mode = Arc::new(Mutex::new(String::new()));
@@ -137,10 +138,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "[READY] Persistent GStreamer HDMI presenter running; waiting for UDP/WebTransport stream"
     );
     let mut sent = 0u64;
-    let idle_timeout_sec: u64 = std::env::var("IDLE_TIMEOUT_SEC")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(30);
+    let idle_timeout_sec = config::env_or(
+        "IDLE_TIMEOUT_SEC",
+        config::server::DEFAULT_IDLE_TIMEOUT_SEC,
+    );
     let idle_timeout = std::time::Duration::from_secs(idle_timeout_sec);
 
     loop {
@@ -158,15 +159,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         v4l2_decoder::reset_decoder_pipeline();
                         let _ = playback_engine.ensure_configuration(&idle_dashboard_codec, &connector_id, render_rect.as_deref(), "dashboard");
                         while rx.try_recv().is_ok() {}
-                        let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
-                        let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
+                        let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(config::telemetry::DEFAULT_IDLE_BITRATE_MBPS);
+                        let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| config::telemetry::DEFAULT_ACTIVE_LATENCY_MODE.to_string());
                         control_channel.send_telemetry(control::TelemetryMessage::Status {
                             state: "IDLE".to_string(),
-                            resolution: "0x0".to_string(),
-                            fps: 0,
-                            delivery_rate: 100.0,
+                            resolution: config::telemetry::DEFAULT_IDLE_RESOLUTION.to_string(),
+                            fps: config::telemetry::DEFAULT_IDLE_FPS,
+                            delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
                             frames_submitted: sent,
-                            latency_ms: 0.0,
+                            latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                             display_resolution: format!("{}x{}", screen_w, screen_h),
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
@@ -185,15 +186,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                     }
                     control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode, source_width, source_height, encoded_width, encoded_height, content_rect, signal_content_rect, panel_content_rect, signal_width, signal_height, panel_width, panel_height } => {
-                        let req_codec = codec.as_deref().unwrap_or("hevc");
+                        let req_codec = codec.as_deref().unwrap_or(config::telemetry::DEFAULT_CODEC);
                         let requested_aspect_mode = aspect_mode.as_deref() == Some("stretch");
-                        let aspect_mode = if requested_aspect_mode { "stretch" } else { "preserve" };
+                        let aspect_mode = if requested_aspect_mode {
+                            "stretch"
+                        } else {
+                            config::telemetry::DEFAULT_ASPECT_MODE
+                        };
                         println!("[CONTROL WS] Received START command: codec={:?}, res={:?}, fps={:?}, bitrate={:?}, latency_mode={:?}, aspect_mode={:?}", req_codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode);
                         streaming_active.store(true, Ordering::Relaxed);
-                        let res_str = resolution.unwrap_or_else(|| "1920x1080".to_string());
-                        let stream_fps = fps.unwrap_or(30);
-                        let bw = bitrate_mbps.unwrap_or(10.0);
-                        let lat_mode = latency_mode.unwrap_or_else(|| "ULL".to_string());
+                        let res_str = resolution.unwrap_or_else(|| config::telemetry::DEFAULT_ACTIVE_RESOLUTION.to_string());
+                        let stream_fps = fps.unwrap_or(config::telemetry::DEFAULT_ACTIVE_FPS);
+                        let bw = bitrate_mbps.unwrap_or(config::telemetry::DEFAULT_ACTIVE_BITRATE_MBPS);
+                        let lat_mode = latency_mode.unwrap_or_else(|| config::telemetry::DEFAULT_ACTIVE_LATENCY_MODE.to_string());
                         let capture_res = match (source_width, source_height) {
                             (Some(width), Some(height)) => format!("{width}x{height}"),
                             _ => String::new(),
@@ -221,9 +226,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state: "STREAMING".to_string(),
                             resolution: res_str,
                             fps: stream_fps,
-                            delivery_rate: 100.0,
+                            delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
                             frames_submitted: sent,
-                            latency_ms: 0.0,
+                            latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                             display_resolution: format!("{}x{}", screen_w, screen_h),
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
@@ -248,13 +253,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let is_act = streaming_active.load(Ordering::Relaxed);
                         let state = if is_act { "STREAMING" } else { "IDLE" };
                         let cur_res = if is_act {
-                            active_res.lock().map(|l| l.clone()).unwrap_or_else(|_| "1920x1080".to_string())
+                            active_res.lock().map(|l| l.clone()).unwrap_or_else(|_| config::telemetry::DEFAULT_ACTIVE_RESOLUTION.to_string())
                         } else {
-                            "0x0".to_string()
+                            config::telemetry::DEFAULT_IDLE_RESOLUTION.to_string()
                         };
                         let cur_fps = if is_act { active_fps.load(Ordering::Relaxed) } else { 0 };
-                        let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
-                        let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
+                        let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(config::telemetry::DEFAULT_IDLE_BITRATE_MBPS);
+                        let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| config::telemetry::DEFAULT_ACTIVE_LATENCY_MODE.to_string());
                         let capture_res = active_capture_resolution.lock().map(|l| l.clone()).unwrap_or_default();
                         let encoded_res = active_encoded_resolution.lock().map(|l| l.clone()).unwrap_or_default();
                         let aspect_mode = active_aspect_mode.lock().map(|l| l.clone()).unwrap_or_default();
@@ -263,9 +268,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state: state.to_string(),
                             resolution: cur_res,
                             fps: cur_fps,
-                            delivery_rate: 100.0,
+                            delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
                             frames_submitted: sent,
-                            latency_ms: 0.0,
+                            latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                             display_resolution: format!("{}x{}", screen_w, screen_h),
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
@@ -300,15 +305,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             v4l2_decoder::reset_decoder_pipeline();
                             let _ = playback_engine.ensure_configuration(&idle_dashboard_codec, &connector_id, render_rect.as_deref(), "dashboard");
                             while rx.try_recv().is_ok() {}
-                            let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
-                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
+                            let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(config::telemetry::DEFAULT_IDLE_BITRATE_MBPS);
+                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| config::telemetry::DEFAULT_ACTIVE_LATENCY_MODE.to_string());
                             control_channel.send_telemetry(control::TelemetryMessage::Status {
                                 state: "IDLE".to_string(),
-                                resolution: "0x0".to_string(),
+                                resolution: config::telemetry::DEFAULT_IDLE_RESOLUTION.to_string(),
                                 fps: 0,
-                                delivery_rate: 100.0,
+                                delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
                                 frames_submitted: sent,
-                                latency_ms: 0.0,
+                                latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                                 display_resolution: format!("{}x{}", screen_w, screen_h),
                                 display_fps: vrefresh,
                                 bitrate_mbps: bw,
@@ -356,16 +361,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let frame_res = format!("{}x{}", frame.width, frame.height);
                             if let Ok(mut l) = active_res.lock() { *l = frame_res.clone(); }
                             let cur_fps = active_fps.load(Ordering::Relaxed);
-                            let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
-                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
+                            let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(config::telemetry::DEFAULT_IDLE_BITRATE_MBPS);
+                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| config::telemetry::DEFAULT_ACTIVE_LATENCY_MODE.to_string());
                             if !was_active {
                                 control_channel.send_telemetry(control::TelemetryMessage::Status {
                                     state: "STREAMING".to_string(),
                                     resolution: frame_res,
                                     fps: cur_fps,
-                                    delivery_rate: 100.0,
+                                    delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
                                     frames_submitted: sent,
-                                    latency_ms: 0.0,
+                                    latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                                     display_resolution: format!("{}x{}", screen_w, screen_h),
                                     display_fps: vrefresh,
                                     bitrate_mbps: bw,
@@ -401,15 +406,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("[PLAYBACK] submitted_{}_access_units={sent} (latency={latency_ms:.1}ms)", frame.codec);
                             let frame_res = format!("{}x{}", frame.width, frame.height);
                             let cur_fps = active_fps.load(Ordering::Relaxed);
-                            let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
-                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
+                            let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(config::telemetry::DEFAULT_IDLE_BITRATE_MBPS);
+                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| config::telemetry::DEFAULT_ACTIVE_LATENCY_MODE.to_string());
                                 control_channel.send_telemetry(control::TelemetryMessage::Status {
                                     state: "STREAMING".to_string(),
                                     resolution: frame_res,
                                     fps: cur_fps,
-                                    delivery_rate: 100.0,
+                                    delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
                                     frames_submitted: sent,
-                                    latency_ms: 0.0,
+                                    latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                                     display_resolution: format!("{}x{}", screen_w, screen_h),
                                     display_fps: vrefresh,
                                     bitrate_mbps: bw,
@@ -440,15 +445,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                              if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
                             let _ = playback_engine.ensure_configuration(&idle_dashboard_codec, &connector_id, render_rect.as_deref(), "dashboard");
                             while rx.try_recv().is_ok() {}
-                            let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(0.0);
-                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| "ULL".to_string());
+                        let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(config::telemetry::DEFAULT_IDLE_BITRATE_MBPS);
+                            let lat_mode = active_latency_mode.lock().map(|l| l.clone()).unwrap_or_else(|_| config::telemetry::DEFAULT_ACTIVE_LATENCY_MODE.to_string());
                             control_channel.send_telemetry(control::TelemetryMessage::Status {
                                 state: "IDLE".to_string(),
-                                resolution: "0x0".to_string(),
+                                resolution: config::telemetry::DEFAULT_IDLE_RESOLUTION.to_string(),
                                 fps: 0,
-                                delivery_rate: 100.0,
+                                delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
                                 frames_submitted: sent,
-                                latency_ms: 0.0,
+                                latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                                 display_resolution: format!("{}x{}", screen_w, screen_h),
                                 display_fps: vrefresh,
                                 bitrate_mbps: bw,

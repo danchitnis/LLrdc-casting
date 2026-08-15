@@ -1,4 +1,14 @@
 ---
+import {
+  ASPECT_OPTIONS,
+  BITRATE_OPTIONS,
+  CODEC_OPTIONS,
+  FPS_OPTIONS,
+  LATENCY_OPTIONS,
+  RESOLUTION_OPTIONS,
+  STREAM_DEFAULTS,
+  VIDEO_SOURCE_OPTIONS,
+} from '../lib/config';
 ---
 
 <div class="card settings-card">
@@ -26,8 +36,9 @@
       </label>
       <div class="select-wrapper">
         <select id="videoSource">
-          <option value="screen" selected>Screen Capture (getDisplayMedia)</option>
-          <option value="synthetic">Bouncing Orb / Test Pattern (Synthetic)</option>
+          {VIDEO_SOURCE_OPTIONS.map(option => (
+            <option value={option.value} selected={option.value === STREAM_DEFAULTS.videoSource}>{option.label}</option>
+          ))}
         </select>
         <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9"></polyline>
@@ -41,10 +52,9 @@
       </label>
       <div class="select-wrapper">
         <select id="resolution">
-          <option value="1280x720">720p (1280x720)</option>
-          <option value="1920x1080" selected>1080p (1920x1080)</option>
-          <option value="2560x1440">1440p (2560x1440)</option>
-          <option value="3840x2160">2160p / 4K UHD (3840x2160)</option>
+          {RESOLUTION_OPTIONS.map(option => (
+            <option value={option.value} selected={option.value === STREAM_DEFAULTS.resolution}>{option.label}</option>
+          ))}
         </select>
         <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9"></polyline>
@@ -58,8 +68,9 @@
       </label>
       <div class="select-wrapper">
         <select id="aspectMode">
-          <option value="preserve" selected>Preserve Laptop Aspect Ratio</option>
-          <option value="stretch">Stretch to HDMI Display</option>
+          {ASPECT_OPTIONS.map(option => (
+            <option value={option.value} selected={option.value === STREAM_DEFAULTS.aspectMode}>{option.label}</option>
+          ))}
         </select>
         <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9"></polyline>
@@ -73,8 +84,9 @@
       </label>
       <div class="select-wrapper">
         <select id="fps">
-          <option value="30" selected>30 FPS</option>
-          <option value="60">60 FPS</option>
+          {FPS_OPTIONS.map(fps => (
+            <option value={fps} selected={fps === STREAM_DEFAULTS.fps}>{fps} FPS</option>
+          ))}
         </select>
         <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9"></polyline>
@@ -88,9 +100,9 @@
       </label>
       <div class="select-wrapper">
         <select id="codec">
-          <option value="H265" selected>HEVC / H.265 (Hardware Accelerated)</option>
-          <option value="H264">H.264 (Hardware Preferred)</option>
-          <option value="H264_SW">H.264 (Software Emulated)</option>
+          {CODEC_OPTIONS.map(option => (
+            <option value={option.value} selected={option.value === STREAM_DEFAULTS.codec}>{option.label}</option>
+          ))}
         </select>
         <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9"></polyline>
@@ -104,11 +116,9 @@
       </label>
       <div class="select-wrapper">
         <select id="bitrate">
-          <option value="auto" selected>Auto (Optimal Quality)</option>
-          <option value="3">Low (3 Mbps)</option>
-          <option value="8">Balanced (8 Mbps)</option>
-          <option value="16">High Quality (16 Mbps)</option>
-          <option value="30">Maximum Quality (30 Mbps)</option>
+          {BITRATE_OPTIONS.map(option => (
+            <option value={option.value} selected={option.value === STREAM_DEFAULTS.bitrate}>{option.label}</option>
+          ))}
         </select>
         <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9"></polyline>
@@ -122,9 +132,9 @@
       </label>
       <div class="select-wrapper">
         <select id="latencyMode">
-          <option value="ULL" selected>ULL (Ultra Low Latency - Default)</option>
-          <option value="balanced">Balanced (Standard LAN)</option>
-          <option value="quality">High Quality Video (Buffered)</option>
+          {LATENCY_OPTIONS.map(option => (
+            <option value={option.value} selected={option.value === STREAM_DEFAULTS.latency}>{option.label}</option>
+          ))}
         </select>
         <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9"></polyline>

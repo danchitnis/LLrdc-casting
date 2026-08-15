@@ -13,6 +13,8 @@ use drm::Device as DrmDevice;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdidInfo {
     pub name: String,
@@ -27,9 +29,9 @@ impl Default for EdidInfo {
         Self {
             name: "HDMI Monitor".to_string(),
             conn_type: "HDMI-A".to_string(),
-            max_res: "1920x1080".to_string(),
-            panel_res: "1920x1080".to_string(),
-            max_fps: 60,
+            max_res: format!("{}x{}", config::display::DEFAULT_MAX_WIDTH, config::display::DEFAULT_MAX_HEIGHT),
+            panel_res: format!("{}x{}", config::display::DEFAULT_MAX_WIDTH, config::display::DEFAULT_MAX_HEIGHT),
+            max_fps: config::display::DEFAULT_MAX_FPS,
         }
     }
 }
@@ -54,7 +56,7 @@ pub fn drop_master(card: &Card) {
 
 /// Open active DRM display card (`/dev/dri/card0`)
 pub fn open_display_card() -> Result<Card, Box<dyn std::error::Error>> {
-    for i in 0..4 {
+    for i in 0..config::display::DRM_CARD_SCAN_LIMIT {
         let card_path = format!("/dev/dri/card{}", i);
         if let Ok(file) = OpenOptions::new().read(true).write(true).open(&card_path) {
             let card = Card(file);
@@ -63,7 +65,7 @@ pub fn open_display_card() -> Result<Card, Box<dyn std::error::Error>> {
                     println!("[DRM SUCCESS] Opened display card: {}", card_path);
 
                     let mut last_err = None;
-                    for _attempt in 1..=10 {
+                    for _attempt in 1..=config::display::DRM_CONNECT_ATTEMPTS {
                         let res1 = card.set_client_capability(drm::ClientCapability::UniversalPlanes, true);
                         let res2 = card.set_client_capability(drm::ClientCapability::Atomic, true);
                         if res1.is_ok() && res2.is_ok() {
@@ -72,7 +74,7 @@ pub fn open_display_card() -> Result<Card, Box<dyn std::error::Error>> {
                         if let Err(e) = res1.or(res2) {
                             last_err = Some(e);
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        std::thread::sleep(std::time::Duration::from_millis(config::display::DRM_CONNECT_RETRY_MS));
                     }
                     if let Some(e) = last_err {
                         return Err(Box::new(e));
@@ -388,9 +390,9 @@ pub fn extract_edid_info(card: &Card, conn_handle: connector::Handle, conn_info:
     let max_res = if max_w > 0 && max_h > 0 {
         format!("{}x{}", max_w, max_h)
     } else {
-        "1920x1080".to_string()
+        format!("{}x{}", config::display::DEFAULT_MAX_WIDTH, config::display::DEFAULT_MAX_HEIGHT)
     };
-    let max_fps = if max_fps > 0 { max_fps } else { 60 };
+    let max_fps = if max_fps > 0 { max_fps } else { config::display::DEFAULT_MAX_FPS };
     if panel_w == 0 || panel_h == 0 {
         panel_w = max_w;
         panel_h = max_h;
@@ -398,7 +400,7 @@ pub fn extract_edid_info(card: &Card, conn_handle: connector::Handle, conn_info:
     let panel_res = if panel_w > 0 && panel_h > 0 {
         format!("{}x{}", panel_w, panel_h)
     } else {
-        "1920x1080".to_string()
+        format!("{}x{}", config::display::DEFAULT_MAX_WIDTH, config::display::DEFAULT_MAX_HEIGHT)
     };
 
     let name = raw_edid_bytes
