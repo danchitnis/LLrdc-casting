@@ -393,6 +393,18 @@ The server discovers:
 
 The server exposes signal and panel geometry in `TelemetryMessage::Status`.
 
+Refresh-rate telemetry keeps the active mode separate from capability:
+
+- `display_fps` is the currently negotiated HDMI scanout rate (for example,
+  30 Hz).
+- `display_max_fps` is the highest refresh rate advertised by the monitor
+  EDID/driver (for example, 60 Hz), for diagnostics and capability reporting.
+  It is not necessarily the currently usable scanout rate.
+
+The client gates its FPS selector on `display_fps`, so a 60 FPS option is
+disabled while the active HDMI mode is 30 Hz, even if a faster mode is
+advertised.
+
 ### Client
 
 The client receives and stores:

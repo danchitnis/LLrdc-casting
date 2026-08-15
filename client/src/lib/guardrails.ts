@@ -10,6 +10,42 @@ export interface EncodedDimensions {
   height: number;
 }
 
+/**
+ * Check a requested stream rate against the currently negotiated HDMI mode.
+ * The driver/EDID may advertise faster modes, but they are not usable until
+ * the receiver has actually negotiated one of those modes.
+ */
+export function isFrameRateWithinDisplayMode(
+  requestedFps: number,
+  displayRefreshFps?: number,
+): boolean {
+  return !displayRefreshFps || displayRefreshFps <= 0 || requestedFps <= displayRefreshFps;
+}
+
+/** Update the FPS selector from the receiver's active HDMI refresh rate. */
+export function updateDisplayFpsGuardrails(displayRefreshFps?: number): void {
+  const fpsSelect = document.getElementById('fps') as HTMLSelectElement | null;
+  if (!fpsSelect || !displayRefreshFps || displayRefreshFps <= 0) return;
+
+  Array.from(fpsSelect.options).forEach(option => {
+    const optionFps = Number.parseInt(option.value, 10);
+    if (!Number.isFinite(optionFps)) return;
+    const allowed = isFrameRateWithinDisplayMode(optionFps, displayRefreshFps);
+    option.disabled = !allowed;
+    if (allowed && option.textContent?.includes('(Unsupported by display)')) {
+      option.textContent = option.textContent.replace(' (Unsupported by display)', '');
+    } else if (!allowed && !option.textContent?.includes('(Unsupported by display)')) {
+      option.textContent = `${option.textContent || `${optionFps} FPS`} (Unsupported by display)`;
+    }
+  });
+
+  const selected = Number.parseInt(fpsSelect.value, 10);
+  if (!isFrameRateWithinDisplayMode(selected, displayRefreshFps)) {
+    const fallback = Array.from(fpsSelect.options).find(option => !option.disabled);
+    if (fallback) fpsSelect.value = fallback.value;
+  }
+}
+
 export function isCodecResolutionAllowed(codec: string, dimensions: EncodedDimensions): boolean {
   return codec === 'H265' || (dimensions.width <= 1920 && dimensions.height <= 1088);
 }

@@ -9,6 +9,14 @@ use std::sync::{Arc, Mutex};
 
 pub type SharedWriter = Arc<Mutex<std::sync::mpsc::SyncSender<Vec<u8>>>>;
 
+// The RK3399 HDMI bridge advertises a 120x70 mm 4K mode. kmssink turns that
+// device aspect ratio into a 15/16 pixel aspect ratio. Apply that correction
+// to the parsed bitstream caps before the V4L2 decoder: the decoder then
+// propagates it onto its native DMA-BUF output, keeping the decoder -> KMS
+// path zero-copy. Applying it after decode with capssetter drops the
+// memory:DMABuf feature and forces a slow system-memory presentation path.
+const KMS_DEVICE_PIXEL_ASPECT_RATIO: &str = "15/16";
+
 pub struct PlaybackEngine {
     pub child: Child,
     pub writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
@@ -102,15 +110,18 @@ pub fn start_persistent_playback(
             "rawvideoparse".to_string(), "format=bgra".to_string(), format!("width={width}"), format!("height={height}"), "framerate=1/1".to_string(), "!".to_string(),
         ]);
     } else {
-        let (parser, decoder) = if norm_codec == "h264" {
-            ("h264parse", "v4l2slh264dec")
+        let (parser, bitstream_caps, decoder) = if norm_codec == "h264" {
+            ("h264parse", "video/x-h264", "v4l2slh264dec")
         } else {
-            ("h265parse", "v4l2slh265dec")
+            ("h265parse", "video/x-h265", "v4l2slh265dec")
         };
         println!("[PLAYBACK STARTUP] Initializing persistent GStreamer pipeline for {norm_codec} ({parser} -> {decoder}) at t=0ms");
         gst_args.extend([
             "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), "blocksize=65536".to_string(), "!".to_string(),
             parser.to_string(), "config-interval=-1".to_string(), "!".to_string(),
+            "capssetter".to_string(),
+            format!("caps={bitstream_caps},pixel-aspect-ratio=(fraction){KMS_DEVICE_PIXEL_ASPECT_RATIO}"),
+            "replace=false".to_string(), "!".to_string(),
             decoder.to_string(), "!".to_string(),
         ]);
     }

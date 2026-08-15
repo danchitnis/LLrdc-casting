@@ -3,14 +3,13 @@
  */
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd};
+use std::os::unix::io::{AsFd, BorrowedFd};
 
 use drm::control::{
     connector, crtc,
     Device as ControlDevice, Mode,
 };
 use drm::Device as DrmDevice;
-use libc::c_int;
 
 use serde::{Deserialize, Serialize};
 
@@ -48,14 +47,9 @@ impl AsFd for Card {
 impl DrmDevice for Card {}
 impl ControlDevice for Card {}
 
-#[link(name = "drm")]
-extern "C" {
-    fn drmDropMaster(fd: c_int) -> c_int;
-}
-
 /// Explicitly relinquish DRM master before another process takes over KMS.
 pub fn drop_master(card: &Card) {
-    unsafe { let _ = drmDropMaster(card.0.as_raw_fd()); }
+    let _ = card.release_master_lock();
 }
 
 /// Open active DRM display card (`/dev/dri/card0`)

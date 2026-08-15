@@ -67,8 +67,7 @@ impl RawDashboardFeeder {
             pairing.cloud_ip.as_deref(),
         );
 
-        let raw_bytes =
-            unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
+        let raw_bytes = bytemuck::cast_slice::<u32, u8>(&pixels);
         let frame = raw_bytes.to_vec();
 
         if let Ok(writer) = self.writer_tx.lock() {
@@ -182,8 +181,7 @@ impl PersistentDashboardEncoder {
             pairing.cloud_ip.as_deref(),
         );
 
-        let raw_bytes: &[u8] =
-            unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
+        let raw_bytes = bytemuck::cast_slice::<u32, u8>(&pixels);
 
         if self
             .stdin
@@ -271,5 +269,18 @@ mod tests {
     fn idle_dashboard_preserves_active_signal_resolution() {
         assert_eq!(raw_dashboard_dimensions(3840, 2160), (3840, 2160));
         assert_eq!(raw_dashboard_dimensions(1920, 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn dashboard_pixels_preserve_native_byte_layout() {
+        let pixels = [0x1122_3344_u32, 0xAABB_CCDD_u32];
+        let bytes = bytemuck::cast_slice::<u32, u8>(&pixels);
+
+        assert_eq!(bytes.len(), pixels.len() * std::mem::size_of::<u32>());
+        let expected = pixels
+            .iter()
+            .flat_map(|pixel| pixel.to_ne_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, expected.as_slice());
     }
 }

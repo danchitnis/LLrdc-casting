@@ -5,17 +5,25 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use thread_priority::unix::{RealtimeThreadSchedulePolicy, ThreadSchedulePolicy};
+use thread_priority::{set_thread_priority_and_policy, ThreadPriority, ThreadPriorityValue};
 
 pub fn elevate_process_priority() {
-    unsafe {
-        let param = libc::sched_param { sched_priority: 20 };
-        if libc::sched_setscheduler(0, libc::SCHED_FIFO, &param as *const _) == 0 {
-            println!("[PRIORITY] Successfully elevated main process to SCHED_FIFO priority 20");
-        } else {
-            let err = *libc::__errno_location();
-            println!("[PRIORITY] SCHED_FIFO elevation not permitted (errno={err}); setting niceness to -10...");
-            libc::setpriority(libc::PRIO_PROCESS, 0, -10);
-        }
+    let fifo_policy = ThreadSchedulePolicy::Realtime(RealtimeThreadSchedulePolicy::Fifo);
+    let fifo_priority = ThreadPriority::Crossplatform(
+        ThreadPriorityValue::try_from(20u8).expect("20 is a valid cross-platform priority"),
+    );
+    if let Err(error) = set_thread_priority_and_policy(
+        thread_priority::unix::thread_native_id(),
+        fifo_priority,
+        fifo_policy,
+    ) {
+        println!(
+            "[PRIORITY] SCHED_FIFO elevation not permitted ({error}); setting niceness to -10..."
+        );
+        let _ = rustix::process::setpriority_process(None, -10);
+    } else {
+        println!("[PRIORITY] Successfully elevated main process to SCHED_FIFO priority 20");
     }
 }
 

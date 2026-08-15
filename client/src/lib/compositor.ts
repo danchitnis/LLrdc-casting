@@ -116,6 +116,15 @@ export function formatPanelContentRect(layout: CompositorLayout): string {
   return `<${layout.panelContentX},${layout.panelContentY},${layout.panelContentWidth},${layout.panelContentHeight}>`;
 }
 
+export function canPassThroughFrame(
+  sourceWidth: number,
+  sourceHeight: number,
+  targetWidth: number,
+  targetHeight: number,
+): boolean {
+  return sourceWidth === targetWidth && sourceHeight === targetHeight;
+}
+
 export class VideoFrameCompositor {
   private readonly canvas: OffscreenCanvas;
   private readonly context: OffscreenCanvasRenderingContext2D;
@@ -152,6 +161,13 @@ export class VideoFrameCompositor {
   }
 
   compose(frame: VideoFrame): VideoFrame {
+    // A frame already at the configured encoder dimensions needs no scaling,
+    // letterboxing, or pixel copy. Returning it preserves the zero-copy path
+    // for native monitor capture and for codec-aligned synthetic frames.
+    if (canPassThroughFrame(frame.displayWidth, frame.displayHeight, this.targetWidth, this.targetHeight)) {
+      return frame;
+    }
+
     const layout = this.layoutFor(frame.displayWidth, frame.displayHeight);
 
     if (this.aspectMode === 'preserve') {

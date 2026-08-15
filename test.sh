@@ -43,6 +43,7 @@ FPS="${TEST_STREAM_FPS:-${STREAM_FPS:-60}}"
 DURATION="${TEST_STREAM_DURATION:-${STREAM_DURATION:-20}}"
 STREAM_FILE=""
 DEPLOY=0
+CODED_RESOLUTION=""
 
 usage() {
   cat <<'EOF'
@@ -92,12 +93,23 @@ fi
 if [[ ! "$FPS" =~ ^[1-9][0-9]*$ ]] || [[ ! "$DURATION" =~ ^[1-9][0-9]*$ ]]; then
   echo "FPS and duration must be positive integers." >&2; exit 2
 fi
+
+# RK3399's stateless decoder needs macroblock-aligned coded surfaces.  The
+# browser keeps the requested display size (for example 1920x1080) but pads
+# the encoded surface to 16-pixel boundaries (1920x1088).  Use the same coded
+# dimensions for the canned smoke stream instead of the decoder's slow
+# unaligned path.
+requested_width="${RESOLUTION%x*}"
+requested_height="${RESOLUTION#*x}"
+coded_width=$(( (requested_width + 15) / 16 * 16 ))
+coded_height=$(( (requested_height + 15) / 16 * 16 ))
+CODED_RESOLUTION="${coded_width}x${coded_height}"
 if [[ -z "$STREAM_FILE" ]]; then
-  STREAM_FILE="${SCRIPT_DIR}/client/assets/stream_${RESOLUTION}_${FPS}fps_h265.265"
+  STREAM_FILE="${SCRIPT_DIR}/client/assets/stream_${CODED_RESOLUTION}_${FPS}fps_h265.265"
 fi
 if [[ ! -s "$STREAM_FILE" ]]; then
   echo "Missing HEVC stream: $STREAM_FILE" >&2
-  echo "Create it with: ./prepare_stream.sh --h265 --res $RESOLUTION --fps $FPS" >&2
+  echo "Create it with: ./prepare_stream.sh --h265 --res $CODED_RESOLUTION --fps $FPS -i client/assets/bigbuckbunny_1080p.mp4" >&2
   exit 2
 fi
 if (( DEPLOY )); then
@@ -108,8 +120,24 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$BOARD_IP" 'docker ps --format "{
   echo "Receiver container is not running; use --deploy to build and start it." >&2; exit 1
 fi
 
-echo "Testing HEVC ${RESOLUTION}@${FPS} for ${DURATION}s -> ${BOARD_IP}:${PORT}"
-node "${SCRIPT_DIR}/client/client.mjs" "$BOARD_IP" "$PORT" "$RESOLUTION" "$FPS" H265 "$STREAM_FILE" -d "$DURATION"
+# Report both sides of the display refresh-rate distinction. The active mode
+# is what the receiver is scanning out right now; the EDID maximum is the
+# capability advertised by the monitor. A 30 Hz active mode makes this a
+# stress test when a higher-FPS sender is requested.
+display_mode_log=$(ssh -o BatchMode=yes "$BOARD_IP" 'docker logs --since 24h llrdc-casting 2>&1 | grep "\[DRM AUTODETECT SUCCESS\]" | tail -1' || true)
+active_display_fps=$(printf '%s\n' "$display_mode_log" | sed -nE 's/.*Screen Resolution: [0-9]+x[0-9]+ @ ([0-9]+)Hz .*/\1/p')
+max_display_fps=$(printf '%s\n' "$display_mode_log" | sed -nE 's/.*Max: [0-9]+x[0-9]+@([0-9]+)Hz.*/\1/p')
+if [[ -n "$active_display_fps" ]]; then
+  echo "Receiver display mode: active ${active_display_fps} Hz${max_display_fps:+, advertised maximum ${max_display_fps} Hz}"
+  if (( FPS > active_display_fps )); then
+    echo "[WARNING] ${FPS} FPS is above the active ${active_display_fps} Hz scanout; this is a transport/decoder stress test, not a mode-matched display-FPS test." >&2
+  fi
+else
+  echo "[WARNING] Receiver display refresh could not be read from its DRM startup telemetry." >&2
+fi
+
+echo "Testing HEVC ${RESOLUTION}@${FPS} (coded ${CODED_RESOLUTION}) for ${DURATION}s -> ${BOARD_IP}:${PORT}"
+node "${SCRIPT_DIR}/client/client.mjs" "$BOARD_IP" "$PORT" "$CODED_RESOLUTION" "$FPS" H265 "$STREAM_FILE" -d "$DURATION"
 sleep 1
 memory=$(ssh -o BatchMode=yes "$BOARD_IP" 'docker stats --no-stream --format "{{.MemUsage}}" llrdc-casting')
 playback=$(ssh -o BatchMode=yes "$BOARD_IP" 'docker logs llrdc-casting 2>&1 | grep "\[PLAYBACK" | tail -1 || true')

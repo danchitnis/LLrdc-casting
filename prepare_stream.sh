@@ -151,6 +151,12 @@ case "$RAW_RES" in
     ;;
 esac
 
+# RK3399's stateless V4L2 decoders consume macroblock-aligned coded
+# dimensions.  Keep the requested preset for source selection, but pad the
+# encoded surface to 16-pixel boundaries (1080p therefore becomes 1920x1088).
+CODED_WIDTH=$(( (WIDTH + 15) / 16 * 16 ))
+CODED_HEIGHT=$(( (HEIGHT + 15) / 16 * 16 ))
+
 # Parse codec
 CODEC_UPPER=$(echo "$RAW_CODEC" | tr '[:lower:]' '[:upper:]')
 if [ "$CODEC_UPPER" = "H265" ] || [ "$CODEC_UPPER" = "HEVC" ]; then
@@ -167,7 +173,7 @@ else
   EXT="264"
 fi
 
-OUTPUT_FILE="${ASSETS_DIR}/stream_${WIDTH}x${HEIGHT}_${FPS}fps_${CODEC_LOWER}.${EXT}"
+OUTPUT_FILE="${ASSETS_DIR}/stream_${CODED_WIDTH}x${CODED_HEIGHT}_${FPS}fps_${CODEC_LOWER}.${EXT}"
 
 # Check input MP4 file
 INPUT_FILE="$CUSTOM_INPUT"
@@ -187,7 +193,8 @@ fi
 echo "====================================================="
 echo " Preparing Stream-Ready Bitstream File"
 echo " Source Video : ${INPUT_FILE}"
-echo " Resolution   : ${WIDTH}x${HEIGHT} (${RES_NAME})"
+echo " Requested    : ${WIDTH}x${HEIGHT} (${RES_NAME})"
+echo " Coded        : ${CODED_WIDTH}x${CODED_HEIGHT} (16-pixel aligned)"
 echo " Frame Rate   : ${FPS} FPS"
 echo " Codec        : ${CODEC_NAME} (${FFMPEG_CODEC})"
 echo " Output File  : ${OUTPUT_FILE}"
@@ -215,7 +222,7 @@ fi
 
 if [ "$CODEC_NAME" = "H265" ]; then
   "$FFMPEG_BIN" -y -i "$INPUT_FILE" \
-    -vf "scale=${WIDTH}:${HEIGHT}" \
+    -vf "scale=${CODED_WIDTH}:${CODED_HEIGHT}" \
     -r "$FPS" \
     -c:v "$FFMPEG_CODEC" \
     -preset ultrafast \
@@ -226,7 +233,7 @@ if [ "$CODEC_NAME" = "H265" ]; then
     "$OUTPUT_FILE"
 else
   "$FFMPEG_BIN" -y -i "$INPUT_FILE" \
-    -vf "scale=${WIDTH}:${HEIGHT}" \
+    -vf "scale=${CODED_WIDTH}:${CODED_HEIGHT}" \
     -r "$FPS" \
     -c:v "$FFMPEG_CODEC" \
     -preset ultrafast \

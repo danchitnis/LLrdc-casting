@@ -5,6 +5,11 @@ interface CapturableCanvas extends HTMLCanvasElement {
 export interface SyntheticStreamConfig {
   width: number;
   height: number;
+  /** Canvas dimensions used by the encoder.  Synthetic output may need the
+   * codec-aligned height (for example 1920x1088 for the 1080p choice) while
+   * the user-facing source remains 1920x1080. */
+  renderWidth?: number;
+  renderHeight?: number;
   encodedWidth: number;
   encodedHeight: number;
   fps: number;
@@ -32,6 +37,8 @@ export function createSyntheticScreenStream(
   isStreamingCheck: () => boolean
 ): MediaStream {
   const { width, height, fps } = config;
+  const renderWidth = config.renderWidth ?? width;
+  const renderHeight = config.renderHeight ?? height;
   let canvas = document.getElementById('screenCanvas') as HTMLCanvasElement | null;
   if (!canvas) {
     canvas = document.createElement('canvas');
@@ -39,8 +46,8 @@ export function createSyntheticScreenStream(
     canvas.style.display = 'none';
     document.body.appendChild(canvas);
   }
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = renderWidth;
+  canvas.height = renderHeight;
   const ctx = canvas.getContext('2d');
 
   let frame = 0;
@@ -52,20 +59,20 @@ export function createSyntheticScreenStream(
     }
     frame++;
     ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 0, width, height);
+    ctx.fillRect(0, 0, renderWidth, renderHeight);
 
     ctx.strokeStyle = '#1e293b';
     ctx.lineWidth = 2;
-    for (let x = 0; x < width; x += 100) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+    for (let x = 0; x < renderWidth; x += 100) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, renderHeight); ctx.stroke();
     }
-    for (let y = 0; y < height; y += 100) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+    for (let y = 0; y < renderHeight; y += 100) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(renderWidth, y); ctx.stroke();
     }
 
     const time = frame / fps;
-    const x = (width / 2) + Math.cos(time * 2) * (width / 3);
-    const y = (height / 2) + Math.sin(time * 3) * (height / 3);
+    const x = (renderWidth / 2) + Math.cos(time * 2) * (renderWidth / 3);
+    const y = (renderHeight / 2) + Math.sin(time * 3) * (renderHeight / 3);
 
     const grad = ctx.createRadialGradient(x, y, 10, x, y, 120);
     grad.addColorStop(0, '#38bdf8');
@@ -73,8 +80,8 @@ export function createSyntheticScreenStream(
     ctx.fillStyle = grad;
     ctx.beginPath(); ctx.arc(x, y, 120, 0, Math.PI * 2); ctx.fill();
 
-    const margin = Math.max(24, Math.round(Math.min(width, height) * 0.05));
-    const titleSize = Math.max(24, Math.round(Math.min(width, height) * 0.045));
+    const margin = Math.max(24, Math.round(Math.min(renderWidth, renderHeight) * 0.05));
+    const titleSize = Math.max(24, Math.round(Math.min(renderWidth, renderHeight) * 0.045));
     const detailSize = Math.max(18, Math.round(titleSize * 0.62));
     const lineHeight = Math.round(detailSize * 1.5);
     const statusLines = formatSyntheticStatus(config, frame);

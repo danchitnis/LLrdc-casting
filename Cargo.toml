@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bytemuck = "1.25"
 drm = "0.15"
 nix = { version = "0.31", features = ["mman", "fs", "ioctl", "net"] }
-libc = "0.2"
+rustix = { version = "1.1", features = ["net", "process"] }
+thread-priority = "3.1"
 tokio = { version = "1.44", features = ["full"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2.2"

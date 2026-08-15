@@ -76,6 +76,11 @@ pub enum TelemetryMessage {
         edid_max_res: String,
         #[serde(default)]
         edid_max_fps: u32,
+        /// Highest refresh rate advertised by the monitor EDID. This is a
+        /// capability, not necessarily the refresh rate of the active HDMI
+        /// mode (`display_fps`).
+        #[serde(default)]
+        display_max_fps: u32,
         #[serde(default)]
         capture_resolution: String,
         #[serde(default)]

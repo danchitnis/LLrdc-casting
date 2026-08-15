@@ -13,6 +13,7 @@ import {
   getCodecString,
   alignEncoderDimensions,
   isCodecResolutionAllowed,
+  updateDisplayFpsGuardrails,
 } from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
 
@@ -82,6 +83,7 @@ export interface ServerStatusMessage {
   edid_type?: string;
   edid_max_res?: string;
   edid_max_fps?: number;
+  display_max_fps?: number;
 }
 
 declare global {
@@ -534,6 +536,8 @@ export async function toggleCasting(): Promise<void> {
       mediaStream = createSyntheticScreenStream({
         width: selectedWidth,
         height: selectedHeight,
+        renderWidth: activeWidth,
+        renderHeight: activeHeight,
         encodedWidth: activeWidth,
         encodedHeight: activeHeight,
         fps: targetFps,
@@ -583,8 +587,8 @@ export async function toggleCasting(): Promise<void> {
     if (videoSource !== 'synthetic' && displaySurface !== 'monitor') {
       throw new Error(`A full monitor is required; Chrome returned ${displaySurface || 'unknown'} capture`);
     }
-    const rawWidth = trackSettings.width;
-    const rawHeight = trackSettings.height;
+    const rawWidth = trackSettings.width || (videoSource === 'synthetic' ? activeWidth : undefined);
+    const rawHeight = trackSettings.height || (videoSource === 'synthetic' ? activeHeight : undefined);
     if (!rawWidth || !rawHeight) {
       throw new Error('Chrome did not report native capture dimensions');
     }
@@ -818,7 +822,7 @@ export async function toggleCasting(): Promise<void> {
             throw new Error('Video compositor is not initialized');
           }
           videoEncoder.encode(composedFrame, { keyFrame: needKeyFrame });
-          composedFrame.close();
+          if (composedFrame !== rawFrame) composedFrame.close();
           rawFrame.close();
         } else {
           rawFrame.close();
@@ -839,6 +843,11 @@ export async function toggleCasting(): Promise<void> {
 
 export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
   if (!msg || !msg.state) return;
+
+  // Gate the sender on the active HDMI scanout mode. The EDID/driver maximum
+  // is reported separately for diagnostics but does not mean that mode is
+  // currently usable by the monitor.
+  updateDisplayFpsGuardrails(msg.display_fps ?? msg.display_max_fps ?? msg.edid_max_fps);
 
   const signalResolution = parseResolution(msg.signal_resolution || msg.display_resolution);
   const panelResolution = parseResolution(msg.panel_resolution || msg.edid_max_res);

@@ -173,7 +173,7 @@ where
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Access-Control-Allow-Origin: *\r\n\
-         Cache-Control: no-cache\r\n\
+         Cache-Control: no-store\r\n\
          Connection: close\r\n\r\n",
         body.len()
     );
@@ -184,6 +184,62 @@ where
         stream.write_all(response_headers.as_bytes()).await?;
         stream.write_all(body).await?;
     }
+    stream.flush().await?;
+    Ok(())
+}
+
+fn https_redirect_location(initial_buf: &[u8], https_port: u16) -> String {
+    let request = String::from_utf8_lossy(initial_buf);
+    let request_line = request.lines().next().unwrap_or("");
+    let mut request_parts = request_line.split_whitespace();
+    let _method = request_parts.next();
+    let path = request_parts
+        .next()
+        .filter(|path| path.starts_with('/'))
+        .unwrap_or("/");
+
+    let host = request
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim().eq_ignore_ascii_case("host").then_some(value.trim())
+        })
+        .filter(|host| !host.is_empty() && !host.chars().any(char::is_control))
+        .unwrap_or_else(|| "localhost");
+
+    let authority = if host.starts_with('[') && host.contains("]:") {
+        host.to_string()
+    } else if host
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| port.parse::<u16>().is_ok())
+    {
+        host.to_string()
+    } else {
+        format!("{host}:{https_port}")
+    };
+
+    format!("https://{authority}{path}")
+}
+
+async fn redirect_http_to_https<S>(mut stream: S, https_port: u16) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut buf = [0u8; 4096];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let location = https_redirect_location(&buf[..n], https_port);
+    let response = format!(
+        "HTTP/1.1 308 Permanent Redirect\r\n\
+         Location: {location}\r\n\
+         Content-Length: 0\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\r\n"
+    );
+    stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
 }
@@ -285,8 +341,28 @@ pub async fn run_server(
                     }
                 }
             } else {
-                let _ = handle_connection(socket, &cert_hash, channel).await;
+                let _ = redirect_http_to_https(socket, port).await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::https_redirect_location;
+
+    #[test]
+    fn redirect_preserves_host_path_and_query() {
+        let request = b"GET /?pair=1 HTTP/1.1\r\nHost: 192.168.1.72:8080\r\n\r\n";
+        assert_eq!(
+            https_redirect_location(request, 8080),
+            "https://192.168.1.72:8080/?pair=1"
+        );
+    }
+
+    #[test]
+    fn redirect_uses_localhost_when_host_is_missing() {
+        let request = b"GET / HTTP/1.1\r\n\r\n";
+        assert_eq!(https_redirect_location(request, 8080), "https://localhost:8080/");
     }
 }

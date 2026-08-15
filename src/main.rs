@@ -2,6 +2,7 @@
 //! The atomic two-plane presenter is developed separately; this keeps HDMI
 //! playback on the proven pipeline while it is completed.
 #![deny(dead_code)]
+#![forbid(unsafe_code)]
 
 mod cert;
 mod admin;
@@ -174,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             edid_type: edid_info.conn_type.clone(),
                             edid_max_res: edid_info.max_res.clone(),
                             edid_max_fps: edid_info.max_fps,
+                            display_max_fps: edid_info.max_fps,
                             capture_resolution: String::new(),
                             encoded_resolution: String::new(),
                             aspect_mode: String::new(),
@@ -230,6 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             edid_type: edid_info.conn_type.clone(),
                             edid_max_res: edid_info.max_res.clone(),
                             edid_max_fps: edid_info.max_fps,
+                            display_max_fps: edid_info.max_fps,
                             capture_resolution: capture_res,
                             encoded_resolution: encoded_res,
                             aspect_mode: aspect_mode.to_string(),
@@ -271,6 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             edid_type: edid_info.conn_type.clone(),
                             edid_max_res: edid_info.max_res.clone(),
                             edid_max_fps: edid_info.max_fps,
+                            display_max_fps: edid_info.max_fps,
                             capture_resolution: capture_res,
                             encoded_resolution: encoded_res,
                             aspect_mode,
@@ -313,6 +317,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 edid_type: edid_info.conn_type.clone(),
                                  edid_max_res: edid_info.max_res.clone(),
                                  edid_max_fps: edid_info.max_fps,
+                                 display_max_fps: edid_info.max_fps,
                                  capture_resolution: String::new(),
                                  encoded_resolution: String::new(),
                                  aspect_mode: String::new(),
@@ -369,6 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     edid_type: edid_info.conn_type.clone(),
                                      edid_max_res: edid_info.max_res.clone(),
                                      edid_max_fps: edid_info.max_fps,
+                                     display_max_fps: edid_info.max_fps,
                                      capture_resolution: String::new(),
                                      encoded_resolution: String::new(),
                                      aspect_mode: String::new(),
@@ -412,6 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     edid_type: edid_info.conn_type.clone(),
                                      edid_max_res: edid_info.max_res.clone(),
                                      edid_max_fps: edid_info.max_fps,
+                                     display_max_fps: edid_info.max_fps,
                                      capture_resolution: String::new(),
                                      encoded_resolution: String::new(),
                                      aspect_mode: String::new(),
@@ -450,6 +457,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 edid_type: edid_info.conn_type.clone(),
                                 edid_max_res: edid_info.max_res.clone(),
                                 edid_max_fps: edid_info.max_fps,
+                                display_max_fps: edid_info.max_fps,
                                 capture_resolution: String::new(),
                                 encoded_resolution: String::new(),
                                 aspect_mode: String::new(),

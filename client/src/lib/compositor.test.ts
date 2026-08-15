@@ -1,4 +1,4 @@
-import { calculateCompositorLayout } from './compositor.ts';
+import { calculateCompositorLayout, canPassThroughFrame } from './compositor.ts';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -67,5 +67,8 @@ assert(Math.abs(
   stretch.panelContentWidth / stretch.panelContentHeight
     - preserve.panelContentWidth / preserve.panelContentHeight,
 ) > 0.01, 'preserve and stretch use distinct panel layouts');
+
+assert(canPassThroughFrame(1920, 1088, 1920, 1088), 'codec-aligned frames use the pass-through path');
+assert(!canPassThroughFrame(1920, 1080, 1920, 1088), 'unaligned 1080p frames still require composition');
 
 console.log('compositor aspect tests passed');

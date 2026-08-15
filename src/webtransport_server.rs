@@ -21,6 +21,10 @@ pub fn extract_cert_hash_hex(identity: &Identity) -> String {
     crate::cert::extract_cert_hash_hex(identity)
 }
 
+fn udp_receive_buffer_bytes(megabytes: usize) -> Option<usize> {
+    megabytes.checked_mul(1024 * 1024)
+}
+
 /// Start WebTransport QUIC UDP server on 0.0.0.0:4433 using existing identity
 pub async fn run_server_with_identity(
     identity: Identity,
@@ -87,18 +91,17 @@ pub async fn run_server_with_identity(
         if let Ok(socket) = tokio::net::UdpSocket::bind(("0.0.0.0", udp_port)).await {
             println!("[UDP RECEIVER] Listening on 0.0.0.0:{udp_port} for direct UDP video stream packets");
 
-            // Set socket receive buffer using nix/libc socket options
-            use std::os::unix::io::AsRawFd;
-            let raw_fd = socket.as_raw_fd();
-            let buf_size: libc::c_int = (buf_mb * 1024 * 1024) as libc::c_int;
-            unsafe {
-                libc::setsockopt(
-                    raw_fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_RCVBUF,
-                    &buf_size as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
+            // Set socket receive buffer using Rustix's safe socket-option wrapper.
+            if let Some(buf_size) = udp_receive_buffer_bytes(buf_mb) {
+                if let Err(error) =
+                    rustix::net::sockopt::set_socket_recv_buffer_size(&socket, buf_size)
+                {
+                    eprintln!(
+                        "[UDP RECEIVER] Could not set receive buffer to {buf_size} bytes: {error}"
+                    );
+                }
+            } else {
+                eprintln!("[UDP RECEIVER] UDP_BUFFER_SIZE_MB is too large; keeping the OS default");
             }
 
             let mut buf = [0u8; 65536];
@@ -133,6 +136,22 @@ pub async fn run_server_with_identity(
                 Err(e) => eprintln!("[WEBTRANSPORT] Session error: {}", e),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::udp_receive_buffer_bytes;
+
+    #[test]
+    fn udp_buffer_size_uses_megabytes() {
+        assert_eq!(udp_receive_buffer_bytes(8), Some(8 * 1024 * 1024));
+        assert_eq!(udp_receive_buffer_bytes(0), Some(0));
+    }
+
+    #[test]
+    fn udp_buffer_size_rejects_overflow() {
+        assert_eq!(udp_receive_buffer_bytes(usize::MAX), None);
     }
 }
 
