@@ -3,6 +3,9 @@ node_modules/
 client/node_modules/
 client/assets/*.h264
 client/assets/
+client/test-results/
+client/playwright-report/
+.artefact/
 bin/
 .DS_Store
 .astro/

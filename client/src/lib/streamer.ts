@@ -159,6 +159,12 @@ export function clearLogs(): void {
 }
 
 export function log(msg: string, isError = false): void {
+  const consoleMessage = `[LLRDC UI] ${msg}`;
+  if (isError) {
+    console.error(consoleMessage);
+  } else {
+    console.info(consoleMessage);
+  }
   const logDiv = document.getElementById('log');
   if (!logDiv) return;
   const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
@@ -399,6 +405,8 @@ export async function stopStreaming(): Promise<void> {
   }
   isStreaming = false;
   seqNum = 0;
+  const frameStat = document.getElementById('statFrameCount');
+  if (frameStat) frameStat.textContent = '0';
 
   if (controlIsConnected()) {
     try { await sendControlMessage({ type: 'stop' }); } catch (e) {}

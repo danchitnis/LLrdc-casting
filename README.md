@@ -96,6 +96,39 @@ Run all Rust unit tests locally without connecting to or changing the receiver:
 ./server.sh --test
 ```
 
+## Browser Hardware Regression Suites
+
+Install the client test dependencies once, including Playwright's test runner:
+
+```bash
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix client ci
+```
+
+The local codec suite deploys with Cloudflare discovery disabled, pairs directly
+with the receiver, and exercises the synthetic HEVC/H.264 matrix in installed
+headed Google Chrome:
+
+```bash
+./test_browser.sh codec
+```
+
+The cloud suite is intentionally separate. It deploys with discovery enabled,
+waits for receiver registration, obtains an unexpired code from D1, pairs
+through `cast.llrdc.com`, and runs one HEVC handoff cycle:
+
+```bash
+./test_browser.sh cloud
+```
+
+Run both suites in sequence with `./test_browser.sh all`. A board address can
+be supplied explicitly with `--board-ip=<address>`; otherwise the `board.ip`
+value in `config.yaml` is used. The suites require SSH/Docker access to the
+RK3399, a working HDMI mode, installed branded Chrome with the required codec
+support, and (for `cloud`) authenticated Wrangler/D1 access. Failure artifacts
+are written below the repository-level `.artefact/` directory and are ignored
+by git. Each invocation cleans that directory first; `all` keeps its codec and
+cloud results in separate subdirectories of one run.
+
 The deployment build runs the same tests before compiling and transferring the
 release binary. A test failure stops the deployment before the receiver is
 stopped or replaced.

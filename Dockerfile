@@ -4,6 +4,9 @@ FROM node:latest AS html-builder
 ARG BUILD_DATE
 WORKDIR /app/client
 COPY client/package*.json ./
+# Hardware browser tests use an installed branded Chrome on the sender; never
+# download Playwright's bundled browsers into the production build image.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm ci || npm install
 COPY client ./
 RUN npm run build
