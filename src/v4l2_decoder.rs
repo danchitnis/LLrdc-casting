@@ -8,10 +8,12 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::packet::{
-    CHUNK_BYTES, H264_MAX_HEIGHT, H264_MAX_WIDTH, H265_MAX_HEIGHT, H265_MAX_WIDTH,
-    MAX_ACCESS_UNIT_BYTES, MAX_IN_FLIGHT_ACCESS_UNITS, PACKET_HEADER_BYTES,
+    CHUNK_BYTES, CHUNK_COUNT_BYTES, CHUNK_COUNT_OFFSET, CHUNK_INDEX_BYTES,
+    CHUNK_INDEX_OFFSET, CODEC_TAG_BYTES, DIMENSION_BYTES, H264_MAX_HEIGHT, H264_MAX_WIDTH,
+    H264_TAG, H265_MAX_HEIGHT, H265_MAX_WIDTH, H265_TAG, HEIGHT_OFFSET, LEGACY_H264_TAG,
+    LEGACY_H265_TAG, MAX_ACCESS_UNIT_BYTES, MAX_IN_FLIGHT_ACCESS_UNITS,
+    PACKET_HEADER_BYTES, SEQUENCE_BYTES, SEQUENCE_OFFSET, STOP_TAG, WIDTH_OFFSET,
 };
-use crate::config::transport::DATAGRAM_TAG_BYTES;
 
 const HEADER_LEN: usize = PACKET_HEADER_BYTES;
 const MAX_CHUNKS: usize = (MAX_ACCESS_UNIT_BYTES + CHUNK_BYTES - 1) / CHUNK_BYTES;
@@ -55,7 +57,7 @@ pub fn reset_decoder_pipeline() {
 }
 
 pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
-    if packet.len() >= 4 && &packet[..4] == b"STOP" {
+    if packet.len() >= STOP_TAG.len() && &packet[..STOP_TAG.len()] == STOP_TAG {
         reset_decoder_pipeline();
         return Some(VideoFrame {
             seq: 0,
@@ -69,13 +71,16 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     if packet.len() <= HEADER_LEN { return None; }
     STATS_CHUNKS.fetch_add(1, Ordering::Relaxed);
 
-    let codec = match &packet[..DATAGRAM_TAG_BYTES] {
-        b"H265" | b"HEVC" => "hevc",
-        b"H264" | b"VIDC" => "h264",
-        _ => return None,
+    let tag = &packet[..CODEC_TAG_BYTES];
+    let codec = if tag == H265_TAG || tag == LEGACY_H265_TAG {
+        "hevc"
+    } else if tag == H264_TAG || tag == LEGACY_H264_TAG {
+        "h264"
+    } else {
+        return None;
     };
     let seq = u32::from_be_bytes(
-        packet[DATAGRAM_TAG_BYTES..DATAGRAM_TAG_BYTES + 4]
+        packet[SEQUENCE_OFFSET..SEQUENCE_OFFSET + SEQUENCE_BYTES]
             .try_into()
             .ok()?,
     );
@@ -91,14 +96,26 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
         }
     }
 
-    let chunk_index_offset = DATAGRAM_TAG_BYTES + 4;
-    let total_chunks_offset = chunk_index_offset + 2;
-    let width_offset = total_chunks_offset + 2;
-    let height_offset = width_offset + 2;
-    let chunk_index = u16::from_be_bytes(packet[chunk_index_offset..chunk_index_offset + 2].try_into().ok()?);
-    let total_chunks = u16::from_be_bytes(packet[total_chunks_offset..total_chunks_offset + 2].try_into().ok()?);
-    let width = u16::from_be_bytes(packet[width_offset..width_offset + 2].try_into().ok()?);
-    let height = u16::from_be_bytes(packet[height_offset..height_offset + 2].try_into().ok()?);
+    let chunk_index = u16::from_be_bytes(
+        packet[CHUNK_INDEX_OFFSET..CHUNK_INDEX_OFFSET + CHUNK_INDEX_BYTES]
+            .try_into()
+            .ok()?,
+    );
+    let total_chunks = u16::from_be_bytes(
+        packet[CHUNK_COUNT_OFFSET..CHUNK_COUNT_OFFSET + CHUNK_COUNT_BYTES]
+            .try_into()
+            .ok()?,
+    );
+    let width = u16::from_be_bytes(
+        packet[WIDTH_OFFSET..WIDTH_OFFSET + DIMENSION_BYTES]
+            .try_into()
+            .ok()?,
+    );
+    let height = u16::from_be_bytes(
+        packet[HEIGHT_OFFSET..HEIGHT_OFFSET + DIMENSION_BYTES]
+            .try_into()
+            .ok()?,
+    );
     if total_chunks == 0 || total_chunks as usize > MAX_CHUNKS || chunk_index >= total_chunks || width == 0 || height == 0 {
         return None;
     }
@@ -166,9 +183,9 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
         let total_attempts = completed_count + timeout_cnt + evicted_cnt;
         let rate = if total_attempts > 0 {
             (completed_count as f64 / total_attempts as f64)
-                * crate::config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT as f64
+                * crate::config::telemetry::PERCENT_SCALE
         } else {
-            crate::config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT as f64
+            crate::config::telemetry::PERCENT_SCALE
         };
         println!("[FRAME INTEGRITY] Completed={completed_count} DroppedTimeout={timeout_cnt} Evicted={evicted_cnt} TotalChunks={chunks_cnt} DeliveryRate={rate:.1}%");
     }
@@ -249,7 +266,14 @@ fn validate_access_unit_bitstream(frame: &VideoFrame) {
 mod tests {
     use super::*;
     fn packet(seq: u32, index: u16, total: u16, payload: &[u8]) -> Vec<u8> {
-        let mut out = b"H265".to_vec(); out.extend_from_slice(&seq.to_be_bytes()); out.extend_from_slice(&index.to_be_bytes()); out.extend_from_slice(&total.to_be_bytes()); out.extend_from_slice(&3840u16.to_be_bytes()); out.extend_from_slice(&2160u16.to_be_bytes()); out.extend_from_slice(payload); out
+        let mut out = H265_TAG.to_vec();
+        out.extend_from_slice(&seq.to_be_bytes());
+        out.extend_from_slice(&index.to_be_bytes());
+        out.extend_from_slice(&total.to_be_bytes());
+        out.extend_from_slice(&3840u16.to_be_bytes());
+        out.extend_from_slice(&2160u16.to_be_bytes());
+        out.extend_from_slice(payload);
+        out
     }
     #[test]
     fn reassembles_out_of_order_without_duplicate_bytes() {

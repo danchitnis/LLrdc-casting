@@ -50,9 +50,9 @@ export function parseDecoderDescription(
           if (offset + nalLen > byteLength) break;
 
           const nalData = new Uint8Array(buffer, byteOffset + offset, nalLen);
-          if (nalType === 32) cache.vps = nalData;
-          if (nalType === 33) cache.sps = nalData;
-          if (nalType === 34) cache.pps = nalData;
+          if (nalType === ANNEXB_CONFIG.H265_VPS_TYPE) cache.vps = nalData;
+          if (nalType === ANNEXB_CONFIG.H265_SPS_TYPE) cache.sps = nalData;
+          if (nalType === ANNEXB_CONFIG.H265_PPS_TYPE) cache.pps = nalData;
           offset += nalLen;
         }
       }

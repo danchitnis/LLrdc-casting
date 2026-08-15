@@ -5,13 +5,13 @@ import {
   ENCODER_GUARDRAILS,
   FPS_THRESHOLDS,
   H264_CODEC_STRINGS,
+  RESOLUTION_OPTIONS,
   STREAM_DEFAULTS,
 } from './config.ts';
 
 export interface CodecCapabilityStatus {
-  h265HW: boolean;
   h265Supported: boolean;
-  h264HW: boolean;
+  h264HardwarePreferenceSupported: boolean;
   h264Supported: boolean;
 }
 
@@ -92,18 +92,18 @@ export function updateEncoderHWStatus(caps?: CodecCapabilityStatus | null): void
     statEncoderHW.textContent = 'SW Emulated (CPU)';
     statEncoderHW.style.color = '#f59e0b';
   } else if (val === 'H265') {
-    const isHW = status ? status.h265HW : true;
-    if (isHW) {
-      statEncoderHW.textContent = 'HW Accelerated (GPU)';
+    const isSupported = status ? status.h265Supported : true;
+    if (isSupported) {
+      statEncoderHW.textContent = 'HW Preferred (Browser API)';
       statEncoderHW.style.color = '#10b981';
     } else {
-      statEncoderHW.textContent = 'HW Unavailable (CPU Blocked)';
+      statEncoderHW.textContent = 'Unsupported';
       statEncoderHW.style.color = '#ef4444';
     }
   } else if (val === 'H264') {
-    const isHW = status ? status.h264HW : true;
-    if (isHW) {
-      statEncoderHW.textContent = 'HW Accelerated (GPU)';
+    const isHWPreferred = status ? status.h264HardwarePreferenceSupported : true;
+    if (isHWPreferred) {
+      statEncoderHW.textContent = 'HW Preferred (Browser API)';
       statEncoderHW.style.color = '#10b981';
     } else {
       statEncoderHW.textContent = 'SW Emulated (CPU)';
@@ -116,9 +116,8 @@ export async function checkBrowserCodecCapabilities(
   logFn?: (msg: string, isError?: boolean) => void
 ): Promise<CodecCapabilityStatus> {
   const result: CodecCapabilityStatus = {
-    h265HW: false,
     h265Supported: false,
-    h264HW: false,
+    h264HardwarePreferenceSupported: false,
     h264Supported: false
   };
 
@@ -142,7 +141,6 @@ export async function checkBrowserCodecCapabilities(
     const resH265 = await VideoEncoder.isConfigSupported(h265Config);
     if (resH265.supported) {
       result.h265Supported = true;
-      result.h265HW = true;
     }
   } catch (e) {}
 
@@ -158,7 +156,7 @@ export async function checkBrowserCodecCapabilities(
     };
     const resH264 = await VideoEncoder.isConfigSupported(h264Config);
     if (resH264.supported) {
-      result.h264HW = true;
+      result.h264HardwarePreferenceSupported = true;
     }
   } catch (e) {}
 
@@ -192,22 +190,15 @@ export async function checkBrowserCodecCapabilities(
           codecSelect.value = 'H264';
           logFn?.('[GUARDRAIL] Browser lacks H.265 encoding support. Auto-switched to H.264');
         }
-      } else if (!result.h265HW) {
-        h265Option.disabled = true;
-        h265Option.textContent = 'HEVC / H.265 (HW Unavailable - CPU Blocked)';
-        if (codecSelect.value === 'H265') {
-          codecSelect.value = 'H264';
-          logFn?.('[GUARDRAIL] Browser lacks H.265 hardware acceleration. H.265 software encoding disabled (high CPU load); auto-switched to H.264');
-        }
       } else {
         h265Option.disabled = false;
-        h265Option.textContent = 'HEVC / H.265 (Hardware Accelerated)';
+        h265Option.textContent = 'HEVC / H.265 (Hardware Preferred)';
       }
     }
 
     if (h264Option) {
-      if (result.h264HW) {
-        h264Option.textContent = 'H.264 (Hardware Accelerated)';
+      if (result.h264HardwarePreferenceSupported) {
+        h264Option.textContent = 'H.264 (Hardware Preferred)';
       } else if (result.h264Supported) {
         h264Option.textContent = 'H.264 (Software Emulated)';
       } else {
@@ -230,7 +221,7 @@ export async function checkBrowserCodecCapabilities(
   updateCodecAndResolutionGuardrails(logFn);
   updateEncoderHWStatus(result);
 
-  logFn?.(`[CAPABILITIES] H.265 HW: ${result.h265HW ? 'AVAILABLE' : 'UNAVAILABLE'} | H.264 HW: ${result.h264HW ? 'AVAILABLE' : 'UNAVAILABLE'} | H.264 SW: ${result.h264Supported ? 'AVAILABLE' : 'UNAVAILABLE'}`);
+  logFn?.(`[CAPABILITIES] H.265: ${result.h265Supported ? 'SUPPORTED' : 'UNAVAILABLE'} | H.264 HW preference: ${result.h264HardwarePreferenceSupported ? 'SUPPORTED' : 'UNAVAILABLE'} | H.264 SW: ${result.h264Supported ? 'AVAILABLE' : 'UNAVAILABLE'}`);
 
   return result;
 }
@@ -243,19 +234,20 @@ export function updateCodecAndResolutionGuardrails(
   if (!codecSelect || !resSelect) return;
 
   const selectedCodec = codecSelect.value;
-  const res2kOption = resSelect.querySelector('option[value="2560x1440"]') as HTMLOptionElement | null;
-  const res4kOption = resSelect.querySelector('option[value="3840x2160"]') as HTMLOptionElement | null;
-  if (selectedCodec === 'H264' || selectedCodec === 'H264_SW') {
-    if (res2kOption) res2kOption.disabled = true;
-    if (res4kOption) res4kOption.disabled = true;
+  const isH264 = selectedCodec === 'H264' || selectedCodec === 'H264_SW';
+  Array.from(resSelect.options).forEach(option => {
+    const resolution = RESOLUTION_OPTIONS.find(candidate => candidate.value === option.value);
+    if (!resolution) return;
+    const encodedDimensions = alignEncoderDimensions(selectedCodec, resolution.width, resolution.height);
+    option.disabled = isH264 && !isCodecResolutionAllowed(selectedCodec, encodedDimensions);
+  });
 
-    if (resSelect.value === '2560x1440' || resSelect.value === '3840x2160') {
-      resSelect.value = '1920x1080';
+  if (isH264) {
+    const selectedOption = resSelect.selectedOptions[0];
+    if (selectedOption?.disabled) {
+      resSelect.value = STREAM_DEFAULTS.resolution;
       logFn?.('[GUARDRAIL] H.264 supports up to 1080p on RK3399 hardware decoder; adjusted to 1080p');
     }
-  } else {
-    if (res2kOption) res2kOption.disabled = false;
-    if (res4kOption) res4kOption.disabled = false;
   }
 }
 
@@ -301,14 +293,9 @@ export function calculateTargetBitrate(
   return fps >= FPS_THRESHOLDS.HIGH ? BITRATE_THRESHOLDS.H264Fallback.at60 : BITRATE_THRESHOLDS.H264Fallback.below60;
 }
 
-export function getCodecString(codec: string, width: number, fps: number = STREAM_DEFAULTS.fps): string {
+export function getCodecString(codec: string, fps: number = STREAM_DEFAULTS.fps): string {
   if (codec === 'H265') {
     return CODEC_CONFIG.H265.defaultCodec;
-  }
-  if (width >= CODEC_RESOLUTION_LIMITS.H265_MAX_WIDTH) {
-    return H264_CODEC_STRINGS.UHD;
-  } else if (width >= CODEC_RESOLUTION_LIMITS.H265_AUTO_MIN_WIDTH) {
-    return H264_CODEC_STRINGS.QHD;
   }
   return fps >= FPS_THRESHOLDS.HIGH ? H264_CODEC_STRINGS.HD60 : H264_CODEC_STRINGS.HD;
 }

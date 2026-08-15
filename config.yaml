@@ -16,7 +16,6 @@ server:
   cloud_discovery_enabled: false
   receiver_id: ""               # Provisioned unique receiver identifier
   pairing_code_ttl_sec: 3600
-  pairing_registration_ttl_sec: 3600
   receiver_registration_secret: "" # Base64url device registration key
   pairing_token_public_key_file: "/pairing/public.pem"
 

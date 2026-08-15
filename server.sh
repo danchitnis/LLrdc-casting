@@ -73,7 +73,7 @@ usage() {
   echo "  --dashboard-mode=<raw|hevc>                 Idle dashboard codec"
   echo "  --idle-timeout-sec=<seconds>                Idle timeout (default: 30)"
   echo "  --pairing-code-ttl-sec=<seconds>            Pairing-code lifetime (default: 3600)"
-  echo "  --pairing-code=<4 alphanumeric>             Fixed test pairing code"
+  echo "  --pairing-code=<alphanumeric>               Fixed test pairing code"
   echo "  --http-port=<port>                          HTTP/UI port (default: 8080)"
   echo "  --webtransport-port=<port>                  WebTransport port (default: 4433)"
   echo "  --board-port=<port>                         Video UDP port (default: 4434)"
@@ -165,8 +165,8 @@ case "$action" in
         --pairing-token-public-key-file=*) pairing_token_public_key_file_override="${1#*=}" ;;
         --pairing-code=*)
           pairing_code_fixed="${1#*=}"
-          if ! [[ "$pairing_code_fixed" =~ ^[A-Za-z0-9]{4}$ ]]; then
-            echo "Pairing code must be exactly four alphanumeric characters." >&2
+          if ! [[ "$pairing_code_fixed" =~ ^[A-Za-z0-9]+$ ]]; then
+            echo "Pairing code must contain only letters and numbers." >&2
             exit 2
           fi
           pairing_code_fixed="$(printf '%s' "$pairing_code_fixed" | tr '[:lower:]' '[:upper:]')"

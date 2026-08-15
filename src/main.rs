@@ -94,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signal_resolution = format!("{}x{}", screen_w, screen_h);
     let panel_resolution = edid_info.panel_res.clone();
     let idle_dashboard_codec = dashboard::configured_dashboard_codec();
+    let idle_dashboard_enabled = config::env_bool_or("IDLE_DASHBOARD", true);
     let (idle_width, idle_height) = if idle_dashboard_codec == "raw" {
         dashboard::raw_dashboard_dimensions(screen_w, screen_h)
     } else {
@@ -125,14 +126,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let active_content_rect = Arc::new(Mutex::new(String::new()));
 
     // 3. Background feeder thread for the idle clock/IP dashboard
-    dashboard::spawn_idle_dashboard_thread(
-        idle_width,
-        idle_height,
-        vrefresh,
-        Arc::clone(&streaming_active),
-        playback_engine.dashboard_writer.clone(),
-        pairing_state,
-    );
+    if idle_dashboard_enabled {
+        dashboard::spawn_idle_dashboard_thread(
+            idle_width,
+            idle_height,
+            vrefresh,
+            Arc::clone(&streaming_active),
+            playback_engine.dashboard_writer.clone(),
+            pairing_state,
+        );
+    } else {
+        println!("[IDLE DASHBOARD] Disabled by configuration");
+    }
 
     println!(
         "[READY] Persistent GStreamer HDMI presenter running; waiting for UDP/WebTransport stream"

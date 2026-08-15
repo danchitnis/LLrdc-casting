@@ -24,6 +24,14 @@ pub fn env_string_or(name: &str, fallback: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| fallback.to_owned())
 }
 
+pub fn env_bool_or(name: &str, fallback: bool) -> bool {
+    match std::env::var(name).ok().as_deref() {
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES") => true,
+        Some("0") | Some("false") | Some("FALSE") | Some("no") | Some("NO") => false,
+        _ => fallback,
+    }
+}
+
 pub mod server {
     pub const DEFAULT_HTTP_PORT: u16 = 8080;
     pub const DEFAULT_WEBTRANSPORT_PORT: u16 = 4433;
@@ -33,14 +41,14 @@ pub mod server {
     pub const DEFAULT_CERTS_DIR: &str = "/certs";
     pub const DEFAULT_PAIRING_PUBLIC_KEY_FILE: &str = "/pairing/public.pem";
     pub const DEFAULT_DRM_PLANE_ID: &str = "33";
-    pub const HTTP_REQUEST_BUFFER_BYTES: usize = 4096;
+    pub const HTTP_REQUEST_BUFFER_BYTES: usize = 4 * 1024;
     pub const HTTP_TLS_BUFFER_BYTES: usize = 1024;
 }
 
 pub mod pairing {
     pub const PAIRING_CODE_LENGTH: usize = 4;
     pub const PAIRING_CODE_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    pub const PAIRING_CODE_TTL_SEC: u64 = 3600;
+    pub const PAIRING_CODE_TTL_SEC: u64 = 60 * 60;
     pub const PAIRING_ATTEMPT_WINDOW_SEC: u64 = 60;
     pub const PAIRING_ATTEMPT_LIMIT: u32 = 5;
     pub const PAIRING_TOKEN_ISSUED_AT_SKEW_SEC: i64 = 30;
@@ -51,20 +59,37 @@ pub mod pairing {
 pub mod packet {
     use std::time::Duration;
 
-    /// Fixed packet header: sequence number, timestamp, dimensions, FPS,
-    /// codec, and flags.
-    pub const PACKET_HEADER_BYTES: usize = 16;
+    pub const CODEC_ALIGNMENT: usize = 16;
+    pub const H264_VISIBLE_MAX_HEIGHT: usize = 1080;
+    pub const CODEC_TAG_BYTES: usize = 4;
+    pub const SEQUENCE_BYTES: usize = 4;
+    pub const CHUNK_INDEX_BYTES: usize = 2;
+    pub const CHUNK_COUNT_BYTES: usize = 2;
+    pub const DIMENSION_BYTES: usize = 2;
+    pub const TAG_OFFSET: usize = 0;
+    pub const SEQUENCE_OFFSET: usize = TAG_OFFSET + CODEC_TAG_BYTES;
+    pub const CHUNK_INDEX_OFFSET: usize = SEQUENCE_OFFSET + SEQUENCE_BYTES;
+    pub const CHUNK_COUNT_OFFSET: usize = CHUNK_INDEX_OFFSET + CHUNK_INDEX_BYTES;
+    pub const WIDTH_OFFSET: usize = CHUNK_COUNT_OFFSET + CHUNK_COUNT_BYTES;
+    pub const HEIGHT_OFFSET: usize = WIDTH_OFFSET + DIMENSION_BYTES;
+    /// Codec tag, sequence, chunk index/count, width, and height.
+    pub const PACKET_HEADER_BYTES: usize = HEIGHT_OFFSET + DIMENSION_BYTES;
+    pub const H264_TAG: &[u8; CODEC_TAG_BYTES] = b"H264";
+    pub const H265_TAG: &[u8; CODEC_TAG_BYTES] = b"H265";
+    pub const LEGACY_H264_TAG: &[u8; CODEC_TAG_BYTES] = b"VIDC";
+    pub const LEGACY_H265_TAG: &[u8; CODEC_TAG_BYTES] = b"HEVC";
+    pub const STOP_TAG: &[u8; CODEC_TAG_BYTES] = b"STOP";
     pub const CHUNK_BYTES: usize = 1350;
     pub const MAX_ACCESS_UNIT_BYTES: usize = 8 * 1024 * 1024;
     pub const MAX_IN_FLIGHT_ACCESS_UNITS: usize = 32;
     pub const ACCESS_UNIT_ASSEMBLY_TTL_MS: u64 = 50;
     pub const ACCESS_UNIT_ASSEMBLY_TTL: Duration =
         Duration::from_millis(ACCESS_UNIT_ASSEMBLY_TTL_MS);
-    pub const MAX_UNI_STREAM_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+    pub const MAX_UNI_STREAM_MESSAGE_BYTES: usize = MAX_ACCESS_UNIT_BYTES + PACKET_HEADER_BYTES;
     pub const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
-    pub const MAX_UI_BYTES: usize = 2 * 1024 * 1024;
     pub const H264_MAX_WIDTH: usize = 1920;
-    pub const H264_MAX_HEIGHT: usize = 1088;
+    pub const H264_MAX_HEIGHT: usize =
+        (H264_VISIBLE_MAX_HEIGHT + CODEC_ALIGNMENT - 1) / CODEC_ALIGNMENT * CODEC_ALIGNMENT;
     pub const H265_MAX_WIDTH: usize = 3840;
     pub const H265_MAX_HEIGHT: usize = 2160;
 }
@@ -72,20 +97,15 @@ pub mod packet {
 pub mod transport {
     pub const FRAME_CHANNEL_CAPACITY: usize = 64;
     pub const CONTROL_CHANNEL_CAPACITY: usize = 32;
-    pub const DATAGRAM_TAG_BYTES: usize = 4;
-    pub const CONTROL_LENGTH_PREFIX_BYTES: usize = 4;
-    pub const DATAGRAM_BUFFER_BYTES: usize = 65_536;
-    pub const DATAGRAM_ERROR_RETRY_SEC: u64 = 3600;
+    pub const LENGTH_PREFIX_BYTES: usize = 4;
+    pub const DATAGRAM_BUFFER_BYTES: usize = 64 * 1024;
+    pub const DATAGRAM_ERROR_RETRY_SEC: u64 = 60 * 60;
 }
 
 pub mod playback {
     pub const KMS_DEVICE_PIXEL_ASPECT_RATIO: &str = "15/16";
-    pub const DEFAULT_DISPLAY_WIDTH: u32 = 1920;
-    pub const DEFAULT_DISPLAY_HEIGHT: u32 = 1080;
-    pub const DEFAULT_DISPLAY_FPS: u32 = 60;
-    pub const DEFAULT_DISPLAY_PIXEL_ASPECT_RATIO: &str = "54";
-    pub const DEFAULT_DISPLAY_RECT: &str = "<0,0,1920,1080>";
-    pub const RAW_PIPELINE_BLOCK_SIZE: usize = 65_536;
+    pub const DEFAULT_DISPLAY_CONNECTOR_ID: &str = "54";
+    pub const RAW_PIPELINE_BLOCK_SIZE: usize = 64 * 1024;
     pub const RAW_PIPELINE_FRAMERATE: &str = "1/1";
     pub const RAW_QUEUE_CAPACITY: usize = 2;
     pub const ENCODED_QUEUE_CAPACITY: usize = 16;
@@ -99,7 +119,10 @@ pub mod certificate {
 }
 
 pub mod discovery {
+    pub const SHA256_DIGEST_BYTES: usize = 256 / 8;
     pub const TOKEN_VERSION: u8 = 1;
+    // Keep synchronized with TOKEN_VERSION; the cross-language consistency
+    // check also verifies that this is the textual `v{VERSION}` prefix.
     pub const TOKEN_PREFIX: &str = "v1";
     pub const TOKEN_ALGORITHM: &str = "PS256";
     pub const TOKEN_TYPE: &str = "CAST-CONNECTION";
@@ -110,7 +133,7 @@ pub mod discovery {
     pub const REGISTRATION_SUCCESS_RETRY_SEC: u64 = 45;
     pub const REGISTRATION_MAX_RETRY_SEC: u64 = 60;
     pub const REGISTRATION_NONCE_BYTES: usize = 16;
-    pub const TOKEN_RSA_SALT_BYTES: usize = 32;
+    pub const TOKEN_RSA_SALT_BYTES: usize = SHA256_DIGEST_BYTES;
 }
 
 pub mod telemetry {
@@ -125,7 +148,12 @@ pub mod telemetry {
     pub const DEFAULT_IDLE_BITRATE_MBPS: f32 = 0.0;
     pub const DEFAULT_IDLE_LATENCY_MS: f32 = 0.0;
     pub const DEFAULT_DELIVERY_RATE_PERCENT: f32 = 100.0;
+    pub const PERCENT_SCALE: f64 = 100.0;
     pub const DEFAULT_TELEMETRY_CHANNEL_CAPACITY: usize = 100;
+}
+
+pub mod ui {
+    pub const MAX_UI_BYTES: usize = 2 * 1024 * 1024;
 }
 
 pub mod display {
@@ -141,6 +169,6 @@ pub mod dashboard {
     pub const DEFAULT_MODE: &str = "raw";
     pub const RAW_FRAME_RATE: &str = "1";
     pub const ENCODED_KEYFRAME_INTERVAL: u32 = 3600;
-    pub const STDOUT_BUFFER_BYTES: usize = 131_072;
+    pub const STDOUT_BUFFER_BYTES: usize = 128 * 1024;
     pub const FEED_INTERVAL_MS: u64 = 100;
 }

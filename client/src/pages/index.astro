@@ -3,6 +3,7 @@ import Header from '../components/Header.astro';
 import SettingsCard from '../components/SettingsCard.astro';
 import TelemetryCard from '../components/TelemetryCard.astro';
 import LogConsole from '../components/LogConsole.astro';
+import { PAIRING_CONFIG } from '../lib/config';
 ---
 
 <!DOCTYPE html>
@@ -199,10 +200,10 @@ import LogConsole from '../components/LogConsole.astro';
 
   <section class="pairing-card" aria-labelledby="pairingTitle">
     <h2 id="pairingTitle">Connect to a receiver</h2>
-    <p>Enter the four-character code shown on the receiver's HDMI screen. Video stays on the local network.</p>
+    <p>Enter the {PAIRING_CONFIG.CODE_LENGTH}-character code shown on the receiver's HDMI screen. Video stays on the local network.</p>
     <form id="pairForm">
       <div class="pairing-row">
-        <input id="pairCode" name="code" inputmode="text" pattern="[A-Za-z0-9]{4}" maxlength="4" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="A78Q" aria-label="Four-character receiver code" required />
+        <input id="pairCode" name="code" inputmode="text" pattern={PAIRING_CONFIG.CODE_PATTERN.source} maxlength={PAIRING_CONFIG.CODE_LENGTH} autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="A78Q" aria-label={`${PAIRING_CONFIG.CODE_LENGTH}-character receiver code`} required />
         <button id="pairBtn" type="submit">Connect</button>
       </div>
     </form>

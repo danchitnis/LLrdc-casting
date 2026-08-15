@@ -89,11 +89,15 @@ pub fn autodetect_display_info() -> (u32, u32, u32, String, Option<String>, crat
         crate::drm_kms::drop_master(&card);
     }
     (
-        config::playback::DEFAULT_DISPLAY_WIDTH,
-        config::playback::DEFAULT_DISPLAY_HEIGHT,
-        config::playback::DEFAULT_DISPLAY_FPS,
-        config::playback::DEFAULT_DISPLAY_PIXEL_ASPECT_RATIO.into(),
-        Some(config::playback::DEFAULT_DISPLAY_RECT.to_string()),
+        config::display::DEFAULT_MAX_WIDTH,
+        config::display::DEFAULT_MAX_HEIGHT,
+        config::display::DEFAULT_MAX_FPS,
+        config::playback::DEFAULT_DISPLAY_CONNECTOR_ID.into(),
+        Some(format!(
+            "<0,0,{},{}>",
+            config::display::DEFAULT_MAX_WIDTH,
+            config::display::DEFAULT_MAX_HEIGHT
+        )),
         crate::drm_kms::EdidInfo::default(),
     )
 }

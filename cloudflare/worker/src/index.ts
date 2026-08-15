@@ -453,16 +453,20 @@ async function createConnectionToken(
   receiverId: string,
   now: number,
 ): Promise<{ token: string; expiresAt: number }> {
-  const header = jsonBase64Url({ alg: "PS256", typ: "CAST-CONNECTION", v: 1 });
+  const header = jsonBase64Url({
+    alg: TOKEN_CONFIG.ALGORITHM,
+    typ: TOKEN_CONFIG.TYPE,
+    v: TOKEN_CONFIG.VERSION,
+  });
   const expiresAt = now + TOKEN_CONFIG.CONNECTION_TTL_SECONDS;
   const payload = jsonBase64Url({
     receiver_id: receiverId,
-    purpose: "webtransport-connect",
+    purpose: TOKEN_CONFIG.PURPOSE,
     iat: now,
     exp: expiresAt,
     jti: randomHex(REQUEST_LIMITS.RANDOM_NONCE_BYTES),
   });
-  const signingInput = `v1.${header}.${payload}`;
+  const signingInput = `${TOKEN_CONFIG.PREFIX}.${header}.${payload}`;
   const signature = new Uint8Array(
     await crypto.subtle.sign(
       { name: "RSA-PSS", saltLength: TOKEN_CONFIG.RSA_PSS_SALT_LENGTH },

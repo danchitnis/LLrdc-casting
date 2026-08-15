@@ -193,7 +193,7 @@ async fn handle_connection(
                     Ok(mut recv_stream) => {
                         let frame_tx_clone = frame_tx.clone();
                         tokio::spawn(async move {
-                            let mut len_buf = [0u8; config::transport::CONTROL_LENGTH_PREFIX_BYTES];
+                            let mut len_buf = [0u8; config::transport::LENGTH_PREFIX_BYTES];
                             while recv_stream.read_exact(&mut len_buf).await.is_ok() {
                                 let len = u32::from_be_bytes(len_buf) as usize;
                                 if len == 0 || len > config::packet::MAX_UNI_STREAM_MESSAGE_BYTES { break; }
@@ -278,7 +278,7 @@ async fn handle_control_stream(
     mut recv_stream: wtransport::RecvStream,
     control_channel: crate::control::ControlChannel,
 ) {
-    let mut length = [0u8; config::transport::CONTROL_LENGTH_PREFIX_BYTES];
+    let mut length = [0u8; config::transport::LENGTH_PREFIX_BYTES];
     if recv_stream.read_exact(&mut length).await.is_err() {
         return;
     }
@@ -320,7 +320,7 @@ async fn handle_control_stream(
         let _ = control_channel.cmd_tx.send(command).await;
     }
     loop {
-        let mut length = [0u8; config::transport::CONTROL_LENGTH_PREFIX_BYTES];
+        let mut length = [0u8; config::transport::LENGTH_PREFIX_BYTES];
         if recv_stream.read_exact(&mut length).await.is_err() {
             break;
         }

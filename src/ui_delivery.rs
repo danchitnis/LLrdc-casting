@@ -3,7 +3,7 @@ use std::error::Error;
 use tokio::io::AsyncWriteExt;
 use wtransport::SendStream;
 
-use crate::config::packet::MAX_UI_BYTES;
+use crate::config::ui::MAX_UI_BYTES;
 
 const UI_REQUEST_TYPE: &str = "get_ui";
 

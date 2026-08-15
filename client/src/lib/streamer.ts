@@ -17,7 +17,9 @@ import {
 } from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
 import {
+  CERTIFICATE_CONFIG,
   CODEC_RESOLUTION_LIMITS,
+  DECODER_LIMITS,
   ENCODER_GUARDRAILS,
   PAIRING_CONFIG,
   STREAM_DEFAULTS,
@@ -196,10 +198,11 @@ export function parseCertHash(input: string | null): Uint8Array | null {
   }
 
   const cleanHex = str.replace(/[^0-9a-fA-F]/g, '');
-  if (cleanHex.length === 64) {
-    const bytes = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) {
-      bytes[i] = parseInt(cleanHex.substring(i * 2, i * 2 + 2), 16);
+  if (cleanHex.length === CERTIFICATE_CONFIG.SHA256_HEX_LENGTH) {
+    const bytes = new Uint8Array(CERTIFICATE_CONFIG.SHA256_DIGEST_BYTES);
+    for (let i = 0; i < bytes.length; i++) {
+      const start = i * CERTIFICATE_CONFIG.HEX_CHARS_PER_BYTE;
+      bytes[i] = parseInt(cleanHex.substring(start, start + CERTIFICATE_CONFIG.HEX_CHARS_PER_BYTE), 16);
     }
     return bytes;
   }
@@ -207,7 +210,7 @@ export function parseCertHash(input: string | null): Uint8Array | null {
 }
 
 async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number, height: number, codec: string): Promise<void> {
-  const tag = codec === 'H265' ? 'H265' : 'H264';
+  const tag = codec === 'H265' ? TRANSPORT_CONFIG.CODEC_TAGS.H265 : TRANSPORT_CONFIG.CODEC_TAGS.H264;
 
   if (!uniStreamWriter && transport) {
     const uniStream = await transport.createUnidirectionalStream();
@@ -216,25 +219,23 @@ async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number
   if (!uniStreamWriter) return;
 
   const packetLen = TRANSPORT_CONFIG.PACKET_HEADER_BYTES + accessUnit.length;
-  const totalPayloadBytes = TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + packetLen;
+  const totalPayloadBytes = TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + packetLen;
   const combinedBuf = new Uint8Array(totalPayloadBytes);
   const view = new DataView(combinedBuf.buffer);
 
   view.setUint32(0, packetLen, false);
 
-  const packetOffset = TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES;
-  for (let i = 0; i < TRANSPORT_CONFIG.TAG_BYTES; i++) combinedBuf[packetOffset + i] = tag.charCodeAt(i);
-  view.setUint32(packetOffset + TRANSPORT_CONFIG.TAG_BYTES, seq, false);
-  const chunkIndexOffset = packetOffset + TRANSPORT_CONFIG.TAG_BYTES + 4;
-  const totalChunksOffset = chunkIndexOffset + 2;
-  const widthOffset = totalChunksOffset + 2;
-  const heightOffset = widthOffset + 2;
-  view.setUint16(chunkIndexOffset, 0, false);
-  view.setUint16(totalChunksOffset, TRANSPORT_CONFIG.SINGLE_PACKET_CHUNK_COUNT, false);
-  view.setUint16(widthOffset, width, false);
-  view.setUint16(heightOffset, height, false);
+  const packetOffset = TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES;
+  for (let i = 0; i < TRANSPORT_CONFIG.PACKET_FIELD_BYTES.TAG; i++) {
+    combinedBuf[packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.TAG + i] = tag.charCodeAt(i);
+  }
+  view.setUint32(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.SEQUENCE, seq, false);
+  view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.CHUNK_INDEX, 0, false);
+  view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.CHUNK_COUNT, TRANSPORT_CONFIG.SINGLE_PACKET_CHUNK_COUNT, false);
+  view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.WIDTH, width, false);
+  view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.HEIGHT, height, false);
 
-  combinedBuf.set(accessUnit, TRANSPORT_CONFIG.STOP_PACKET_BYTES);
+  combinedBuf.set(accessUnit, TRANSPORT_CONFIG.PACKET_FRAME_PREFIX_BYTES);
 
   await uniStreamWriter.write(combinedBuf);
 }
@@ -249,9 +250,9 @@ async function sendControlMessage(message: object): Promise<void> {
   if (payload.length > TRANSPORT_CONFIG.MAX_CONTROL_MESSAGE_BYTES) {
     throw new Error('Control message exceeds the configured maximum');
   }
-  const framed = new Uint8Array(TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + payload.length);
+  const framed = new Uint8Array(TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + payload.length);
   new DataView(framed.buffer).setUint32(0, payload.length, false);
-  framed.set(payload, TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES);
+  framed.set(payload, TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES);
   await controlWriter.write(framed);
 }
 
@@ -265,12 +266,12 @@ async function readControlMessages(reader: ReadableStreamDefaultReader<Uint8Arra
       merged.set(pending);
       merged.set(result.value, pending.length);
       pending = merged;
-      while (pending.length >= TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES) {
-        const length = new DataView(pending.buffer, pending.byteOffset, 4).getUint32(0, false);
+      while (pending.length >= TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES) {
+        const length = new DataView(pending.buffer, pending.byteOffset, TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES).getUint32(0, false);
         if (length === 0 || length > TRANSPORT_CONFIG.MAX_CONTROL_MESSAGE_BYTES) throw new Error('Invalid control message length');
-        if (pending.length < TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + length) break;
-        const payload = pending.slice(TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES, TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + length);
-        pending = pending.slice(TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES + length);
+        if (pending.length < TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + length) break;
+        const payload = pending.slice(TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES, TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + length);
+        pending = pending.slice(TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + length);
         const message = JSON.parse(new TextDecoder().decode(payload)) as ServerStatusMessage;
         if (message.type === 'status') handleServerStatusUpdate(message);
         if (message.type === 'pong') log('[CONTROL] Received pong from device');
@@ -405,10 +406,12 @@ export async function stopStreaming(): Promise<void> {
 
   if (uniStreamWriter) {
     try {
-      const stopPacket = new Uint8Array(TRANSPORT_CONFIG.STOP_PACKET_BYTES);
+      const stopPacket = new Uint8Array(TRANSPORT_CONFIG.PACKET_FRAME_PREFIX_BYTES);
       const view = new DataView(stopPacket.buffer);
       view.setUint32(0, TRANSPORT_CONFIG.PACKET_HEADER_BYTES, false);
-      stopPacket.set(TRANSPORT_CONFIG.STOP_TAG, TRANSPORT_CONFIG.CONTROL_LENGTH_PREFIX_BYTES);
+      for (let i = 0; i < TRANSPORT_CONFIG.PACKET_FIELD_BYTES.TAG; i++) {
+        stopPacket[TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + i] = TRANSPORT_CONFIG.STOP_TAG.charCodeAt(i);
+      }
       uniStreamWriter.write(stopPacket).catch(() => {});
     } catch (e) {}
   }
@@ -651,13 +654,14 @@ export async function toggleCasting(): Promise<void> {
       return;
     }
 
-    const codecString = getCodecString(wireCodec, activeWidth, targetFps);
+    const codecString = getCodecString(wireCodec, targetFps);
     const hardwarePref: HardwareAcceleration = isSWRequested
       ? ENCODER_GUARDRAILS.SOFTWARE_ACCELERATION
       : ENCODER_GUARDRAILS.HARDWARE_ACCELERATION;
 
-    // Verify browser hardware acceleration capability
-    let isHWAccelerated = false;
+    // WebCodecs exposes a hardware preference, not portable proof of the
+    // backend actually selected by the browser.
+    let hardwarePreferenceSupported = false;
     let isSupported = false;
     if (typeof VideoEncoder !== 'undefined' && typeof VideoEncoder.isConfigSupported === 'function') {
       try {
@@ -670,7 +674,7 @@ export async function toggleCasting(): Promise<void> {
           hardwareAcceleration: hardwarePref
         });
         isSupported = !!supportCheck.supported;
-        isHWAccelerated = !!supportCheck.supported && !isSWRequested;
+        hardwarePreferenceSupported = !!supportCheck.supported && !isSWRequested;
       } catch (e) {}
     }
 
@@ -688,12 +692,6 @@ export async function toggleCasting(): Promise<void> {
         ? CODEC_RESOLUTION_LIMITS.H265_MAX_HEIGHT
         : CODEC_RESOLUTION_LIMITS.H264_MAX_HEIGHT;
       log(`[ERROR] ${wireCodec} output ${encodedResolution} exceeds the ${maxWidth}x${maxHeight} decoder limit; choose a smaller encoder resolution.`, true);
-      await stopStreaming();
-      return;
-    }
-
-    if (selectedCodec === 'H265' && !isHWAccelerated) {
-      log(`[ERROR] H.265 software encoding is blocked to prevent heavy CPU usage. Please select H.264.`, true);
       await stopStreaming();
       return;
     }
@@ -729,8 +727,8 @@ export async function toggleCasting(): Promise<void> {
       if (isSWRequested) {
         statEncoderHW.textContent = 'SW Emulated (CPU)';
         statEncoderHW.style.color = '#f59e0b';
-      } else if (isHWAccelerated) {
-        statEncoderHW.textContent = 'HW Accelerated (GPU)';
+      } else if (hardwarePreferenceSupported) {
+        statEncoderHW.textContent = 'HW Preferred (Browser API)';
         statEncoderHW.style.color = '#10b981';
       } else {
         statEncoderHW.textContent = 'SW Emulated (CPU)';
@@ -738,7 +736,7 @@ export async function toggleCasting(): Promise<void> {
       }
     }
 
-    log(`[WEBCODECS] Initializing ${wireCodec} Encoder (${codecString}) at ${activeWidth}x${activeHeight} [${isSWRequested ? 'SW CPU' : (isHWAccelerated ? 'HW GPU' : 'SW CPU')}]...`);
+    log(`[WEBCODECS] Initializing ${wireCodec} Encoder (${codecString}) at ${activeWidth}x${activeHeight} [${isSWRequested ? 'SW CPU' : (hardwarePreferenceSupported ? 'HW preferred' : 'browser default')}]...`);
 
     let forceNextKeyframe = false;
 
@@ -746,6 +744,11 @@ export async function toggleCasting(): Promise<void> {
       output: async (chunk, metadata) => {
         seqNum++;
         const accessUnit = convertToAnnexB(chunk, metadata, wireCodec, nalCache, seqNum, log);
+        if (accessUnit.length > DECODER_LIMITS.MAX_ACCESS_UNIT_BYTES) {
+          log(`[GUARDRAIL] Encoded access unit exceeds the ${DECODER_LIMITS.MAX_ACCESS_UNIT_BYTES} byte decoder limit`, true);
+          await stopStreaming();
+          return;
+        }
         await sendAccessUnit(accessUnit, seqNum, activeWidth, activeHeight, wireCodec);
 
         const frameStat = document.getElementById('statFrameCount');

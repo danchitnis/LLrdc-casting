@@ -1,4 +1,4 @@
-import { BOOTSTRAP_LIMITS, PAIRING_CODE_LENGTH } from "./config";
+import { BOOTSTRAP_LIMITS, CRYPTO_CONFIG, PAIRING_CODE_LENGTH, REQUEST_LIMITS } from "./config";
 
 const BOOTSTRAP_HTML = `<!doctype html>
 <html lang="en">
@@ -42,17 +42,20 @@ const BOOTSTRAP_HTML = `<!doctype html>
       });
 
       function decodeHex(value) {
-        if (!/^[0-9a-f]{64}$/i.test(value)) return null;
+        if (!new RegExp('^[0-9a-f]{${REQUEST_LIMITS.CERTIFICATE_HASH_HEX_LENGTH}}$', 'i').test(value)) return null;
         const bytes = new Uint8Array(${BOOTSTRAP_LIMITS.CERTIFICATE_HASH_BYTES});
-        for (let i = 0; i < bytes.length; i += 1) bytes[i] = parseInt(value.slice(i * 2, i * 2 + 2), 16);
+        for (let i = 0; i < bytes.length; i += 1) {
+          const start = i * ${CRYPTO_CONFIG.HEX_CHARS_PER_BYTE};
+          bytes[i] = parseInt(value.slice(start, start + ${CRYPTO_CONFIG.HEX_CHARS_PER_BYTE}), 16);
+        }
         return bytes;
       }
 
       function frame(payload) {
         const bytes = new TextEncoder().encode(JSON.stringify(payload));
-        const result = new Uint8Array(bytes.length + ${BOOTSTRAP_LIMITS.FRAME_LENGTH_PREFIX_BYTES});
+        const result = new Uint8Array(bytes.length + ${BOOTSTRAP_LIMITS.LENGTH_PREFIX_BYTES});
         new DataView(result.buffer).setUint32(0, bytes.length, false);
-        result.set(bytes, 4);
+        result.set(bytes, ${BOOTSTRAP_LIMITS.LENGTH_PREFIX_BYTES});
         return result;
       }
 
@@ -66,11 +69,11 @@ const BOOTSTRAP_HTML = `<!doctype html>
           merged.set(pending);
           merged.set(part.value, pending.length);
           pending = merged;
-          if (pending.length < 4) continue;
-          const length = new DataView(pending.buffer, pending.byteOffset, 4).getUint32(0, false);
+          if (pending.length < ${BOOTSTRAP_LIMITS.LENGTH_PREFIX_BYTES}) continue;
+          const length = new DataView(pending.buffer, pending.byteOffset, ${BOOTSTRAP_LIMITS.LENGTH_PREFIX_BYTES}).getUint32(0, false);
           if (length === 0 || length > ${BOOTSTRAP_LIMITS.MAX_UI_BYTES}) throw new Error('Invalid UI response');
-          if (pending.length < length + ${BOOTSTRAP_LIMITS.FRAME_LENGTH_PREFIX_BYTES}) continue;
-          return new TextDecoder().decode(pending.slice(${BOOTSTRAP_LIMITS.FRAME_LENGTH_PREFIX_BYTES}, length + ${BOOTSTRAP_LIMITS.FRAME_LENGTH_PREFIX_BYTES}));
+          if (pending.length < length + ${BOOTSTRAP_LIMITS.LENGTH_PREFIX_BYTES}) continue;
+          return new TextDecoder().decode(pending.slice(${BOOTSTRAP_LIMITS.LENGTH_PREFIX_BYTES}, length + ${BOOTSTRAP_LIMITS.LENGTH_PREFIX_BYTES}));
         }
       }
 
