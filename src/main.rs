@@ -251,8 +251,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             panel_resolution: panel_resolution.clone(),
                         });
                     }
-                    control::ControlCommand::Ping => {
-                        control_channel.send_telemetry(control::TelemetryMessage::Pong);
+                    control::ControlCommand::Ping { id } => {
+                        // WebTransport pings are answered directly on their
+                        // originating control stream. This legacy command
+                        // path remains for the older WebSocket endpoint.
+                        control_channel.send_telemetry(control::TelemetryMessage::Pong { id });
                     }
                     control::ControlCommand::GetStatus => {
                         let is_act = streaming_active.load(Ordering::Relaxed);

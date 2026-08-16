@@ -142,7 +142,9 @@ pub async fn run_server_with_identity(
 
 #[cfg(test)]
 mod tests {
-    use super::udp_receive_buffer_bytes;
+    use super::{route_control_payload, udp_receive_buffer_bytes};
+    use crate::control::{ControlCommand, TelemetryMessage};
+    use tokio::sync::mpsc;
 
     #[test]
     fn udp_buffer_size_uses_megabytes() {
@@ -153,6 +155,48 @@ mod tests {
     #[test]
     fn udp_buffer_size_rejects_overflow() {
         assert_eq!(udp_receive_buffer_bytes(usize::MAX), None);
+    }
+
+    #[tokio::test]
+    async fn ping_is_answered_on_the_originating_control_channel() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+
+        route_control_payload(
+            br#"{"type":"ping","id":42}"#,
+            &cmd_tx,
+            &outbound_tx,
+        )
+        .await;
+
+        assert!(cmd_rx.try_recv().is_err());
+        let payload = outbound_rx.recv().await.expect("targeted pong");
+        let pong: TelemetryMessage = serde_json::from_slice(&payload).expect("valid pong");
+        assert!(matches!(pong, TelemetryMessage::Pong { id: Some(42) }));
+    }
+
+    #[tokio::test]
+    async fn legacy_ping_without_id_is_still_answered() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+
+        route_control_payload(br#"{"type":"ping"}"#, &cmd_tx, &outbound_tx).await;
+
+        assert!(cmd_rx.try_recv().is_err());
+        let payload = outbound_rx.recv().await.expect("legacy pong");
+        let pong: TelemetryMessage = serde_json::from_slice(&payload).expect("valid pong");
+        assert!(matches!(pong, TelemetryMessage::Pong { id: None }));
+    }
+
+    #[tokio::test]
+    async fn non_ping_commands_still_reach_the_device_command_queue() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+
+        route_control_payload(br#"{"type":"get_status"}"#, &cmd_tx, &outbound_tx).await;
+
+        assert!(matches!(cmd_rx.recv().await, Some(ControlCommand::GetStatus)));
+        assert!(outbound_rx.try_recv().is_err());
     }
 }
 
@@ -297,16 +341,25 @@ async fn handle_control_stream(
         return;
     }
 
+    // A single writer owns the stream so broadcast telemetry and a direct pong
+    // can never interleave their length-prefixed messages.
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(32);
+    let writer_task = tokio::spawn(async move {
+        while let Some(payload) = outbound_rx.recv().await {
+            if write_control_message(&mut send_stream, &payload).await.is_err() {
+                break;
+            }
+        }
+    });
+
     let mut telemetry_rx = control_channel.telemetry_tx.subscribe();
+    let telemetry_tx = outbound_tx.clone();
     let telemetry_task = tokio::spawn(async move {
         while let Ok(message) = telemetry_rx.recv().await {
             let Ok(payload) = serde_json::to_vec(&message) else {
                 continue;
             };
-            if write_control_message(&mut send_stream, &payload)
-                .await
-                .is_err()
-            {
+            if telemetry_tx.send(payload).await.is_err() {
                 break;
             }
         }
@@ -316,9 +369,7 @@ async fn handle_control_stream(
         .cmd_tx
         .send(crate::control::ControlCommand::GetStatus)
         .await;
-    if let Ok(command) = serde_json::from_slice::<crate::control::ControlCommand>(&first_payload) {
-        let _ = control_channel.cmd_tx.send(command).await;
-    }
+    route_control_payload(&first_payload, &control_channel.cmd_tx, &outbound_tx).await;
     loop {
         let mut length = [0u8; config::transport::LENGTH_PREFIX_BYTES];
         if recv_stream.read_exact(&mut length).await.is_err() {
@@ -332,11 +383,31 @@ async fn handle_control_stream(
         if recv_stream.read_exact(&mut payload).await.is_err() {
             break;
         }
-        if let Ok(command) = serde_json::from_slice::<crate::control::ControlCommand>(&payload) {
-            let _ = control_channel.cmd_tx.send(command).await;
-        }
+        route_control_payload(&payload, &control_channel.cmd_tx, &outbound_tx).await;
     }
     telemetry_task.abort();
+    writer_task.abort();
+}
+
+async fn route_control_payload(
+    payload: &[u8],
+    cmd_tx: &mpsc::Sender<crate::control::ControlCommand>,
+    outbound_tx: &mpsc::Sender<Vec<u8>>,
+) {
+    let Ok(command) = serde_json::from_slice::<crate::control::ControlCommand>(payload) else {
+        return;
+    };
+    match command {
+        crate::control::ControlCommand::Ping { id } => {
+            let response = crate::control::TelemetryMessage::Pong { id };
+            if let Ok(response_payload) = serde_json::to_vec(&response) {
+                let _ = outbound_tx.send(response_payload).await;
+            }
+        }
+        command => {
+            let _ = cmd_tx.send(command).await;
+        }
+    }
 }
 
 async fn write_control_message(

@@ -104,6 +104,7 @@ test.describe('local codec matrix', () => {
     expect(pairedLogs).not.toContain('[CLOUD DISCOVERY]');
     await expect(page.locator('#statProtocol')).toHaveText('WebTransport / QUIC');
     await expect.poll(async () => page.locator('#statSignal').textContent()).not.toBe('--');
+    await expect.poll(async () => page.locator('#statDevicePing').textContent()).toMatch(/^\d+ ms$/);
     await expect(page.locator('#log')).toContainText('[WEBTRANSPORT] Connected directly to receiver over the LAN.');
 
     await assertCodecSupport(page, 'H265', '1920x1080');

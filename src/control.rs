@@ -46,14 +46,22 @@ pub enum ControlCommand {
         panel_height: Option<u32>,
     },
     Stop,
-    Ping,
+    /// Application-level RTT probe. The optional ID keeps older clients that
+    /// sent `{ "type": "ping" }` compatible with the control protocol.
+    Ping {
+        #[serde(default)]
+        id: Option<u64>,
+    },
     GetStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TelemetryMessage {
-    Pong,
+    Pong {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
+    },
     Status {
         state: String,
         resolution: String,

@@ -93,6 +93,7 @@ export interface ServerStatusMessage {
   edid_max_res?: string;
   edid_max_fps?: number;
   display_max_fps?: number;
+  id?: number;
 }
 
 declare global {
@@ -120,6 +121,62 @@ let controlWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let controlReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 let pairedConnection: BootstrapConnection | null = null;
 let nalCache: NalCache = createNalCache();
+let pingTimer: number | null = null;
+let pingSequence = 0;
+let pendingPing: { id: number; sentAt: number } | null = null;
+let pingVisibilityHandlerInstalled = false;
+
+function updateDevicePing(value: number | null): void {
+  const stat = document.getElementById('statDevicePing');
+  if (stat) stat.textContent = value === null ? '--' : `${Math.round(value)} ms`;
+}
+
+function stopPingSampling(resetMetric = true): void {
+  if (pingTimer !== null) {
+    window.clearInterval(pingTimer);
+    pingTimer = null;
+  }
+  pendingPing = null;
+  if (resetMetric) updateDevicePing(null);
+}
+
+async function sendPing(): Promise<void> {
+  if (!controlIsConnected() || document.visibilityState !== 'visible') return;
+  if (pendingPing) {
+    if (performance.now() - pendingPing.sentAt <= TRANSPORT_CONFIG.PING_RESPONSE_TIMEOUT_MS) return;
+    pendingPing = null;
+    updateDevicePing(null);
+  }
+  const id = pingSequence++;
+  pendingPing = { id, sentAt: performance.now() };
+  try {
+    await sendControlMessage({ type: 'ping', id });
+  } catch {
+    if (pendingPing?.id === id) pendingPing = null;
+    markControlDisconnected();
+  }
+  if (!controlIsConnected() && pendingPing?.id === id) pendingPing = null;
+}
+
+function startPingSampling(): void {
+  stopPingSampling(false);
+  if (!controlIsConnected() || document.visibilityState !== 'visible') return;
+  void sendPing();
+  pingTimer = window.setInterval(() => { void sendPing(); }, TRANSPORT_CONFIG.KEEPALIVE_INTERVAL_MS);
+}
+
+function handlePong(id: number | undefined): void {
+  if (!pendingPing || (id !== undefined && id !== pendingPing.id)) return;
+  const elapsed = performance.now() - pendingPing.sentAt;
+  pendingPing = null;
+  updateDevicePing(elapsed);
+}
+
+function markControlDisconnected(): void {
+  stopPingSampling();
+  controlWriter = null;
+  updateStatus('disconnected', 'DISCONNECTED');
+}
 
 function parseResolution(value: string | undefined): [number, number] | null {
   if (!value) return null;
@@ -280,15 +337,16 @@ async function readControlMessages(reader: ReadableStreamDefaultReader<Uint8Arra
         pending = pending.slice(TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + length);
         const message = JSON.parse(new TextDecoder().decode(payload)) as ServerStatusMessage;
         if (message.type === 'status') handleServerStatusUpdate(message);
-        if (message.type === 'pong') log('[CONTROL] Received pong from device');
+        if (message.type === 'pong') handlePong(message.id);
       }
     }
   } catch (error) {
     if (transport) {
       log('[CONTROL] Direct LAN control stream disconnected.', true);
-      updateStatus('disconnected', 'DISCONNECTED');
+      markControlDisconnected();
     }
   }
+  if (transport && controlReader === reader) markControlDisconnected();
   controlReader = null;
   controlWriter = null;
 }
@@ -317,6 +375,7 @@ async function openPairedTransport(): Promise<void> {
   void readControlMessages(controlReader);
   await sendControlMessage({ type: 'get_status' });
   updateStatus('connected', 'CONNECTED');
+  startPingSampling();
   log('[WEBTRANSPORT] Connected directly to receiver over the LAN.');
 }
 
@@ -382,6 +441,7 @@ export async function pairWithCode(rawCode: string): Promise<void> {
     transport = null;
     controlWriter = null;
     controlReader = null;
+    stopPingSampling();
     throw new Error(`Receiver is not reachable from this LAN${reason}.`);
   }
   setSettingsDisabled(false);
@@ -392,6 +452,17 @@ export async function pairWithCode(rawCode: string): Promise<void> {
 }
 
 export function initPairing(): void {
+  if (!pingVisibilityHandlerInstalled) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        startPingSampling();
+      } else {
+        stopPingSampling();
+      }
+    });
+    pingVisibilityHandlerInstalled = true;
+  }
+  stopPingSampling();
   setSettingsDisabled(true);
   const button = document.getElementById('toggleBtn') as HTMLButtonElement | null;
   if (button) button.disabled = true;
@@ -788,23 +859,6 @@ export async function toggleCasting(): Promise<void> {
       toggleBtn.className = 'btn-primary stop';
     }
 
-    const keepAliveTimer = setInterval(async () => {
-      if (!isStreaming) {
-        clearInterval(keepAliveTimer);
-        return;
-      }
-      if (controlIsConnected()) {
-        try { await sendControlMessage({ type: 'ping' }); } catch(e) {}
-      }
-      if (transport && transport.datagrams && transport.datagrams.writable) {
-        try {
-          const pingWriter = transport.datagrams.writable.getWriter();
-          pingWriter.write(new Uint8Array([80, 73, 78, 71]));
-          pingWriter.releaseLock();
-        } catch(e) {}
-      }
-    }, TRANSPORT_CONFIG.KEEPALIVE_INTERVAL_MS);
-
     const TrackProcessorClass = window.MediaStreamTrackProcessor;
     const minFrameIntervalMs = 1000 / targetFps - ENCODER_GUARDRAILS.FRAME_TIMING_SLACK_MS;
     if (!TrackProcessorClass || !activeVideoTrack) {
@@ -886,7 +940,6 @@ export async function toggleCasting(): Promise<void> {
           fallbackVideo.remove();
         }
       }
-      clearInterval(keepAliveTimer);
       return;
     }
 
@@ -938,8 +991,6 @@ export async function toggleCasting(): Promise<void> {
         break;
       }
     }
-
-    clearInterval(keepAliveTimer);
 
   } catch (err) {
     const errObj = err as Error;
