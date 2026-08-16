@@ -6,6 +6,7 @@
 
 mod cert;
 mod admin;
+mod admin_protocol;
 mod cloud_discovery;
 mod config;
 mod control;
@@ -14,6 +15,7 @@ mod drm_kms;
 mod http_server;
 mod net;
 mod local_pairing;
+mod management;
 mod playback;
 mod sys_monitor;
 mod text;
@@ -40,6 +42,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel::<v4l2_decoder::VideoFrame>(config::transport::FRAME_CHANNEL_CAPACITY);
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<control::ControlCommand>(config::transport::CONTROL_CHANNEL_CAPACITY);
     let control_channel = control::ControlChannel::new(cmd_tx);
+    let management = management::ManagementState::new();
+    let (admin_tx, mut admin_rx) = mpsc::channel::<admin_protocol::AdminCommand>(8);
+    let core_control_tx = control_channel.cmd_tx.clone();
+    tokio::spawn(async move {
+        while let Some(command) = admin_rx.recv().await {
+            match command {
+                admin_protocol::AdminCommand::StopSharing => {
+                    let _ = core_control_tx.send(control::ControlCommand::AdminStop).await;
+                }
+            }
+        }
+    });
 
     let identity = webtransport_server::get_or_create_identity()
         .await
@@ -59,8 +73,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let admin_pairing_state = pairing_state.clone();
+    let admin_management = management.clone();
+    let admin_commands = admin_tx.clone();
     tokio::spawn(async move {
-        if let Err(error) = admin::run_server(admin_pairing_state).await {
+        if let Err(error) = admin::run_server(admin_pairing_state, admin_management, admin_commands).await {
             eprintln!("[ADMIN SOCKET] Server stopped: {error}");
         }
     });
@@ -75,12 +91,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let webtransport_control_channel = control_channel.clone();
     let webtransport_pairing_state = pairing_state.clone();
+    let webtransport_management = management.clone();
     tokio::spawn(async move {
         if let Err(error) = webtransport_server::run_server_with_identity(
             identity,
             tx,
             webtransport_control_channel,
             webtransport_pairing_state,
+            webtransport_management,
         )
         .await
         {
@@ -91,6 +109,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Auto-detect display geometry once before starting GStreamer
     let (screen_w, screen_h, vrefresh, connector_id, render_rect, edid_info) =
         playback::autodetect_display_info();
+    management.set_health(management::HealthSnapshot {
+        display_resolution: format!("{}x{}", screen_w, screen_h), display_fps: vrefresh,
+        panel_resolution: edid_info.panel_res.clone(), edid_name: edid_info.name.clone(),
+        edid_type: edid_info.conn_type.clone(), pairing_status: "READY".into(),
+        cloud_status: "UNKNOWN".into(), decoder_state: "idle".into(), ..Default::default()
+    });
     let signal_resolution = format!("{}x{}", screen_w, screen_h);
     let panel_resolution = edid_info.panel_res.clone();
     let idle_dashboard_codec = dashboard::configured_dashboard_codec();
@@ -156,6 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match cmd {
                     control::ControlCommand::Stop => {
                         println!("[CONTROL WS] Received STOP command from independent control socket!");
+                        management.stop("user_stop");
                         streaming_active.store(false, Ordering::Relaxed);
                         if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                         if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
@@ -190,7 +215,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             panel_resolution: panel_resolution.clone(),
                         });
                     }
-                    control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode, source_width, source_height, encoded_width, encoded_height, content_rect, signal_content_rect, panel_content_rect, signal_width, signal_height, panel_width, panel_height } => {
+                    control::ControlCommand::AdminStop => {
+                        println!("[ADMIN] Received administrative stop command");
+                        management.stop("admin_stop");
+                        streaming_active.store(false, Ordering::Relaxed);
+                        if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
+                        if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
+                        if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
+                        if let Ok(mut l) = active_content_rect.lock() { l.clear(); }
+                        v4l2_decoder::reset_decoder_pipeline();
+                        let _ = playback_engine.ensure_configuration(&idle_dashboard_codec, &connector_id, render_rect.as_deref(), "dashboard");
+                        while rx.try_recv().is_ok() {}
+                        control_channel.send_telemetry(control::TelemetryMessage::Status {
+                            state: "IDLE".into(), resolution: config::telemetry::DEFAULT_IDLE_RESOLUTION.into(), fps: 0,
+                            delivery_rate: 0.0, frames_submitted: sent, latency_ms: 0.0,
+                            display_resolution: format!("{}x{}", screen_w, screen_h), display_fps: vrefresh,
+                            bitrate_mbps: 0.0, latency_mode: String::new(), edid_name: edid_info.name.clone(), edid_type: edid_info.conn_type.clone(),
+                            edid_max_res: edid_info.max_res.clone(), edid_max_fps: edid_info.max_fps, display_max_fps: edid_info.max_fps,
+                            capture_resolution: String::new(), encoded_resolution: String::new(), aspect_mode: String::new(), content_rect: String::new(), signal_resolution: signal_resolution.clone(), panel_resolution: panel_resolution.clone(),
+                        });
+                    }
+                    control::ControlCommand::ClientHello { device_id, user_agent, platform, language, page_session_id, connection_id, remote_ip } => {
+                        management.hello(management::ClientMetadata { device_id, user_agent, platform, language, page_session_id, connection_id: connection_id.unwrap_or_else(|| "legacy".into()), remote_ip: remote_ip.unwrap_or_else(|| "unknown".into()) });
+                    }
+                    control::ControlCommand::Start { codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode, source_width, source_height, encoded_width, encoded_height, content_rect, signal_content_rect, panel_content_rect, signal_width, signal_height, panel_width, panel_height, connection_id, device_id } => {
                         let req_codec = codec.as_deref().unwrap_or(config::telemetry::DEFAULT_CODEC);
                         let requested_aspect_mode = aspect_mode.as_deref() == Some("stretch");
                         let aspect_mode = if requested_aspect_mode {
@@ -212,6 +260,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             (Some(width), Some(height)) => format!("{width}x{height}"),
                             _ => res_str.clone(),
                         };
+                        let sender = connection_id.as_ref().and_then(|id| management.snapshot().connections.into_iter().find(|c| &c.connection_id == id)).map(|c| management::ClientMetadata { device_id: if c.device_id.is_empty() { device_id.clone().unwrap_or_default() } else { c.device_id }, user_agent: c.user_agent, platform: c.platform, language: c.language, page_session_id: c.page_session_id, remote_ip: c.remote_ip, connection_id: c.connection_id });
+                        management.start(management::StreamConfigSnapshot { codec: req_codec.to_string(), resolution: res_str.clone(), fps: stream_fps, bitrate_mbps: bw, latency_mode: lat_mode.clone(), aspect_mode: aspect_mode.to_string(), capture_resolution: capture_res.clone(), encoded_resolution: encoded_res.clone() }, sender);
                         let content_rect = content_rect.unwrap_or_default();
                         if let Ok(mut l) = active_capture_resolution.lock() { *l = capture_res.clone(); }
                         if let Ok(mut l) = active_encoded_resolution.lock() { *l = encoded_res.clone(); }
@@ -305,6 +355,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(Some(frame)) => {
                         if frame.codec == "stop" {
                             println!("[PLAYBACK] Received stop signal; restoring HDMI IP dashboard...");
+                            management.stop("user_stop");
                             streaming_active.store(false, Ordering::Relaxed);
                             if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
@@ -403,13 +454,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
+                        let frame_seq = frame.seq;
+                        let frame_bytes = frame.access_unit.len();
                         if playback_engine.writer_tx.send(frame.access_unit).is_err() {
                             eprintln!("[PLAYBACK ERROR] seq={} pipe write failed", frame.seq);
                             continue;
                         }
 
-                        sent += 1;
                         let latency_ms = frame.first_packet_at.elapsed().as_secs_f32() * 1000.0;
+                        sent += 1;
+                        management.record_frame(frame_seq, frame_bytes, latency_ms as f64);
                         if sent == 1 || sent % 30 == 0 {
                             println!("[PLAYBACK] submitted_{}_access_units={sent} (latency={latency_ms:.1}ms)", frame.codec);
                             let frame_res = format!("{}x{}", frame.width, frame.height);
@@ -446,6 +500,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Timeout waiting for frames (30s idle)
                         if streaming_active.load(Ordering::Relaxed) {
                             println!("[PLAYBACK] Stream idle timeout; restoring HDMI IP dashboard...");
+                            management.stop("idle_timeout");
                             streaming_active.store(false, Ordering::Relaxed);
                             if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }

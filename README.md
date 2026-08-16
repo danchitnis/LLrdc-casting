@@ -161,6 +161,20 @@ For example:
   --cloud=false
 ```
 
+The receiver also exposes a Tailscale-only management portal. It binds to
+`server.admin_bind_address` (or `--admin-bind-address`) and defaults to port
+`9090`; it never falls back to a wildcard address. Open:
+
+```text
+https://<tailscale-receiver-ip>:9090/
+```
+
+The portal shows live measured stream traffic, connected devices, process-life
+sharing history, receiver health, and structured events. **Stop sharing** sends
+an isolated admin command through the application boundary and restores the
+idle dashboard. The portal has no separate password because access is limited
+to the configured Tailscale interface.
+
 To use an address without editing `config.yaml`:
 
 ```bash

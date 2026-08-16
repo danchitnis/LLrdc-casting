@@ -125,6 +125,23 @@ let pingTimer: number | null = null;
 let pingSequence = 0;
 let pendingPing: { id: number; sentAt: number } | null = null;
 let pingVisibilityHandlerInstalled = false;
+const pageSessionId = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+  ? crypto.randomUUID()
+  : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+function getDeviceId(): string {
+  try {
+    const existing = window.localStorage.getItem('llrdc-device-id');
+    if (existing) return existing;
+    const created = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    window.localStorage.setItem('llrdc-device-id', created);
+    return created;
+  } catch {
+    return pageSessionId;
+  }
+}
 
 function updateDevicePing(value: number | null): void {
   const stat = document.getElementById('statDevicePing');
@@ -373,6 +390,14 @@ async function openPairedTransport(): Promise<void> {
   controlWriter = control.writable.getWriter();
   controlReader = control.readable.getReader();
   void readControlMessages(controlReader);
+  await sendControlMessage({
+    type: 'client_hello',
+    device_id: getDeviceId(),
+    user_agent: navigator.userAgent,
+    platform: navigator.platform,
+    language: navigator.language,
+    page_session_id: pageSessionId,
+  });
   await sendControlMessage({ type: 'get_status' });
   updateStatus('connected', 'CONNECTED');
   startPingSampling();
@@ -792,8 +817,9 @@ export async function toggleCasting(): Promise<void> {
           signal_width: displayGeometry.signalWidth,
           signal_height: displayGeometry.signalHeight,
           panel_width: displayGeometry.panelWidth,
-           panel_height: displayGeometry.panelHeight,
-         });
+          panel_height: displayGeometry.panelHeight,
+          device_id: getDeviceId(),
+        });
           log(`[CONTROL] Geometry: capture ${rawWidth}x${rawHeight}, encoded ${activeWidth}x${activeHeight}, KMS 100% HDMI signal, content ${contentRect}`);
       } catch (e) {}
     }

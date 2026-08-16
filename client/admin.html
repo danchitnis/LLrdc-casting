@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LLRDC Management</title>
+  <style>
+    :root{color-scheme:dark;--bg:#08111f;--card:#111d31;--line:#263852;--text:#edf5ff;--muted:#90a4bd;--blue:#45c2ff;--green:#35d49a;--red:#ff647c}
+    *{box-sizing:border-box}
+    body{margin:0;padding:24px;background:radial-gradient(circle at top left,#16294a,#08111f 55%);font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text)}
+    main{max-width:1200px;margin:auto}
+    header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+    h1{font-size:1.35rem;margin:0}
+    h2{font-size:1rem;margin:0 0 12px;color:var(--blue)}
+    .badge{padding:5px 10px;border:1px solid var(--line);border-radius:99px;color:var(--green);font-weight:700}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+    .card{background:rgba(17,29,49,.92);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+    .metric{background:#0b1729;border-radius:8px;padding:11px}
+    .label{display:block;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.05em}
+    .value{display:block;margin-top:5px;font:600 1.05rem ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .danger{background:var(--red);border:0;color:#19050a;border-radius:8px;padding:10px 15px;font-weight:800;cursor:pointer}
+    .danger:disabled{opacity:.45;cursor:not-allowed}
+    .secondary{background:#1b3150;border:1px solid #355477;color:var(--text);border-radius:8px;padding:9px 13px;font-weight:700;cursor:pointer}
+    table{width:100%;border-collapse:collapse;font-size:.84rem}
+    th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+    th{color:var(--muted);font-size:.7rem;text-transform:uppercase}
+    pre{max-height:210px;overflow:auto;margin:0;color:#b9c8dc;font-size:.75rem;white-space:pre-wrap}
+    canvas{width:100%;height:180px;background:#0b1729;border-radius:8px}
+    .muted{color:var(--muted)}
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>LLRDC Receiver Management</h1><span id="state" class="badge">CONNECTING</span></header>
+    <section class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center"><h2>Live stream</h2><div style="display:flex;gap:8px"><button id="resetChart" class="secondary" type="button">Reset plot</button><button id="stop" class="danger" disabled>Stop sharing</button></div></div>
+      <div id="metrics" class="grid"></div>
+      <canvas id="chart" width="1000" height="300" aria-label="Measured encoded bitrate over time"></canvas>
+      <p id="sender" class="muted">No active sender</p>
+    </section>
+    <section class="card"><h2>Connected devices</h2><div style="overflow:auto"><table><thead><tr><th>Device</th><th>Client IP</th><th>Platform</th><th>State</th><th>Last seen</th></tr></thead><tbody id="connections"></tbody></table></div></section>
+    <section class="card"><h2>Sharing history</h2><div style="overflow:auto"><table><thead><tr><th>Session</th><th>Sender</th><th>Stream</th><th>Duration</th><th>Bytes</th><th>End reason</th></tr></thead><tbody id="history"></tbody></table></div></section>
+    <section class="card"><h2>Receiver health &amp; events</h2><div id="health" class="grid"></div><pre id="events"></pre></section>
+  </main>
+  <script>
+    const $=id=>document.getElementById(id);
+    const fmtBytes=n=>{if(!n)return'0 B';const u=['B','KB','MB','GB'];let i=0;while(n>=1024&&i<3){n/=1024;i++}return n.toFixed(i?1:0)+' '+u[i]};
+    const fmtTime=n=>n==null?'--':new Date(Date.now()-(window.up-n)*1000).toLocaleTimeString();
+    const CHART_WINDOW_SEC=60;
+    let points=[],chartSessionId=null,chartOriginElapsed=0,lastSnapshot=null;
+    function metric(label,value){return '<div class="metric"><span class="label">'+label+'</span><span class="value">'+value+'</span></div>'}
+    function chartScale(value){if(value<=0)return 1;const magnitude=Math.pow(10,Math.floor(Math.log10(value)));return Math.ceil(value/magnitude)*magnitude}
+    function draw(){
+      const canvas=$('chart'),ctx=canvas.getContext('2d'),width=canvas.clientWidth*2||1000,height=300;
+      canvas.width=width;canvas.height=height;ctx.clearRect(0,0,width,height);
+      const pad={left:66,right:24,top:20,bottom:48},plotWidth=width-pad.left-pad.right,plotHeight=height-pad.top-pad.bottom;
+      const dataMax=Math.max(0,...points.map(p=>Number.isFinite(p.bitrate_mbps)?p.bitrate_mbps:0)),max=chartScale(dataMax*1.1),tickCount=4,decimals=max<1?2:max<10?1:0;
+      ctx.font='22px system-ui,sans-serif';ctx.lineWidth=2;ctx.strokeStyle='#263852';ctx.fillStyle='#90a4bd';ctx.textAlign='right';
+      for(let i=0;i<=tickCount;i++){
+        const value=max*i/tickCount,y=pad.top+plotHeight-(value/max)*plotHeight;
+        ctx.beginPath();ctx.moveTo(pad.left,y);ctx.lineTo(width-pad.right,y);ctx.stroke();ctx.fillText(value.toFixed(decimals),pad.left-10,y+7);
+      }
+      ctx.textAlign='center';
+      const xTickCount=points.length?Math.min(3,points.length):1;
+      for(let i=0;i<xTickCount;i++){
+        const ratio=xTickCount===1?0:i/(xTickCount-1),index=points.length>1?Math.round(ratio*(points.length-1)):0,px=pad.left+ratio*plotWidth;
+        ctx.fillText(points[index]?.elapsed_sec!=null?points[index].elapsed_sec.toFixed(0)+'s':'0s',px,height-24);
+      }
+      ctx.fillStyle='#b9c8dc';ctx.fillText('Time (rolling 60 seconds)',pad.left+plotWidth/2,height-5);
+      ctx.save();ctx.translate(17,pad.top+plotHeight/2);ctx.rotate(-Math.PI/2);ctx.fillText('Encoded bitrate (Mbps)',0,0);ctx.restore();
+      if(points.length<2)return;
+      ctx.strokeStyle='#45c2ff';ctx.lineWidth=4;ctx.beginPath();
+      points.forEach((point,index)=>{const px=pad.left+index*plotWidth/(points.length-1),py=pad.top+plotHeight-(point.bitrate_mbps/max)*plotHeight;index?ctx.lineTo(px,py):ctx.moveTo(px,py)});
+      ctx.stroke();
+    }
+    function render(snapshot){
+      lastSnapshot=snapshot;window.up=snapshot.management.server_uptime_sec;const management=snapshot.management,active=management.active_stream;
+      $('state').textContent=management.state;$('state').style.color=management.state==='STREAMING'?'#35d49a':'#90a4bd';$('stop').disabled=!active;
+      if(active){
+        $('metrics').innerHTML=[metric('Codec',active.config.codec),metric('Resolution',active.config.encoded_resolution||active.config.resolution),metric('FPS',active.measured_fps.toFixed(1)+' / '+active.config.fps+' target'),metric('Measured bitrate',active.measured_bitrate_mbps.toFixed(2)+' Mbps'),metric('Average bitrate',active.average_bitrate_mbps.toFixed(2)+' Mbps'),metric('Peak bitrate',active.peak_bitrate_mbps.toFixed(2)+' Mbps'),metric('Frames',active.frames.toLocaleString()),metric('Bytes',fmtBytes(active.bytes)),metric('Latency',active.server_latency_ms.toFixed(1)+' ms'),metric('Sequence gaps',active.sequence_gaps)].join('');
+        const sender=active.sender;$('sender').textContent=sender?'Active sender: '+sender.device_id+' · '+sender.remote_ip+' · '+sender.platform+' · '+sender.user_agent:'Active sender metadata pending';
+        const samples=active.samples||[],latestElapsed=samples.length?samples[samples.length-1].elapsed_sec:active.duration_sec;
+        if(chartSessionId!==active.id||latestElapsed<chartOriginElapsed){chartSessionId=active.id;chartOriginElapsed=Math.max(0,latestElapsed-CHART_WINDOW_SEC)}
+        const windowStart=Math.max(chartOriginElapsed,latestElapsed-CHART_WINDOW_SEC);points=samples.filter(sample=>sample.elapsed_sec>=windowStart&&sample.elapsed_sec<=latestElapsed).slice(-90);draw();
+      }else{$('metrics').innerHTML=metric('Stream','Idle');$('sender').textContent='No active sender';points=[];chartSessionId=null;chartOriginElapsed=0;draw()}
+      $('connections').innerHTML=management.connections.map(connection=>'<tr><td>'+ (connection.device_id||'unknown') +'<br><span class="muted">'+(connection.page_session_id||'')+'</span></td><td>'+ (connection.remote_ip||'--') +'</td><td>'+ (connection.platform||'--') +'<br>'+ (connection.user_agent||'') +'</td><td>'+ (connection.connected?(connection.sharing?'SHARING':'CONNECTED'):'DISCONNECTED') +'</td><td>'+fmtTime(connection.last_seen_at_sec)+'</td></tr>').join('')||'<tr><td colspan="5" class="muted">No devices observed</td></tr>';
+      $('history').innerHTML=management.history.map(history=>'<tr><td>#'+history.id+'</td><td>'+(history.sender?.device_id||'unknown')+'<br>'+(history.sender?.remote_ip||'')+'</td><td>'+history.config.codec+' '+history.config.resolution+'</td><td>'+history.duration_sec.toFixed(1)+'s</td><td>'+fmtBytes(history.bytes)+'</td><td>'+(history.end_reason||'--')+'</td></tr>').join('')||'<tr><td colspan="6" class="muted">No completed sessions since startup</td></tr>';
+      const health=management.health;$('health').innerHTML=[metric('Display',health.display_resolution+' @ '+health.display_fps+' Hz'),metric('Panel',health.panel_resolution||'--'),metric('EDID',health.edid_name||'--'),metric('Pairing',snapshot.pairing.local_status),metric('Cloud',snapshot.pairing.cloud_status),metric('Decoder',health.decoder_state),metric('Queue',health.queue_depth),metric('Dropped',health.dropped_frames),metric('Rejected',health.rejected_frames),metric('Load',health.load_average||'--'),metric('Memory',health.memory||'--'),metric('Temperature',health.temperature||'--')].join('');
+      $('events').textContent=(management.events||[]).slice(-80).map(event=>'['+event.elapsed_sec.toFixed(1)+'s] '+event.level.toUpperCase()+' '+event.kind+': '+event.message).join('\n')||'No events';
+    }
+    function resetChart(){const active=lastSnapshot?.management?.active_stream;if(active){const samples=active.samples||[],latestElapsed=samples.length?samples[samples.length-1].elapsed_sec:active.duration_sec;chartSessionId=active.id;chartOriginElapsed=latestElapsed}else{chartSessionId=null;chartOriginElapsed=0}points=[];draw()}
+    async function stop(){if(!confirm('Stop the active share?'))return;await fetch('/api/stream/stop',{method:'POST'})}
+    $('resetChart').onclick=resetChart;$('stop').onclick=stop;let ws;
+    function connect(){ws=new WebSocket('wss://'+location.host+'/ws');ws.onmessage=event=>{try{render(JSON.parse(event.data))}catch{}};ws.onclose=()=>{$('state').textContent='DISCONNECTED';setTimeout(connect,1500)};ws.onerror=()=>ws.close()}
+    connect();
+  </script>
+</body>
+</html>

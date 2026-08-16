@@ -4,7 +4,9 @@
  */
 
 use std::error::Error;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use wtransport::{Endpoint, Identity, ServerConfig};
@@ -13,6 +15,9 @@ use crate::cloud_discovery::ConnectionTokenVerifier;
 use crate::config;
 use crate::local_pairing::PairingState;
 use crate::v4l2_decoder::VideoFrame;
+use crate::management::ManagementState;
+
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 pub async fn get_or_create_identity() -> Result<Identity, Box<dyn Error + Send + Sync>> {
     crate::cert::get_or_create_identity().await
@@ -26,12 +31,20 @@ fn udp_receive_buffer_bytes(megabytes: usize) -> Option<usize> {
     megabytes.checked_mul(1024 * 1024)
 }
 
+fn normalize_peer_ip(address: IpAddr) -> String {
+    match address {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => ip.to_ipv4().map_or_else(|| ip.to_string(), |mapped| mapped.to_string()),
+    }
+}
+
 /// Start WebTransport QUIC UDP server on 0.0.0.0:4433 using existing identity
 pub async fn run_server_with_identity(
     identity: Identity,
     frame_tx: mpsc::Sender<VideoFrame>,
     control_channel: crate::control::ControlChannel,
     pairing_state: PairingState,
+    management: ManagementState,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let hex_str = extract_cert_hash_hex(&identity);
     if !hex_str.is_empty() {
@@ -122,6 +135,7 @@ pub async fn run_server_with_identity(
         let control_channel_clone = control_channel.clone();
         let token_verifier_clone = token_verifier.as_ref().map(Arc::clone);
         let pairing_state_clone = pairing_state.clone();
+        let management_clone = management.clone();
 
         tokio::spawn(async move {
             match handle_connection(
@@ -130,6 +144,7 @@ pub async fn run_server_with_identity(
                 control_channel_clone,
                 token_verifier_clone,
                 pairing_state_clone,
+                management_clone,
             )
             .await
             {
@@ -142,8 +157,9 @@ pub async fn run_server_with_identity(
 
 #[cfg(test)]
 mod tests {
-    use super::{route_control_payload, udp_receive_buffer_bytes};
+    use super::{normalize_peer_ip, route_control_payload, udp_receive_buffer_bytes};
     use crate::control::{ControlCommand, TelemetryMessage};
+    use std::net::IpAddr;
     use tokio::sync::mpsc;
 
     #[test]
@@ -157,6 +173,13 @@ mod tests {
         assert_eq!(udp_receive_buffer_bytes(usize::MAX), None);
     }
 
+    #[test]
+    fn normalizes_ipv4_mapped_peer_addresses() {
+        let mapped: IpAddr = "::ffff:192.0.2.44".parse().expect("mapped IPv4 address");
+        assert_eq!(normalize_peer_ip(mapped), "192.0.2.44");
+        assert_eq!(normalize_peer_ip("2001:db8::1".parse().unwrap()), "2001:db8::1");
+    }
+
     #[tokio::test]
     async fn ping_is_answered_on_the_originating_control_channel() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
@@ -166,6 +189,8 @@ mod tests {
             br#"{"type":"ping","id":42}"#,
             &cmd_tx,
             &outbound_tx,
+            "test",
+            "127.0.0.1",
         )
         .await;
 
@@ -180,7 +205,7 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
         let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
 
-        route_control_payload(br#"{"type":"ping"}"#, &cmd_tx, &outbound_tx).await;
+        route_control_payload(br#"{"type":"ping"}"#, &cmd_tx, &outbound_tx, "test", "127.0.0.1").await;
 
         assert!(cmd_rx.try_recv().is_err());
         let payload = outbound_rx.recv().await.expect("legacy pong");
@@ -193,7 +218,7 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
         let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
 
-        route_control_payload(br#"{"type":"get_status"}"#, &cmd_tx, &outbound_tx).await;
+        route_control_payload(br#"{"type":"get_status"}"#, &cmd_tx, &outbound_tx, "test", "127.0.0.1").await;
 
         assert!(matches!(cmd_rx.recv().await, Some(ControlCommand::GetStatus)));
         assert!(outbound_rx.try_recv().is_err());
@@ -206,6 +231,7 @@ async fn handle_connection(
     control_channel: crate::control::ControlChannel,
     token_verifier: Option<Arc<ConnectionTokenVerifier>>,
     pairing_state: PairingState,
+    management: ManagementState,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let session_request = incoming_session.await?;
     println!("[WEBTRANSPORT] Connection request received");
@@ -215,7 +241,8 @@ async fn handle_connection(
         session_request.forbidden().await;
         return Err("missing local pairing code".into());
     };
-    let peer = session_request.remote_address().ip().to_string();
+    let peer = normalize_peer_ip(session_request.remote_address().ip());
+    let connection_id = format!("wt-{}", NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed));
     if let Err(reason) = pairing_state.validate_code(&code, &peer) {
         session_request.forbidden().await;
         return Err(format!("local pairing rejected: {reason}").into());
@@ -228,6 +255,7 @@ async fn handle_connection(
     }
     let connection = session_request.accept().await?;
     println!("[WEBTRANSPORT] Client connected successfully via QUIC/UDP!");
+    management.event("info", "connection", format!("{connection_id} connected from {peer}"));
 
     loop {
         tokio::select! {
@@ -262,6 +290,8 @@ async fn handle_connection(
                             send_stream,
                             recv_stream,
                             control_channel.clone(),
+                            connection_id.clone(),
+                            peer.clone(),
                         ));
                     }
                     Err(e) => println!("[WEBTRANSPORT] Control stream channel closed ({})", e),
@@ -297,6 +327,7 @@ async fn handle_connection(
         first_packet_at: std::time::Instant::now(),
     };
     let _ = frame_tx.send(stop_frame).await;
+    management.connection_closed(&connection_id);
 
     Ok(())
 }
@@ -321,6 +352,8 @@ async fn handle_control_stream(
     mut send_stream: wtransport::SendStream,
     mut recv_stream: wtransport::RecvStream,
     control_channel: crate::control::ControlChannel,
+    connection_id: String,
+    remote_ip: String,
 ) {
     let mut length = [0u8; config::transport::LENGTH_PREFIX_BYTES];
     if recv_stream.read_exact(&mut length).await.is_err() {
@@ -369,7 +402,7 @@ async fn handle_control_stream(
         .cmd_tx
         .send(crate::control::ControlCommand::GetStatus)
         .await;
-    route_control_payload(&first_payload, &control_channel.cmd_tx, &outbound_tx).await;
+    route_control_payload(&first_payload, &control_channel.cmd_tx, &outbound_tx, &connection_id, &remote_ip).await;
     loop {
         let mut length = [0u8; config::transport::LENGTH_PREFIX_BYTES];
         if recv_stream.read_exact(&mut length).await.is_err() {
@@ -383,7 +416,7 @@ async fn handle_control_stream(
         if recv_stream.read_exact(&mut payload).await.is_err() {
             break;
         }
-        route_control_payload(&payload, &control_channel.cmd_tx, &outbound_tx).await;
+        route_control_payload(&payload, &control_channel.cmd_tx, &outbound_tx, &connection_id, &remote_ip).await;
     }
     telemetry_task.abort();
     writer_task.abort();
@@ -393,10 +426,20 @@ async fn route_control_payload(
     payload: &[u8],
     cmd_tx: &mpsc::Sender<crate::control::ControlCommand>,
     outbound_tx: &mpsc::Sender<Vec<u8>>,
+    connection_id: &str,
+    remote_ip: &str,
 ) {
-    let Ok(command) = serde_json::from_slice::<crate::control::ControlCommand>(payload) else {
+    let Ok(mut command) = serde_json::from_slice::<crate::control::ControlCommand>(payload) else {
         return;
     };
+    match &mut command {
+        crate::control::ControlCommand::ClientHello { connection_id: id, remote_ip: ip, .. } => {
+            *id = Some(connection_id.to_string());
+            *ip = Some(remote_ip.to_string());
+        }
+        crate::control::ControlCommand::Start { connection_id: id, .. } => *id = Some(connection_id.to_string()),
+        _ => {}
+    }
     match command {
         crate::control::ControlCommand::Ping { id } => {
             let response = crate::control::TelemetryMessage::Pong { id };

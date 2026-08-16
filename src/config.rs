@@ -34,6 +34,7 @@ pub fn env_bool_or(name: &str, fallback: bool) -> bool {
 
 pub mod server {
     pub const DEFAULT_HTTP_PORT: u16 = 8080;
+    pub const DEFAULT_ADMIN_PORT: u16 = 9090;
     pub const DEFAULT_WEBTRANSPORT_PORT: u16 = 4433;
     pub const DEFAULT_BOARD_PORT: u16 = 4434;
     pub const DEFAULT_UDP_BUFFER_SIZE_MB: usize = 8;

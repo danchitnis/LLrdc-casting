@@ -6,6 +6,8 @@ server:
   port: 4434                   # Direct UDP video receiver port
   webtransport_port: 4433      # WebTransport QUIC server port
   http_port: 8080              # Web UI & WebSocket control socket port
+  admin_bind_address: "100.100.1.72" # Tailscale-only management bind address
+  admin_port: 9090             # Tailscale-only management portal port
   drm_connector_id: "auto"     # DRM display connector ID (auto or e.g. 54)
   drm_plane_id: "33"           # DRM overlay plane ID
   idle_dashboard: true         # Enable idle IP screen when no stream is active

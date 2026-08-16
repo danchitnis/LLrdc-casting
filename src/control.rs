@@ -44,8 +44,28 @@ pub enum ControlCommand {
         panel_width: Option<u32>,
         #[serde(default)]
         panel_height: Option<u32>,
+        #[serde(default)]
+        connection_id: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
     },
     Stop,
+    AdminStop,
+    ClientHello {
+        device_id: String,
+        #[serde(default)]
+        user_agent: String,
+        #[serde(default)]
+        platform: String,
+        #[serde(default)]
+        language: String,
+        #[serde(default)]
+        page_session_id: String,
+        #[serde(default)]
+        connection_id: Option<String>,
+        #[serde(default)]
+        remote_ip: Option<String>,
+    },
     /// Application-level RTT probe. The optional ID keeps older clients that
     /// sent `{ "type": "ping" }` compatible with the control protocol.
     Ping {

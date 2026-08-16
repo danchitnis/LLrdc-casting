@@ -75,6 +75,8 @@ usage() {
   echo "  --pairing-code-ttl-sec=<seconds>            Pairing-code lifetime (default: 3600)"
   echo "  --pairing-code=<alphanumeric>               Fixed test pairing code"
   echo "  --http-port=<port>                          HTTP/UI port (default: 8080)"
+  echo "  --admin-bind-address=<address>              Tailscale-only admin bind address"
+  echo "  --admin-port=<port>                         Tailscale-only admin port (default: 9090)"
   echo "  --webtransport-port=<port>                  WebTransport port (default: 4433)"
   echo "  --board-port=<port>                         Video UDP port (default: 4434)"
   echo "  --udp-buffer-size-mb=<megabytes>            UDP receive buffer (default: 8)"
@@ -128,6 +130,8 @@ case "$action" in
     idle_timeout_override=""
     pairing_code_ttl_override=""
     http_port_override=""
+    admin_bind_address_override=""
+    admin_port_override=""
     webtransport_port_override=""
     board_port_override=""
     udp_buffer_size_override=""
@@ -155,6 +159,8 @@ case "$action" in
           exit 2
           ;;
         --http-port=*) http_port_override="${1#*=}" ;;
+        --admin-bind-address=*) admin_bind_address_override="${1#*=}" ;;
+        --admin-port=*) admin_port_override="${1#*=}" ;;
         --webtransport-port=*) webtransport_port_override="${1#*=}" ;;
         --board-port=*) board_port_override="${1#*=}" ;;
         --udp-buffer-size-mb=*) udp_buffer_size_override="${1#*=}" ;;
@@ -184,6 +190,8 @@ case "$action" in
     idle_timeout_sec="${SERVER_IDLE_TIMEOUT_SEC:-${BOARD_IDLE_TIMEOUT_SEC:-30}}"
     pairing_code_ttl_sec="${SERVER_PAIRING_CODE_TTL_SEC:-${BOARD_PAIRING_CODE_TTL_SEC:-3600}}"
     http_port="${SERVER_HTTP_PORT:-${BOARD_HTTP_PORT:-8080}}"
+    admin_bind_address="${SERVER_ADMIN_BIND_ADDRESS:-${BOARD_ADMIN_BIND_ADDRESS:-$board_ip}}"
+    admin_port="${SERVER_ADMIN_PORT:-${BOARD_ADMIN_PORT:-9090}}"
     webtransport_port="${SERVER_WEBTRANSPORT_PORT:-${BOARD_WEBTRANSPORT_PORT:-4433}}"
     board_port="${SERVER_PORT:-${BOARD_PORT:-4434}}"
     udp_buffer_size_mb="${SERVER_UDP_BUFFER_SIZE_MB:-${BOARD_UDP_BUFFER_SIZE_MB:-8}}"
@@ -199,6 +207,8 @@ case "$action" in
     if [[ -n "$idle_timeout_override" ]]; then idle_timeout_sec="$idle_timeout_override"; fi
     if [[ -n "$pairing_code_ttl_override" ]]; then pairing_code_ttl_sec="$pairing_code_ttl_override"; fi
     if [[ -n "$http_port_override" ]]; then http_port="$http_port_override"; fi
+    if [[ -n "$admin_bind_address_override" ]]; then admin_bind_address="$admin_bind_address_override"; fi
+    if [[ -n "$admin_port_override" ]]; then admin_port="$admin_port_override"; fi
     if [[ -n "$webtransport_port_override" ]]; then webtransport_port="$webtransport_port_override"; fi
     if [[ -n "$board_port_override" ]]; then board_port="$board_port_override"; fi
     if [[ -n "$udp_buffer_size_override" ]]; then udp_buffer_size_mb="$udp_buffer_size_override"; fi
@@ -253,7 +263,7 @@ case "$action" in
     scp -o BatchMode=yes /tmp/llrdc-casting "${board_ip}:/var/tmp/llrdc-bin/llrdc-casting"
     rm -f /tmp/llrdc-casting
 
-    ssh -o BatchMode=yes "$board_ip" "docker stop -t 2 '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; docker rm -f '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; sleep 1; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='$drm_connector_id' -e DRM_PLANE_ID='$drm_plane_id' -e IDLE_DASHBOARD='$idle_dashboard' -e IDLE_DASHBOARD_MODE='$idle_dashboard_mode' -e IDLE_TIMEOUT_SEC='$idle_timeout_sec' -e PAIRING_CODE_TTL_SEC='$pairing_code_ttl_sec' -e PAIRING_CODE_FIXED='$pairing_code_fixed' -e HTTP_PORT='$http_port' -e WEBTRANSPORT_PORT='$webtransport_port' -e BOARD_PORT='$board_port' -e UDP_BUFFER_SIZE_MB='$udp_buffer_size_mb' -e CERTS_DIR='$cert_dir' -e CLOUD_DISCOVERY_ENABLED='$cloud_discovery_enabled' -e PAIRING_WORKER_URL='$pairing_worker_url' -e RECEIVER_ID='$receiver_id' -e RECEIVER_REGISTRATION_SECRET='$receiver_registration_secret' -e PAIRING_TOKEN_PUBLIC_KEY_FILE='$pairing_token_public_key_file' -v /dev:/dev -v /var/lib/llrdc-certs:/certs -v /var/lib/llrdc-pairing:/pairing:ro -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
+    ssh -o BatchMode=yes "$board_ip" "docker stop -t 2 '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; docker rm -f '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; sleep 1; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='$drm_connector_id' -e DRM_PLANE_ID='$drm_plane_id' -e IDLE_DASHBOARD='$idle_dashboard' -e IDLE_DASHBOARD_MODE='$idle_dashboard_mode' -e IDLE_TIMEOUT_SEC='$idle_timeout_sec' -e PAIRING_CODE_TTL_SEC='$pairing_code_ttl_sec' -e PAIRING_CODE_FIXED='$pairing_code_fixed' -e HTTP_PORT='$http_port' -e ADMIN_BIND_ADDR='$admin_bind_address' -e ADMIN_PORT='$admin_port' -e WEBTRANSPORT_PORT='$webtransport_port' -e BOARD_PORT='$board_port' -e UDP_BUFFER_SIZE_MB='$udp_buffer_size_mb' -e CERTS_DIR='$cert_dir' -e CLOUD_DISCOVERY_ENABLED='$cloud_discovery_enabled' -e PAIRING_WORKER_URL='$pairing_worker_url' -e RECEIVER_ID='$receiver_id' -e RECEIVER_REGISTRATION_SECRET='$receiver_registration_secret' -e PAIRING_TOKEN_PUBLIC_KEY_FILE='$pairing_token_public_key_file' -v /dev:/dev -v /var/lib/llrdc-certs:/certs -v /var/lib/llrdc-pairing:/pairing:ro -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
     ;;
   --stop)
     board_ip_override=""
