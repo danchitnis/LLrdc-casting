@@ -607,14 +607,11 @@ export async function toggleCasting(): Promise<void> {
 
     const trackSettings = activeVideoTrack ? activeVideoTrack.getSettings() : {};
     const displaySurface = trackSettings.displaySurface;
-    if (videoSource !== 'synthetic' && displaySurface !== 'monitor') {
-      throw new Error(`A full monitor is required; Chrome returned ${displaySurface || 'unknown'} capture`);
+    if (videoSource !== 'synthetic' && displaySurface && displaySurface !== 'monitor') {
+      throw new Error(`A full monitor is required; browser returned ${displaySurface} capture`);
     }
-    const rawWidth = trackSettings.width || (videoSource === 'synthetic' ? activeWidth : undefined);
-    const rawHeight = trackSettings.height || (videoSource === 'synthetic' ? activeHeight : undefined);
-    if (!rawWidth || !rawHeight) {
-      throw new Error('Chrome did not report native capture dimensions');
-    }
+    const rawWidth = trackSettings.width || activeWidth;
+    const rawHeight = trackSettings.height || activeHeight;
     const statRes = document.getElementById('statEncodedOutput');
     const statScale = document.getElementById('statScale');
     const statCodec = document.getElementById('statCodec');
@@ -811,39 +808,82 @@ export async function toggleCasting(): Promise<void> {
     const TrackProcessorClass = window.MediaStreamTrackProcessor;
     const minFrameIntervalMs = 1000 / targetFps - ENCODER_GUARDRAILS.FRAME_TIMING_SLACK_MS;
     if (!TrackProcessorClass || !activeVideoTrack) {
-      if (videoSource !== 'synthetic') {
-        throw new Error('MediaStreamTrackProcessor is not supported or active video track is missing');
+      if (!activeVideoTrack || typeof VideoFrame === 'undefined') {
+        throw new Error('Safari fallback requires an active video track and VideoFrame support');
       }
 
-      const syntheticCanvas = document.getElementById('screenCanvas') as HTMLCanvasElement | null;
-      if (!syntheticCanvas || typeof VideoFrame === 'undefined') {
-        throw new Error('Synthetic Safari fallback requires a canvas and VideoFrame support');
+      let fallbackCanvas = document.getElementById('screenCanvas') as HTMLCanvasElement | null;
+      if (!fallbackCanvas) {
+        fallbackCanvas = document.createElement('canvas');
+        fallbackCanvas.id = 'screenCanvas';
+        fallbackCanvas.style.display = 'none';
+        document.body.appendChild(fallbackCanvas);
+      }
+      fallbackCanvas.width = rawWidth;
+      fallbackCanvas.height = rawHeight;
+      const fallbackContext = fallbackCanvas.getContext('2d');
+      if (!fallbackContext) throw new Error('Safari fallback could not create a 2D capture canvas');
+
+      let fallbackVideo: HTMLVideoElement | null = null;
+      if (videoSource !== 'synthetic') {
+        fallbackVideo = document.createElement('video');
+        fallbackVideo.muted = true;
+        fallbackVideo.autoplay = true;
+        fallbackVideo.playsInline = true;
+        fallbackVideo.style.display = 'none';
+        fallbackVideo.srcObject = mediaStream;
+        document.body.appendChild(fallbackVideo);
+        try {
+          await fallbackVideo.play();
+        } catch (playErr) {
+          const errObj = playErr as Error;
+          throw new Error(`Safari could not play the captured screen: ${errObj.message}`);
+        }
+        const videoDeadline = performance.now() + 10_000;
+        while (fallbackVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA && performance.now() < videoDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        if (fallbackVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+          throw new Error('Safari did not produce video frames after screen capture permission was granted');
+        }
+        log('[SOURCE] Safari is rendering the captured monitor through a hidden video canvas.');
       }
 
       let syntheticFrameCount = 0;
       let lastSyntheticFrameTime = 0;
-      while (isStreaming) {
-        await new Promise(resolve => setTimeout(resolve, Math.max(1, minFrameIntervalMs)));
-        if (!isStreaming) break;
+      try {
+        while (isStreaming) {
+          await new Promise(resolve => setTimeout(resolve, Math.max(1, minFrameIntervalMs)));
+          if (!isStreaming) break;
 
-        const now = performance.now();
-        if (lastSyntheticFrameTime > 0 && (now - lastSyntheticFrameTime) < minFrameIntervalMs) continue;
-        lastSyntheticFrameTime = now;
-        syntheticFrameCount++;
+          const now = performance.now();
+          if (lastSyntheticFrameTime > 0 && (now - lastSyntheticFrameTime) < minFrameIntervalMs) continue;
+          lastSyntheticFrameTime = now;
+          syntheticFrameCount++;
 
-        const rawFrame = new VideoFrame(syntheticCanvas, { timestamp: Math.round(now * 1000) });
-        try {
-          const needKeyFrame = (syntheticFrameCount <= ENCODER_GUARDRAILS.INITIAL_KEYFRAME_COUNT
-            || syntheticFrameCount % keyframeInterval === 0 || forceNextKeyframe);
-          if (forceNextKeyframe) forceNextKeyframe = false;
-          if (videoEncoder && videoEncoder.encodeQueueSize <= ENCODER_GUARDRAILS.MAX_ENCODER_QUEUE) {
-            const composedFrame = frameCompositor?.compose(rawFrame);
-            if (!composedFrame) throw new Error('Video compositor is not initialized');
-            videoEncoder.encode(composedFrame, { keyFrame: needKeyFrame });
-            if (composedFrame !== rawFrame) composedFrame.close();
+          if (fallbackVideo) {
+            fallbackContext.drawImage(fallbackVideo, 0, 0, rawWidth, rawHeight);
           }
-        } finally {
-          rawFrame.close();
+          const rawFrame = new VideoFrame(fallbackCanvas, { timestamp: Math.round(now * 1000) });
+          try {
+            const needKeyFrame = (syntheticFrameCount <= ENCODER_GUARDRAILS.INITIAL_KEYFRAME_COUNT
+              || syntheticFrameCount % keyframeInterval === 0 || forceNextKeyframe);
+            if (forceNextKeyframe) forceNextKeyframe = false;
+            if (videoEncoder && videoEncoder.encodeQueueSize <= ENCODER_GUARDRAILS.MAX_ENCODER_QUEUE) {
+              const composedFrame = frameCompositor?.compose(rawFrame);
+              if (!composedFrame) throw new Error('Video compositor is not initialized');
+              videoEncoder.encode(composedFrame, { keyFrame: needKeyFrame });
+              if (composedFrame !== rawFrame) composedFrame.close();
+            }
+          } finally {
+            rawFrame.close();
+          }
+        }
+      } finally {
+        if (fallbackVideo) {
+          fallbackVideo.pause();
+          fallbackVideo.srcObject = null;
+          fallbackVideo.remove();
         }
       }
       clearInterval(keepAliveTimer);
