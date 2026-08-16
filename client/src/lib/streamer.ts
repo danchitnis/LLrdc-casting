@@ -809,8 +809,45 @@ export async function toggleCasting(): Promise<void> {
     }, TRANSPORT_CONFIG.KEEPALIVE_INTERVAL_MS);
 
     const TrackProcessorClass = window.MediaStreamTrackProcessor;
+    const minFrameIntervalMs = 1000 / targetFps - ENCODER_GUARDRAILS.FRAME_TIMING_SLACK_MS;
     if (!TrackProcessorClass || !activeVideoTrack) {
-      throw new Error('MediaStreamTrackProcessor is not supported or active video track is missing');
+      if (videoSource !== 'synthetic') {
+        throw new Error('MediaStreamTrackProcessor is not supported or active video track is missing');
+      }
+
+      const syntheticCanvas = document.getElementById('screenCanvas') as HTMLCanvasElement | null;
+      if (!syntheticCanvas || typeof VideoFrame === 'undefined') {
+        throw new Error('Synthetic Safari fallback requires a canvas and VideoFrame support');
+      }
+
+      let syntheticFrameCount = 0;
+      let lastSyntheticFrameTime = 0;
+      while (isStreaming) {
+        await new Promise(resolve => setTimeout(resolve, Math.max(1, minFrameIntervalMs)));
+        if (!isStreaming) break;
+
+        const now = performance.now();
+        if (lastSyntheticFrameTime > 0 && (now - lastSyntheticFrameTime) < minFrameIntervalMs) continue;
+        lastSyntheticFrameTime = now;
+        syntheticFrameCount++;
+
+        const rawFrame = new VideoFrame(syntheticCanvas, { timestamp: Math.round(now * 1000) });
+        try {
+          const needKeyFrame = (syntheticFrameCount <= ENCODER_GUARDRAILS.INITIAL_KEYFRAME_COUNT
+            || syntheticFrameCount % keyframeInterval === 0 || forceNextKeyframe);
+          if (forceNextKeyframe) forceNextKeyframe = false;
+          if (videoEncoder && videoEncoder.encodeQueueSize <= ENCODER_GUARDRAILS.MAX_ENCODER_QUEUE) {
+            const composedFrame = frameCompositor?.compose(rawFrame);
+            if (!composedFrame) throw new Error('Video compositor is not initialized');
+            videoEncoder.encode(composedFrame, { keyFrame: needKeyFrame });
+            if (composedFrame !== rawFrame) composedFrame.close();
+          }
+        } finally {
+          rawFrame.close();
+        }
+      }
+      clearInterval(keepAliveTimer);
+      return;
     }
 
     trackProcessor = new TrackProcessorClass({ track: activeVideoTrack });
@@ -818,7 +855,6 @@ export async function toggleCasting(): Promise<void> {
 
     let frameCount = 0;
     let lastFrameTime = 0;
-    const minFrameIntervalMs = 1000 / targetFps - ENCODER_GUARDRAILS.FRAME_TIMING_SLACK_MS;
 
     while (isStreaming && trackProcessorReader) {
       try {

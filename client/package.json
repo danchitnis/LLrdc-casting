@@ -13,6 +13,7 @@
     "test:e2e": "playwright test",
     "test:e2e:codec": "playwright test e2e/hardware.spec.ts --project=hardware-codec",
     "test:e2e:cloud": "playwright test e2e/cloud.spec.ts --project=hardware-cloud",
+    "test:e2e:safari": "node --experimental-strip-types e2e/safari.ts",
     "check": "astro check && tsc --noEmit",
     "build": "astro build"
   },

@@ -104,12 +104,16 @@ Install the client test dependencies once, including Playwright's test runner:
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix client ci
 ```
 
-The local codec suite deploys with Cloudflare discovery disabled, pairs directly
-with the receiver, and exercises the synthetic HEVC/H.264 matrix in installed
-headed Google Chrome:
+The local codec suite deploys with Cloudflare discovery disabled and pairs
+directly with the receiver. Chrome is the default (and only) browser for the
+plain command; use the explicit Safari form after Chrome when you want the
+installed Safari WebDriver pass. Safari never uses Playwright WebKit and reuses
+the existing cloud-disabled deployment without redeploying:
 
 ```bash
-./test_browser.sh codec
+./test_browser.sh codec          # branded Chrome (default)
+./test_browser.sh codec chrome   # same as above
+./test_browser.sh codec safari   # installed Safari, H.265 + H.264 at 1080p
 ```
 
 The cloud suite is intentionally separate. It deploys with discovery enabled,
@@ -124,10 +128,12 @@ Run both suites in sequence with `./test_browser.sh all`. A board address can
 be supplied explicitly with `--board-ip=<address>`; otherwise the `board.ip`
 value in `config.yaml` is used. The suites require SSH/Docker access to the
 RK3399, a working HDMI mode, installed branded Chrome with the required codec
-support, and (for `cloud`) authenticated Wrangler/D1 access. Failure artifacts
-are written below the repository-level `.artefact/` directory and are ignored
-by git. Each invocation cleans that directory first; `all` keeps its codec and
-cloud results in separate subdirectories of one run.
+support. The Safari form additionally requires Safari **Develop → Allow Remote
+Automation** enabled. The cloud suite additionally requires authenticated
+Wrangler/D1 access. Failure artifacts are written below the repository-level
+`.artefact/` directory and are ignored by git. Each invocation cleans that
+directory first; browser-specific codec runs write their own timestamped run
+directory, and `all` keeps Chrome codec and cloud results separate.
 
 The deployment build runs the same tests before compiling and transferring the
 release binary. A test failure stops the deployment before the receiver is
