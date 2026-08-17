@@ -198,10 +198,31 @@ after logging in with Wrangler:
 
 The script creates the D1 database, applies migrations, generates and uploads
 the required credentials, deploys the Worker/UI, and restarts the receiver.
-It is safe to rerun; generated private state stays in `.cloudflare/`.
+It is safe to rerun; generated private state stays in `.cloudflare/`. The
+workflow records non-secret checkpoints in `.cloudflare/setup-state.json`,
+rechecks remote state before changing anything, and can resume after an
+interrupted command.
 SSH access to the receiver must already be configured and working. The script
 does not install SSH or change receiver SSH settings. If needed, it uses your
 existing `sudo` access only to install the public pairing key.
+
+The setup UI adapts to the terminal: interactive terminals get color,
+width-aware status lines, and transient progress indicators; redirected or
+`NO_COLOR` output is plain and append-only. Useful maintenance commands are:
+
+```bash
+./setup_cloudflare.sh --status
+./setup_cloudflare.sh --verify
+./setup_cloudflare.sh --status --json
+./setup_cloudflare.sh --rotate-credentials
+```
+
+`--rotate-credentials` keeps the previous local files until the replacement
+workflow completes; if a later phase fails, rerun setup to reconcile the
+remote and local fingerprints. A failed run reports its phase and recovery
+action instead of claiming completion. The final infrastructure checks do not
+consume a live pairing code; run `./test_browser.sh cloud` for the optional
+full browser-to-LAN HEVC regression.
 
 1. For offline/LAN-only casting, open the receiver's current IP in Chrome:
 

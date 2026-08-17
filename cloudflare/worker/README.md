@@ -29,9 +29,18 @@ user you enter. The script does not install or configure SSH. If the receiver's
 your existing `sudo` access to install only `public.pem`; it does not change
 the directory ownership.
 
-If setup stops after creating D1, run the same command again, reuse the existing
-`wrangler.toml`, and enter the database ID printed by Wrangler, for example
-`eada85fc-cd08-4378-bb67-13edabf5ae6c`.
+The setup command is resumable. It writes non-secret checkpoints to
+`.cloudflare/setup-state.json`, discovers a D1 database by name after an
+interrupted create, and verifies the remote database, Worker secrets, receiver
+key, deployment, registration, and public bootstrap before reporting success.
+If a run stops after creating D1 or during deployment, run the same command
+again; it will inspect the existing resources and continue from the first
+incomplete phase. Use `./setup_cloudflare.sh --status` for a read-only report or
+`./setup_cloudflare.sh --verify` to run checks without changing state.
+
+Use `./setup_cloudflare.sh --rotate-credentials` only when intentionally
+invalidating the existing Worker credentials. Replacement files are prepared
+before they are promoted locally, and a failed run reports the phase to retry.
 
 1. Copy `wrangler.toml.example` to `wrangler.toml` and set the D1 database ID.
 2. Deploy from this directory. The Worker contains only the fixed bootstrap;
