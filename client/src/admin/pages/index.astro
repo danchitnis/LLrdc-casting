@@ -1,0 +1,103 @@
+---
+import ManagementCard from '../components/ManagementCard.astro';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>LLRDC Management</title>
+    <style is:global>
+      :root {
+        color-scheme: dark;
+        --bg: #08111f;
+        --card: #111d31;
+        --line: #263852;
+        --text: #edf5ff;
+        --muted: #90a4bd;
+        --blue: #45c2ff;
+        --green: #35d49a;
+        --red: #ff647c;
+      }
+
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 24px; background: radial-gradient(circle at top left, #16294a, var(--bg) 55%); font: 14px system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text); }
+      main { max-width: 1200px; margin: auto; }
+      header, .card-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+      header { margin-bottom: 18px; }
+      h1 { font-size: 1.35rem; margin: 0; }
+      h2 { font-size: 1rem; margin: 0 0 12px; color: var(--blue); }
+      .card-heading h2 { margin: 0; }
+      .badge { padding: 5px 10px; border: 1px solid var(--line); border-radius: 99px; color: var(--green); font-weight: 700; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+      .card { background: rgba(17, 29, 49, .92); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+      .metric { background: #0b1729; border-radius: 8px; padding: 11px; }
+      .label { display: block; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+      .value { display: block; margin-top: 5px; font: 600 1.05rem ui-monospace, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      button { border-radius: 8px; padding: 10px 15px; font-weight: 800; cursor: pointer; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      .danger { background: var(--red); border: 0; color: #19050a; }
+      .secondary { background: #1b3150; border: 1px solid #355477; color: var(--text); }
+      table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+      th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { color: var(--muted); font-size: .7rem; text-transform: uppercase; }
+      pre { max-height: 210px; overflow: auto; margin: 0; color: #b9c8dc; font-size: .75rem; white-space: pre-wrap; }
+      canvas { width: 100%; height: 180px; background: #0b1729; border-radius: 8px; }
+      .muted { color: var(--muted); }
+      .table-scroll { overflow: auto; }
+      #metrics { margin-top: 12px; }
+
+      @media (max-width: 560px) {
+        body { padding: 14px; }
+        .card-heading { align-items: flex-start; flex-direction: column; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>LLRDC Receiver Management</h1>
+        <span id="state" class="badge">CONNECTING</span>
+      </header>
+
+      <ManagementCard title="Live stream">
+        <div slot="actions">
+          <button id="resetChart" class="secondary" type="button">Reset plot</button>
+          <button id="stop" class="danger" type="button" disabled>Stop sharing</button>
+        </div>
+        <div id="metrics" class="grid"></div>
+        <canvas id="chart" width="1000" height="300" aria-label="Measured encoded bitrate over time"></canvas>
+        <p id="sender" class="muted">No active sender</p>
+      </ManagementCard>
+
+      <ManagementCard title="Connected devices">
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Device</th><th>Client IP</th><th>Platform</th><th>State</th><th>Last seen</th></tr></thead>
+            <tbody id="connections"></tbody>
+          </table>
+        </div>
+      </ManagementCard>
+
+      <ManagementCard title="Sharing history">
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Session</th><th>Sender</th><th>Stream</th><th>Duration</th><th>Bytes</th><th>End reason</th></tr></thead>
+            <tbody id="history"></tbody>
+          </table>
+        </div>
+      </ManagementCard>
+
+      <ManagementCard title="Receiver health &amp; events">
+        <div id="health" class="grid"></div>
+        <pre id="events"></pre>
+      </ManagementCard>
+    </main>
+
+    <script>
+      import '../lib/dashboard';
+    </script>
+  </body>
+</html>

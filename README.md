@@ -169,6 +169,10 @@ The receiver also exposes a Tailscale-only management portal. It binds to
 https://<tailscale-receiver-ip>:9090/
 ```
 
+The casting and management interfaces are strict-TypeScript Astro sources.
+The container build produces each interface as an independent, self-contained
+HTML file before embedding both files in the Rust binary.
+
 The portal shows live measured stream traffic, connected devices, process-life
 sharing history, receiver health, and structured events. **Stop sharing** sends
 an isolated admin command through the application boundary and restores the

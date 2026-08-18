@@ -13,6 +13,8 @@ client/.astro/
 dist/
 client/dist/
 client/index.html
+client/admin.html
+client/dist-admin/
 .opencode
 .cloudflare/
 cloudflare/worker/wrangler.toml

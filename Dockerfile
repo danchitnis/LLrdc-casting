@@ -1,4 +1,4 @@
-# 1. HTML Client Builder Stage
+# 1. Embedded Client and Management UI Builder Stage
 ARG BUILD_DATE=unknown
 FROM node:latest AS html-builder
 ARG BUILD_DATE
@@ -18,6 +18,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY client ./client
 COPY --from=html-builder /app/client/dist/index.html ./client/index.html
+COPY --from=html-builder /app/client/dist-admin/index.html ./client/admin.html
 COPY src ./src
 ARG BUILD_DATE=unknown
 

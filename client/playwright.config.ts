@@ -28,6 +28,10 @@ export default defineConfig({
   },
   projects: [
     {
+      name: 'management-admin',
+      testMatch: /admin\.spec\.ts/,
+    },
+    {
       name: 'hardware-codec',
       testMatch: /hardware\.spec\.ts/,
     },
