@@ -1,13 +1,80 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE="llrdc-casting"
+ROLLBACK_RUNTIME_IMAGE="$IMAGE"
+SSH_OPTIONS=(
+  -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=5
+  -o ServerAliveCountMax=3
+)
+DEPLOY_TMP_DIR=""
+ARTIFACT_CONTAINER_ID=""
+
+die() {
+  echo "[ERROR] $*" >&2
+  exit 1
+}
+
+on_error() {
+  local exit_code=$?
+  trap - ERR
+  echo "[ERROR] server.sh failed at line ${BASH_LINENO[0]:-unknown} (exit ${exit_code})." >&2
+  exit "$exit_code"
+}
+
+cleanup() {
+  if [[ -n "$ARTIFACT_CONTAINER_ID" ]]; then
+    docker rm -f "$ARTIFACT_CONTAINER_ID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$DEPLOY_TMP_DIR" && -d "$DEPLOY_TMP_DIR" ]]; then
+    rm -rf -- "$DEPLOY_TMP_DIR"
+  fi
+}
+
+trap on_error ERR
+trap cleanup EXIT
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command is unavailable: $1"
+}
+
+validate_positive_integer() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer (received '$value')."
+}
+
+validate_port() {
+  local name="$1"
+  local value="$2"
+  validate_positive_integer "$name" "$value"
+  ((value <= 65535)) || die "$name must be between 1 and 65535 (received '$value')."
+}
+
+validate_single_line() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "$name must not contain a newline."
+}
+
+ensure_local_docker() {
+  require_command docker
+  docker info >/dev/null 2>&1 || die "Docker is not running or is not accessible."
+  docker buildx version >/dev/null 2>&1 || die "Docker Buildx is unavailable."
+}
 
 # Load config.yaml if present
 load_config() {
   local cfg="${SCRIPT_DIR}/config.yaml"
   if [ -f "$cfg" ]; then
-    eval "$(python3 -c '
+    local parsed_config
+    require_command python3
+    if ! parsed_config="$(python3 -c '
+import shlex
+import re
 import sys
 path = sys.argv[1]
 current_section = ""
@@ -25,9 +92,14 @@ with open(path) as f:
             k = k.strip().replace("-", "_")
             v = v.strip().strip("\"'\''")
             full_key = f"{current_section}_{k}".upper() if indent > 0 and current_section else k.upper()
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", full_key):
+                raise ValueError(f"invalid configuration key: {full_key}")
             if v:
-                print(f"export {full_key}=\"{v}\"")
-' "$cfg" 2>/dev/null || true)"
+                print(f"export {full_key}={shlex.quote(v)}")
+' "$cfg")"; then
+      die "Could not parse configuration file: $cfg"
+    fi
+    eval "$parsed_config"
   fi
 }
 
@@ -56,7 +128,6 @@ if [ -n "$PRE_RECEIVER_ID" ]; then SERVER_RECEIVER_ID="$PRE_RECEIVER_ID"; fi
 if [ -n "$PRE_RECEIVER_REGISTRATION_SECRET" ]; then SERVER_RECEIVER_REGISTRATION_SECRET="$PRE_RECEIVER_REGISTRATION_SECRET"; fi
 if [ -n "$PRE_PAIRING_TOKEN_PUBLIC_KEY_FILE" ]; then SERVER_PAIRING_TOKEN_PUBLIC_KEY_FILE="$PRE_PAIRING_TOKEN_PUBLIC_KEY_FILE"; fi
 BOARD_IP="${BOARD_IP:-}"
-IMAGE="llrdc-casting"
 CONNECTOR_ID="${PRE_CONNECTOR_ID:-${BOARD_DRM_CONNECTOR_ID:-${DRM_CONNECTOR_ID:-auto}}}"
 
 usage() {
@@ -88,6 +159,115 @@ usage() {
   echo "  --pairing-token-public-key-file=<path>      Pairing token public-key file"
 }
 
+remote_ssh() {
+  ssh "${SSH_OPTIONS[@]}" "$board_ip" "$@"
+}
+
+check_remote_prerequisites() {
+  echo "[PREFLIGHT] Checking Docker and disk space on ${board_ip}..."
+  remote_ssh '
+    set -eu
+    command -v docker >/dev/null
+    command -v sha256sum >/dev/null
+    docker info >/dev/null
+    available_kb=$(df -Pk /var/tmp | awk "NR==2 {print \$4}")
+    [ -n "$available_kb" ] && [ "$available_kb" -ge 131072 ]
+  ' || die "Board preflight failed: SSH, Docker, sha256sum, or 128 MiB of /var/tmp space is unavailable."
+}
+
+write_runtime_env() {
+  local destination="$1"
+  umask 077
+  {
+    printf 'DRM_CONNECTOR_ID=%s\n' "$drm_connector_id"
+    printf 'DRM_PLANE_ID=%s\n' "$drm_plane_id"
+    printf 'IDLE_DASHBOARD=%s\n' "$idle_dashboard"
+    printf 'IDLE_DASHBOARD_MODE=%s\n' "$idle_dashboard_mode"
+    printf 'IDLE_TIMEOUT_SEC=%s\n' "$idle_timeout_sec"
+    printf 'PAIRING_CODE_TTL_SEC=%s\n' "$pairing_code_ttl_sec"
+    printf 'PAIRING_CODE_FIXED=%s\n' "$pairing_code_fixed"
+    printf 'HTTP_PORT=%s\n' "$http_port"
+    printf 'ADMIN_BIND_ADDR=%s\n' "$admin_bind_address"
+    printf 'ADMIN_PORT=%s\n' "$admin_port"
+    printf 'WEBTRANSPORT_PORT=%s\n' "$webtransport_port"
+    printf 'BOARD_PORT=%s\n' "$board_port"
+    printf 'UDP_BUFFER_SIZE_MB=%s\n' "$udp_buffer_size_mb"
+    printf 'CERTS_DIR=%s\n' "$cert_dir"
+    printf 'CLOUD_DISCOVERY_ENABLED=%s\n' "$cloud_discovery_enabled"
+    printf 'PAIRING_WORKER_URL=%s\n' "$pairing_worker_url"
+    printf 'RECEIVER_ID=%s\n' "$receiver_id"
+    printf 'RECEIVER_REGISTRATION_SECRET=%s\n' "$receiver_registration_secret"
+    printf 'PAIRING_TOKEN_PUBLIC_KEY_FILE=%s\n' "$pairing_token_public_key_file"
+  } >"$destination"
+}
+
+start_remote_container() {
+  local runtime_image="$1"
+  remote_ssh "
+    set -eu
+    for existing in '$IMAGE' rock5c-v4l2-drm; do
+      if docker container inspect \"\$existing\" >/dev/null 2>&1; then
+        docker stop -t 2 \"\$existing\" >/dev/null 2>&1 || docker kill \"\$existing\" >/dev/null
+        docker rm -f \"\$existing\" >/dev/null
+      fi
+    done
+    docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged \
+      --env-file /var/tmp/llrdc-bin/runtime.env \
+      -v /dev:/dev \
+      -v /var/lib/llrdc-certs:/certs \
+      -v /var/lib/llrdc-pairing:/pairing:ro \
+      -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting:ro \
+      '$runtime_image' >/dev/null
+  "
+}
+
+wait_for_receiver() {
+  local probe_host="$admin_bind_address"
+  if [[ "$probe_host" == "0.0.0.0" || "$probe_host" == "::" || -z "$probe_host" ]]; then
+    probe_host="$board_ip"
+  fi
+  local health_url="https://${probe_host}:${admin_port}/health"
+  local attempt
+  local healthy_streak=0
+  for ((attempt = 1; attempt <= 25; attempt++)); do
+    if remote_ssh "test \"\$(docker inspect -f '{{.State.Running}}' '$IMAGE' 2>/dev/null)\" = true && docker logs '$IMAGE' 2>&1 | grep -q '\[READY\] Persistent GStreamer HDMI presenter running'" >/dev/null 2>&1 \
+      && [[ "$(curl -fsSk --connect-timeout 2 --max-time 3 "$health_url" 2>/dev/null || true)" == "OK" ]]; then
+      ((healthy_streak += 1))
+      if ((healthy_streak >= 3)); then
+        return 0
+      fi
+    else
+      healthy_streak=0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+show_receiver_logs() {
+  remote_ssh "docker logs --tail 80 '$IMAGE' 2>&1 || true" >&2 || true
+}
+
+rollback_remote_deployment() {
+  echo "[ROLLBACK] Restoring the previous receiver binary and runtime configuration..." >&2
+  if ! remote_ssh "
+    set -eu
+    test -s /var/tmp/llrdc-bin/llrdc-casting.previous
+    cp -p /var/tmp/llrdc-bin/llrdc-casting.previous /var/tmp/llrdc-bin/llrdc-casting.rollback
+    mv -f /var/tmp/llrdc-bin/llrdc-casting.rollback /var/tmp/llrdc-bin/llrdc-casting
+    if [ -s /var/tmp/llrdc-bin/runtime.env.previous ]; then
+      cp -p /var/tmp/llrdc-bin/runtime.env.previous /var/tmp/llrdc-bin/runtime.env.rollback
+      mv -f /var/tmp/llrdc-bin/runtime.env.rollback /var/tmp/llrdc-bin/runtime.env
+    fi
+  "; then
+    echo "[ROLLBACK] No valid previous deployment is available." >&2
+    return 1
+  fi
+
+  start_remote_container "$ROLLBACK_RUNTIME_IMAGE" || return 1
+  wait_for_receiver
+}
+
 action="${1:-}"
 [[ -n "$action" ]] || { usage; exit 2; }
 shift || true
@@ -98,6 +278,7 @@ case "$action" in
     ;;
   --test)
     (($# == 0)) || { usage; exit 2; }
+    ensure_local_docker
     echo "[TEST] Running Rust unit tests in the ARM64 Docker builder..."
     docker buildx build \
       --build-arg BUILD_DATE="$(date +%s)" \
@@ -106,6 +287,7 @@ case "$action" in
       --tag "${IMAGE}-tests" \
       --load \
       .
+    echo "[TEST] ARM64 Rust tests passed."
     ;;
   --get-pairing-code)
     board_ip_override=""
@@ -118,8 +300,13 @@ case "$action" in
       shift
     done
     board_ip="${board_ip_override:-$BOARD_IP}"
-    [[ -n "$board_ip" ]] || { echo "A board address is required; use --board-ip=<address>." >&2; exit 2; }
-    ssh -o BatchMode=yes "$board_ip" "docker exec '$IMAGE' /usr/local/bin/llrdc-casting admin pairing-code"
+    [[ -n "$board_ip" ]] || die "A board address is required; use --board-ip=<address>."
+    [[ "$board_ip" != -* && "$board_ip" != *[[:space:]]* ]] || die "Invalid board address."
+    require_command ssh
+    pairing_code="$(remote_ssh "docker inspect -f '{{.State.Running}}' '$IMAGE' 2>/dev/null | grep -qx true && docker exec '$IMAGE' /usr/local/bin/llrdc-casting admin pairing-code")" \
+      || die "The receiver container is not running or its pairing-code command failed."
+    [[ "$pairing_code" =~ ^[A-Z0-9]{4}$ ]] || die "The receiver returned an invalid pairing code."
+    printf '%s\n' "$pairing_code"
     ;;
   --start)
     board_ip_override=""
@@ -171,8 +358,8 @@ case "$action" in
         --pairing-token-public-key-file=*) pairing_token_public_key_file_override="${1#*=}" ;;
         --pairing-code=*)
           pairing_code_fixed="${1#*=}"
-          if ! [[ "$pairing_code_fixed" =~ ^[A-Za-z0-9]+$ ]]; then
-            echo "Pairing code must contain only letters and numbers." >&2
+          if ! [[ "$pairing_code_fixed" =~ ^[A-Za-z0-9]{4}$ ]]; then
+            echo "Pairing code must contain exactly four letters or numbers." >&2
             exit 2
           fi
           pairing_code_fixed="$(printf '%s' "$pairing_code_fixed" | tr '[:lower:]' '[:upper:]')"
@@ -221,7 +408,26 @@ case "$action" in
     if [[ -n "$receiver_registration_secret_override" ]]; then receiver_registration_secret="$receiver_registration_secret_override"; fi
     if [[ -n "$pairing_token_public_key_file_override" ]]; then pairing_token_public_key_file="$pairing_token_public_key_file_override"; fi
 
-    [[ -n "$board_ip" ]] || { echo "A board address is required; use --board-ip=<address>." >&2; exit 2; }
+    [[ -n "$board_ip" ]] || die "A board address is required; use --board-ip=<address>."
+    [[ "$board_ip" != -* && "$board_ip" != *[[:space:]]* ]] || die "Invalid board address."
+    [[ "$drm_connector_id" == "auto" || "$drm_connector_id" =~ ^[0-9]+$ ]] || die "DRM connector must be 'auto' or a numeric ID."
+    [[ "$drm_plane_id" =~ ^[0-9]+$ ]] || die "DRM plane must be a numeric ID."
+    case "$idle_dashboard" in
+      1|true|TRUE|yes|YES) idle_dashboard=1 ;;
+      0|false|FALSE|no|NO) idle_dashboard=0 ;;
+      *) die "Idle dashboard must be configured as true or false." ;;
+    esac
+    [[ "$idle_dashboard_mode" == "raw" || "$idle_dashboard_mode" == "hevc" ]] || die "Dashboard mode must be 'raw' or 'hevc'."
+    validate_positive_integer "Idle timeout" "$idle_timeout_sec"
+    validate_positive_integer "Pairing-code lifetime" "$pairing_code_ttl_sec"
+    validate_port "HTTP port" "$http_port"
+    validate_port "Admin port" "$admin_port"
+    validate_port "WebTransport port" "$webtransport_port"
+    validate_port "Video UDP port" "$board_port"
+    validate_positive_integer "UDP buffer size" "$udp_buffer_size_mb"
+    for port_pair in "$http_port:$admin_port" "$http_port:$webtransport_port" "$http_port:$board_port" "$admin_port:$webtransport_port" "$admin_port:$board_port" "$webtransport_port:$board_port"; do
+      [[ "${port_pair%%:*}" != "${port_pair##*:}" ]] || die "Receiver ports must be unique."
+    done
     case "$cloud_discovery_enabled" in
       1|true|TRUE|yes|YES) cloud_discovery_enabled=1 ;;
       0|false|FALSE|no|NO|"") cloud_discovery_enabled=0 ;;
@@ -237,33 +443,104 @@ case "$action" in
     if [[ -n "$pairing_code_fixed" ]]; then
       echo "[WARNING] Fixed pairing code mode is enabled for this local test deployment."
     fi
+    for env_value in \
+      "$drm_connector_id" "$drm_plane_id" "$idle_dashboard_mode" "$pairing_code_fixed" \
+      "$admin_bind_address" "$cert_dir" "$pairing_worker_url" "$receiver_id" \
+      "$receiver_registration_secret" "$pairing_token_public_key_file"; do
+      validate_single_line "Receiver configuration value" "$env_value"
+    done
 
-    # Hash Dockerfile to detect if GStreamer / OS dependencies changed
-    DOCKERFILE_HASH=$(shasum -a 256 "${SCRIPT_DIR}/Dockerfile" | awk '{print $1}')
-    REMOTE_HASH=$(ssh -o BatchMode=yes "$board_ip" "cat /var/tmp/llrdc-bin/Dockerfile.sha256 2>/dev/null || true")
+    require_command ssh
+    require_command scp
+    require_command shasum
+    require_command gzip
+    require_command curl
+    require_command mktemp
+    ensure_local_docker
+    check_remote_prerequisites
 
-    ssh -o BatchMode=yes "$board_ip" "mkdir -p /var/tmp/llrdc-bin && rm -rf /var/tmp/llrdc-bin/llrdc-casting"
+    DEPLOY_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/llrdc-deploy.XXXXXX")"
+    local_binary="${DEPLOY_TMP_DIR}/llrdc-casting"
+    local_runtime_env="${DEPLOY_TMP_DIR}/runtime.env"
+    write_runtime_env "$local_runtime_env"
 
-    if [ "$DOCKERFILE_HASH" != "$REMOTE_HASH" ]; then
-      echo "[DEPLOY] Dockerfile changed or first deploy -> Transferring full base Docker image (278MB)..."
-      docker buildx build --build-arg BUILD_DATE="$(date +%s)" --platform linux/arm64 -t "$IMAGE" --load .
-      docker save "$IMAGE" | gzip -1 | ssh -o BatchMode=yes "$board_ip" 'gunzip | docker load'
-      ssh -o BatchMode=yes "$board_ip" "echo '$DOCKERFILE_HASH' > /var/tmp/llrdc-bin/Dockerfile.sha256"
-    else
-      echo "[DEPLOY] Dockerfile unchanged -> Fast deploy: building and copying only binary (~3.9MB)..."
-      docker buildx build --build-arg BUILD_DATE="$(date +%s)" --target builder --platform linux/arm64 -t "${IMAGE}-builder" --load .
+    remote_ssh "mkdir -p /var/tmp/llrdc-bin && rm -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/runtime.env.new"
+
+    # Hash Dockerfile to detect whether the complete runtime image must be transferred.
+    dockerfile_hash="$(shasum -a 256 "${SCRIPT_DIR}/Dockerfile" | awk '{print $1}')"
+    remote_hash="$(remote_ssh "cat /var/tmp/llrdc-bin/Dockerfile.sha256 2>/dev/null || true")"
+    if [[ -n "$remote_hash" && ! "$remote_hash" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "[WARNING] Ignoring an invalid remote Dockerfile hash; forcing a full image deployment." >&2
+      remote_hash=""
     fi
 
-    # Extract compiled binary and copy to board host path
-    tmp_id=$(docker create "${IMAGE}-builder")
-    docker cp "${tmp_id}:/app/target/release/llrdc-casting" /tmp/llrdc-casting
-    docker rm "$tmp_id" >/dev/null
-    bin_size=$(ls -lh /tmp/llrdc-casting | awk '{print $5}')
-    echo "[TRANSFER] Transferring only binary (/tmp/llrdc-casting: ${bin_size}) to board..."
-    scp -o BatchMode=yes /tmp/llrdc-casting "${board_ip}:/var/tmp/llrdc-bin/llrdc-casting"
-    rm -f /tmp/llrdc-casting
+    build_date="$(date +%s)"
+    if [[ "$dockerfile_hash" != "$remote_hash" ]]; then
+      echo "[DEPLOY] Runtime dependencies changed; building and transferring the full ARM64 image..."
+      if remote_ssh "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
+        remote_ssh "docker tag '$IMAGE' '${IMAGE}:rollback'"
+        ROLLBACK_RUNTIME_IMAGE="${IMAGE}:rollback"
+      fi
+      docker buildx build --build-arg BUILD_DATE="$build_date" --platform linux/arm64 -t "$IMAGE" --load .
+      docker save "$IMAGE" | gzip -1 | remote_ssh "bash -o pipefail -c 'gunzip | docker load'"
+      artifact_image="$IMAGE"
+      artifact_path="/usr/local/bin/llrdc-casting"
+    else
+      echo "[DEPLOY] Runtime dependencies unchanged; building the ARM64 binary..."
+      docker buildx build --build-arg BUILD_DATE="$build_date" --target builder --platform linux/arm64 -t "${IMAGE}-builder" --load .
+      artifact_image="${IMAGE}-builder"
+      artifact_path="/app/target/release/llrdc-casting"
+    fi
 
-    ssh -o BatchMode=yes "$board_ip" "docker stop -t 2 '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; docker rm -f '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; sleep 1; docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged -e DRM_CONNECTOR_ID='$drm_connector_id' -e DRM_PLANE_ID='$drm_plane_id' -e IDLE_DASHBOARD='$idle_dashboard' -e IDLE_DASHBOARD_MODE='$idle_dashboard_mode' -e IDLE_TIMEOUT_SEC='$idle_timeout_sec' -e PAIRING_CODE_TTL_SEC='$pairing_code_ttl_sec' -e PAIRING_CODE_FIXED='$pairing_code_fixed' -e HTTP_PORT='$http_port' -e ADMIN_BIND_ADDR='$admin_bind_address' -e ADMIN_PORT='$admin_port' -e WEBTRANSPORT_PORT='$webtransport_port' -e BOARD_PORT='$board_port' -e UDP_BUFFER_SIZE_MB='$udp_buffer_size_mb' -e CERTS_DIR='$cert_dir' -e CLOUD_DISCOVERY_ENABLED='$cloud_discovery_enabled' -e PAIRING_WORKER_URL='$pairing_worker_url' -e RECEIVER_ID='$receiver_id' -e RECEIVER_REGISTRATION_SECRET='$receiver_registration_secret' -e PAIRING_TOKEN_PUBLIC_KEY_FILE='$pairing_token_public_key_file' -v /dev:/dev -v /var/lib/llrdc-certs:/certs -v /var/lib/llrdc-pairing:/pairing:ro -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting '$IMAGE'; sleep 2; docker logs --tail 30 '$IMAGE'"
+    artifact_arch="$(docker image inspect --format '{{.Architecture}}' "$artifact_image")"
+    [[ "$artifact_arch" == "arm64" ]] || die "Built artifact has architecture '$artifact_arch', expected 'arm64'."
+    ARTIFACT_CONTAINER_ID="$(docker create "$artifact_image")"
+    docker cp "${ARTIFACT_CONTAINER_ID}:${artifact_path}" "$local_binary"
+    docker rm "$ARTIFACT_CONTAINER_ID" >/dev/null
+    ARTIFACT_CONTAINER_ID=""
+    [[ -s "$local_binary" ]] || die "The built receiver binary is empty or missing."
+
+    local_binary_hash="$(shasum -a 256 "$local_binary" | awk '{print $1}')"
+    binary_size="$(ls -lh "$local_binary" | awk '{print $5}')"
+    echo "[TRANSFER] Uploading verified receiver binary (${binary_size})..."
+    scp "${SSH_OPTIONS[@]}" "$local_binary" "${board_ip}:/var/tmp/llrdc-bin/llrdc-casting.new"
+    scp "${SSH_OPTIONS[@]}" "$local_runtime_env" "${board_ip}:/var/tmp/llrdc-bin/runtime.env.new"
+    remote_binary_hash="$(remote_ssh "sha256sum /var/tmp/llrdc-bin/llrdc-casting.new | awk '{print \$1}'")"
+    [[ "$remote_binary_hash" == "$local_binary_hash" ]] || die "Transferred binary checksum mismatch. The active receiver was not changed."
+
+    remote_ssh '
+      set -eu
+      if [ -s /var/tmp/llrdc-bin/llrdc-casting ]; then
+        cp -p /var/tmp/llrdc-bin/llrdc-casting /var/tmp/llrdc-bin/llrdc-casting.previous
+      fi
+      if [ -s /var/tmp/llrdc-bin/runtime.env ]; then
+        cp -p /var/tmp/llrdc-bin/runtime.env /var/tmp/llrdc-bin/runtime.env.previous
+      fi
+      chmod 0755 /var/tmp/llrdc-bin/llrdc-casting.new
+      chmod 0600 /var/tmp/llrdc-bin/runtime.env.new
+      mv -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/llrdc-casting
+      mv -f /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/runtime.env
+    '
+
+    if ! start_remote_container "$IMAGE"; then
+      if rollback_remote_deployment; then
+        die "New receiver container could not start; the previous deployment was restored."
+      fi
+      die "New receiver container could not start and rollback also failed."
+    fi
+    echo "[VERIFY] Waiting for a running container, presenter readiness, and stable HTTPS health..."
+    if ! wait_for_receiver; then
+      echo "[ERROR] Receiver did not become stably healthy within 25 seconds." >&2
+      show_receiver_logs
+      if rollback_remote_deployment; then
+        die "Deployment failed readiness checks; the previous deployment was restored."
+      fi
+      die "Deployment failed readiness checks and rollback also failed."
+    fi
+
+    remote_ssh "printf '%s\\n' '$dockerfile_hash' > /var/tmp/llrdc-bin/Dockerfile.sha256 && printf '%s\\n' '$local_binary_hash' > /var/tmp/llrdc-bin/llrdc-casting.sha256"
+    remote_ssh "docker logs --tail 30 '$IMAGE' 2>&1"
+    echo "[DEPLOY] Receiver is healthy; binary checksum ${local_binary_hash:0:12}..."
     ;;
   --stop)
     board_ip_override=""
@@ -275,8 +552,23 @@ case "$action" in
       shift
     done
     board_ip="${board_ip_override:-$BOARD_IP}"
-    [[ -n "$board_ip" ]] || { echo "A board address is required; use --board-ip=<address>." >&2; exit 2; }
-    ssh -o BatchMode=yes "$board_ip" "docker stop -t 2 '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true; docker rm -f '$IMAGE' rock5c-v4l2-drm 2>/dev/null || true"
+    [[ -n "$board_ip" ]] || die "A board address is required; use --board-ip=<address>."
+    [[ "$board_ip" != -* && "$board_ip" != *[[:space:]]* ]] || die "Invalid board address."
+    require_command ssh
+    remote_ssh "
+      set -eu
+      for existing in '$IMAGE' rock5c-v4l2-drm; do
+        if docker container inspect \"\$existing\" >/dev/null 2>&1; then
+          docker stop -t 2 \"\$existing\" >/dev/null 2>&1 || docker kill \"\$existing\" >/dev/null
+          docker rm -f \"\$existing\" >/dev/null
+        fi
+        if docker container inspect \"\$existing\" >/dev/null 2>&1; then
+          echo \"Container \$existing could not be removed.\" >&2
+          exit 1
+        fi
+      done
+    "
+    echo "[STOP] Receiver containers are stopped and removed."
     ;;
   *) usage; exit 2 ;;
 esac
