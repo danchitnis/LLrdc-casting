@@ -1,189 +1,169 @@
 #!/usr/bin/env python3
 """
-Radxa ROCK 4C+ (RK3399) 3-Wire PWM Fan Controller & Monitor
-===========================================================
+Radxa ROCK 4C+ (RK3399) kernel-managed PWM fan monitor
+========================================================
 
-Hardware Wiring:
----------------
-- Red Wire   : +5V Power (Pin 2 or Pin 4 on 40-pin GPIO header)
-- Black Wire : Ground (Pin 6, 9, 14, 20, or 25 on GPIO header)
-- Blue Wire  : PWM Control Input -> Connected to Physical Pin 7 (GPIO4_C2 / PWM0)
+The fan is controlled by the pwm-fan driver and the CPU thermal governor.
+This tool reports that live state and provides a temporary manual override
+for diagnostics; it deliberately does not run a competing thermal daemon.
 
-Technical Explanation of Fan Control:
-------------------------------------
-1. Pin Muxing & Hardware Controller:
-   - Physical Pin 7 corresponds to GPIO4_C2 (Linux GPIO pin 146).
-   - In the Rockchip RK3399 Device Tree, Pin 7 is assigned to PWM controller 0 (`/pwm@ff420000`).
-   - The device tree overlay (`rockchip-rk3399-pwm0-fan.dtbo`) uses `pinctrl-names = "default"`
-     to ensure `rockchip-pwm` claims Pin 146 during driver probe.
-
-2. PWM Signal Parameters:
-   - Period: 1,000,000 ns (1 kHz switching frequency).
-     * High-frequency 25 kHz signals cause beat-frequency interference and "voom-voom" 
-       revving oscillations with small 3-wire DC fan internal motor drivers.
-     * A 1 kHz switching frequency delivers silky-smooth, silent DC power modulation.
-   - Duty Cycle: Ranges from 0 ns (0% / OFF) to 1,000,000 ns (100% / MAX speed).
-
-3. Thermal Management & Anti-Revving:
-   - CPU temperature is read from `/sys/class/thermal/thermal_zone0/temp`.
-   - Polling interval is set to 3 seconds with a 5°C hysteresis band to prevent 
-     rapid revving and motor hunting on minor thermal fluctuations.
+Hardware wiring:
+  Red wire   -> +5V (physical pin 2 or 4)
+  Black wire -> Ground (physical pin 6, 9, 14, 20, or 25)
+  Blue wire  -> PWM0 / physical pin 7 (GPIO4_C2)
 
 Usage:
-------
-- Check status:
-    python3 tools/fan_control.py status
-
-- Set manual duty cycle percentage (0-100%):
-    python3 tools/fan_control.py set <0-100>
-
-- Run dynamic thermal daemon (smooth temperature-proportional control):
-    python3 tools/fan_control.py daemon
+  python3 tools/fan_control.py status
+  python3 tools/fan_control.py set <0-100>
+  python3 tools/fan_control.py daemon  # intentionally disabled
 """
 
-import sys
+import glob
 import os
-import time
+import sys
 
-SYSFS_PWM_DIR = "/sys/class/pwm/pwmchip0/pwm0"
-SYSFS_EXPORT = "/sys/class/pwm/pwmchip0/export"
+
 THERMAL_ZONE = "/sys/class/thermal/thermal_zone0/temp"
-PWM_PERIOD_NS = 1000000  # 1 kHz period (1,000,000 ns)
+THERMAL_ZONE_DIR = "/sys/class/thermal/thermal_zone0"
+HWMON_ROOT = "/sys/class/hwmon"
+PWM_MAX = 255
+
+# Rising thresholds and the exact cooling state selected at each trip.
+CURVE = (
+    (50.0, 1, 100),
+    (60.0, 2, 150),
+    (68.0, 3, 200),
+    (75.0, 4, 255),
+)
 
 
-def ensure_pwm_exported():
-    """Ensure PWM0 channel is exported and accessible in sysfs."""
-    if not os.path.exists(SYSFS_PWM_DIR):
-        if os.path.exists(SYSFS_EXPORT):
-            try:
-                with open(SYSFS_EXPORT, "w") as f:
-                    f.write("0")
-                time.sleep(0.1)
-            except Exception as e:
-                print(f"[!] Warning exporting PWM0: {e}")
+def read_text(path, default="N/A"):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except (OSError, ValueError):
+        return default
 
-    # Set 1 kHz period if available
-    period_file = os.path.join(SYSFS_PWM_DIR, "period")
-    if os.path.exists(period_file):
-        try:
-            with open(period_file, "w") as f:
-                f.write(str(PWM_PERIOD_NS))
-        except Exception as e:
-            pass
+
+def find_pwmfan_dir():
+    """Find the hwmon directory owned by the kernel pwm-fan driver."""
+    for name_file in sorted(glob.glob(os.path.join(HWMON_ROOT, "hwmon*", "name"))):
+        if read_text(name_file) == "pwmfan":
+            return os.path.dirname(name_file)
+    return None
+
+
+def find_pwmfan_cooling_device():
+    """Find the thermal cooling device whose type is pwm-fan."""
+    for type_file in sorted(glob.glob("/sys/class/thermal/cooling_device*/type")):
+        if read_text(type_file) == "pwm-fan":
+            return os.path.dirname(type_file)
+    return None
 
 
 def get_cpu_temp():
     """Read CPU temperature in Celsius."""
-    if os.path.exists(THERMAL_ZONE):
-        try:
-            with open(THERMAL_ZONE, "r") as f:
-                return float(f.read().strip()) / 1000.0
-        except Exception:
-            pass
-    return 0.0
+    try:
+        return float(read_text(THERMAL_ZONE, "0")) / 1000.0
+    except ValueError:
+        return 0.0
 
 
 def set_fan_speed_percent(percent):
-    """
-    Set fan speed as a percentage (0 to 100%).
-    
-    Duty cycle (ns) = (percent / 100) * PWM_PERIOD_NS (1,000,000 ns)
-    """
+    """Set a temporary diagnostic PWM override through the live hwmon driver."""
     percent = max(0.0, min(100.0, float(percent)))
-    duty_ns = int((percent / 100.0) * PWM_PERIOD_NS)
+    pwm_dir = find_pwmfan_dir()
+    if not pwm_dir:
+        print("[!] Kernel pwmfan hwmon device not found. Ensure the overlay is loaded.")
+        return 1
 
-    ensure_pwm_exported()
+    pwm_value = round((percent / 100.0) * PWM_MAX)
+    try:
+        with open(os.path.join(pwm_dir, "pwm1"), "w", encoding="utf-8") as handle:
+            handle.write(str(pwm_value))
+    except PermissionError:
+        print(f"[!] Permission denied writing to {pwm_dir}/pwm1.")
+        return 1
+    except OSError as error:
+        print(f"[!] Error setting fan speed: {error}")
+        return 1
 
-    duty_file = os.path.join(SYSFS_PWM_DIR, "duty_cycle")
-    enable_file = os.path.join(SYSFS_PWM_DIR, "enable")
+    print(
+        f"[!] Temporary manual override: {percent:.1f}% "
+        f"({pwm_value}/{PWM_MAX}). Kernel control may reassert it."
+    )
+    return 0
 
-    if os.path.exists(duty_file):
-        try:
-            if percent == 0:
-                with open(enable_file, "w") as f:
-                    f.write("0")
-            else:
-                with open(duty_file, "w") as f:
-                    f.write(str(duty_ns))
-                with open(enable_file, "w") as f:
-                    f.write("1")
-            print(f"[✓] Fan speed set to {percent:.1f}% (Duty Cycle: {duty_ns} ns @ 1 kHz)")
-        except PermissionError:
-            print(f"[!] Permission denied writing to {SYSFS_PWM_DIR}.")
-            print("    Run: sudo chmod -R 777 /sys/class/pwm/pwmchip0/pwm0")
-        except Exception as e:
-            print(f"[!] Error setting fan speed: {e}")
-    else:
-        print(f"[!] PWM directory {SYSFS_PWM_DIR} not found. Ensure PWM0 overlay is loaded.")
+
+def print_curve():
+    print(" Target Fan Curve  : kernel step_wise, fixed cooling stages")
+    for temperature, state, pwm in CURVE:
+        percentage = pwm / PWM_MAX * 100.0
+        print(f"   >= {temperature:.0f}°C      : state {state}, PWM {pwm}/255 ({percentage:.1f}%)")
+    print("   Hysteresis       : 5°C per stage; fan startup boost 100% for 500 ms")
 
 
 def print_status():
-    """Print detailed status of thermal zones and PWM fan control."""
-    temp_c = get_cpu_temp()
+    """Print the active kernel thermal curve and live fan state."""
     print("=================================================")
     print(" Radxa ROCK 4C+ PWM0 Fan Detailed Status")
     print("=================================================")
-    print(f" CPU Temperature : {temp_c:.2f}°C")
-    
-    if os.path.exists(SYSFS_PWM_DIR):
-        try:
-            with open(os.path.join(SYSFS_PWM_DIR, "period"), "r") as f:
-                period = int(f.read().strip())
-            with open(os.path.join(SYSFS_PWM_DIR, "duty_cycle"), "r") as f:
-                duty = int(f.read().strip())
-            with open(os.path.join(SYSFS_PWM_DIR, "enable"), "r") as f:
-                enabled = int(f.read().strip())
-            
-            freq_hz = 1e9 / period if period > 0 else 0
-            percent = (duty / period) * 100.0 if period > 0 else 0
-            
-            print(f" PWM Status       : {'Active' if enabled else 'Disabled'}")
-            print(f" PWM Frequency    : {freq_hz/1000.0:.1f} kHz ({period} ns period)")
-            print(f" Duty Cycle       : {duty} ns ({percent:.1f}% speed)")
-        except Exception as e:
-            print(f" PWM Info Error   : {e}")
+    print(f" CPU Temperature : {get_cpu_temp():.2f}°C")
+    print(f" Thermal Policy  : {read_text(os.path.join(THERMAL_ZONE_DIR, 'policy'))}")
+    print_curve()
+
+    print(" Thermal Trips    :")
+    for temp_file in sorted(glob.glob(os.path.join(THERMAL_ZONE_DIR, "trip_point_*_temp"))):
+        trip_base = temp_file[:-len("_temp")]
+        trip_id = trip_base.rsplit("_", 1)[-1]
+        print(
+            f"   {trip_id}: {read_text(temp_file)} m°C, "
+            f"hyst {read_text(f'{trip_base}_hyst')} m°C, "
+            f"type {read_text(f'{trip_base}_type')}"
+        )
+
+    cooling_dir = find_pwmfan_cooling_device()
+    if cooling_dir:
+        state = read_text(os.path.join(cooling_dir, "cur_state"))
+        maximum = read_text(os.path.join(cooling_dir, "max_state"))
+        print(f" Cooling Device  : {cooling_dir} state {state}/{maximum}")
     else:
-        print(" PWM Channel 0    : Not exported or disabled in DT")
+        print(" Cooling Device  : pwm-fan not found")
+
+    pwm_dir = find_pwmfan_dir()
+    if pwm_dir:
+        print(f" PWM Interface   : {pwm_dir}/pwm1={read_text(os.path.join(pwm_dir, 'pwm1'))}")
+        print(f" PWM Enable      : {read_text(os.path.join(pwm_dir, 'pwm1_enable'))}")
+    else:
+        print(" PWM Interface   : pwmfan hwmon device not found")
     print("=================================================")
 
 
 def run_daemon():
-    """Run smooth temperature-proportional thermal control loop."""
-    print("[*] Starting smooth thermal control daemon (Ctrl+C to stop)...")
-    last_speed = -1
-    
-    while True:
-        temp = get_cpu_temp()
-        
-        # Calculate smooth target speed
-        if temp < 50.0:
-            target = 0.0
-        elif temp < 60.0:
-            target = 40.0
-        elif temp < 68.0:
-            target = 60.0
-        elif temp < 75.0:
-            target = 80.0
-        else:
-            target = 100.0
-
-        if target != last_speed:
-            set_fan_speed_percent(target)
-            last_speed = target
-
-        time.sleep(3)
+    """Reject the old competing userspace thermal controller."""
+    print("[!] fan_control.py daemon is disabled: kernel thermal control owns PWM0.")
+    print("    Use 'status' to inspect the active curve or 'set' for a temporary diagnostic override.")
+    return 2
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] == "status":
         print_status()
-    elif sys.argv[1] == "set" and len(sys.argv) >= 3:
-        set_fan_speed_percent(float(sys.argv[2]))
-    elif sys.argv[1] == "daemon":
-        run_daemon()
-    else:
-        print("Usage: python3 tools/fan_control.py {status | set <0-100> | daemon}")
+        return 0
+
+    if sys.argv[1] == "set" and len(sys.argv) >= 3:
+        try:
+            return set_fan_speed_percent(float(sys.argv[2]))
+        except ValueError:
+            print("Usage: python3 tools/fan_control.py set <0-100>")
+            return 2
+
+    if sys.argv[1] == "daemon":
+        return run_daemon()
+
+    print("Usage: python3 tools/fan_control.py {status | set <0-100> | daemon}")
+    return 2
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
