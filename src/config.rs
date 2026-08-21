@@ -39,6 +39,7 @@ pub mod server {
     pub const DEFAULT_BOARD_PORT: u16 = 4434;
     pub const DEFAULT_UDP_BUFFER_SIZE_MB: usize = 8;
     pub const DEFAULT_IDLE_TIMEOUT_SEC: u64 = 30;
+    pub const DEFAULT_SENDER_LIVENESS_TIMEOUT_SEC: u64 = 90;
     pub const DEFAULT_CERTS_DIR: &str = "/certs";
     pub const DEFAULT_PAIRING_PUBLIC_KEY_FILE: &str = "/pairing/public.pem";
     pub const DEFAULT_DRM_PLANE_ID: &str = "33";

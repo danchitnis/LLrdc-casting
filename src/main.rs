@@ -172,6 +172,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config::server::DEFAULT_IDLE_TIMEOUT_SEC,
     );
     let idle_timeout = std::time::Duration::from_secs(idle_timeout_sec);
+    let sender_liveness_timeout_sec = config::env_or(
+        "SENDER_LIVENESS_TIMEOUT_SEC",
+        config::server::DEFAULT_SENDER_LIVENESS_TIMEOUT_SEC,
+    );
+    let sender_liveness_timeout = std::time::Duration::from_secs(sender_liveness_timeout_sec);
+    let mut media_stall_reported = false;
 
     loop {
         tokio::select! {
@@ -181,6 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     control::ControlCommand::Stop => {
                         println!("[CONTROL WS] Received STOP command from independent control socket!");
                         management.stop("user_stop");
+                        media_stall_reported = false;
                         streaming_active.store(false, Ordering::Relaxed);
                         if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                         if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
@@ -218,6 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     control::ControlCommand::AdminStop => {
                         println!("[ADMIN] Received administrative stop command");
                         management.stop("admin_stop");
+                        media_stall_reported = false;
                         streaming_active.store(false, Ordering::Relaxed);
                         if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                         if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
@@ -248,6 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         println!("[CONTROL WS] Received START command: codec={:?}, res={:?}, fps={:?}, bitrate={:?}, latency_mode={:?}, aspect_mode={:?}", req_codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode);
                         streaming_active.store(true, Ordering::Relaxed);
+                        media_stall_reported = false;
                         let res_str = resolution.unwrap_or_else(|| config::telemetry::DEFAULT_ACTIVE_RESOLUTION.to_string());
                         let stream_fps = fps.unwrap_or(config::telemetry::DEFAULT_ACTIVE_FPS);
                         let bw = bitrate_mbps.unwrap_or(config::telemetry::DEFAULT_ACTIVE_BITRATE_MBPS);
@@ -463,6 +472,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let latency_ms = frame.first_packet_at.elapsed().as_secs_f32() * 1000.0;
                         sent += 1;
+                        media_stall_reported = false;
                         management.record_frame(frame_seq, frame_bytes, latency_ms as f64);
                         if sent == 1 || sent % 30 == 0 {
                             println!("[PLAYBACK] submitted_{}_access_units={sent} (latency={latency_ms:.1}ms)", frame.codec);
@@ -499,9 +509,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => {
                         // Timeout waiting for frames (30s idle)
                         if streaming_active.load(Ordering::Relaxed) {
+                            if management.active_sender_heartbeat_fresh(sender_liveness_timeout) {
+                                if !media_stall_reported {
+                                    println!("[PLAYBACK] No media frames for {}s; active sender heartbeat is fresh, keeping the last frame", idle_timeout_sec);
+                                    management.event(
+                                        "warn",
+                                        "media_stalled_sender_alive",
+                                        format!("no frames for {idle_timeout_sec}s while sender heartbeat remained fresh"),
+                                    );
+                                    media_stall_reported = true;
+                                }
+                                continue;
+                            }
                             println!("[PLAYBACK] Stream idle timeout; restoring HDMI IP dashboard...");
                             management.stop("idle_timeout");
                             streaming_active.store(false, Ordering::Relaxed);
+                            media_stall_reported = false;
                             if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }

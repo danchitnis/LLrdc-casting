@@ -159,6 +159,7 @@ pub async fn run_server_with_identity(
 mod tests {
     use super::{normalize_peer_ip, route_control_payload, udp_receive_buffer_bytes};
     use crate::control::{ControlCommand, TelemetryMessage};
+    use crate::management::{ClientMetadata, ManagementState};
     use std::net::IpAddr;
     use tokio::sync::mpsc;
 
@@ -184,6 +185,12 @@ mod tests {
     async fn ping_is_answered_on_the_originating_control_channel() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
         let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+        let management = ManagementState::new();
+        management.hello(ClientMetadata {
+            device_id: "test".into(), user_agent: "test".into(), platform: "test".into(),
+            language: "en".into(), page_session_id: "test-page".into(),
+            remote_ip: "127.0.0.1".into(), connection_id: "test".into(),
+        });
 
         route_control_payload(
             br#"{"type":"ping","id":42}"#,
@@ -191,10 +198,12 @@ mod tests {
             &outbound_tx,
             "test",
             "127.0.0.1",
+            &management,
         )
         .await;
 
         assert!(cmd_rx.try_recv().is_err());
+        assert!(management.touch_connection("test"));
         let payload = outbound_rx.recv().await.expect("targeted pong");
         let pong: TelemetryMessage = serde_json::from_slice(&payload).expect("valid pong");
         assert!(matches!(pong, TelemetryMessage::Pong { id: Some(42) }));
@@ -204,8 +213,9 @@ mod tests {
     async fn legacy_ping_without_id_is_still_answered() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
         let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+        let management = ManagementState::new();
 
-        route_control_payload(br#"{"type":"ping"}"#, &cmd_tx, &outbound_tx, "test", "127.0.0.1").await;
+        route_control_payload(br#"{"type":"ping"}"#, &cmd_tx, &outbound_tx, "test", "127.0.0.1", &management).await;
 
         assert!(cmd_rx.try_recv().is_err());
         let payload = outbound_rx.recv().await.expect("legacy pong");
@@ -217,8 +227,9 @@ mod tests {
     async fn non_ping_commands_still_reach_the_device_command_queue() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
         let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+        let management = ManagementState::new();
 
-        route_control_payload(br#"{"type":"get_status"}"#, &cmd_tx, &outbound_tx, "test", "127.0.0.1").await;
+        route_control_payload(br#"{"type":"get_status"}"#, &cmd_tx, &outbound_tx, "test", "127.0.0.1", &management).await;
 
         assert!(matches!(cmd_rx.recv().await, Some(ControlCommand::GetStatus)));
         assert!(outbound_rx.try_recv().is_err());
@@ -292,6 +303,7 @@ async fn handle_connection(
                             control_channel.clone(),
                             connection_id.clone(),
                             peer.clone(),
+                            management.clone(),
                         ));
                     }
                     Err(e) => println!("[WEBTRANSPORT] Control stream channel closed ({})", e),
@@ -354,6 +366,7 @@ async fn handle_control_stream(
     control_channel: crate::control::ControlChannel,
     connection_id: String,
     remote_ip: String,
+    management: ManagementState,
 ) {
     let mut length = [0u8; config::transport::LENGTH_PREFIX_BYTES];
     if recv_stream.read_exact(&mut length).await.is_err() {
@@ -402,7 +415,7 @@ async fn handle_control_stream(
         .cmd_tx
         .send(crate::control::ControlCommand::GetStatus)
         .await;
-    route_control_payload(&first_payload, &control_channel.cmd_tx, &outbound_tx, &connection_id, &remote_ip).await;
+    route_control_payload(&first_payload, &control_channel.cmd_tx, &outbound_tx, &connection_id, &remote_ip, &management).await;
     loop {
         let mut length = [0u8; config::transport::LENGTH_PREFIX_BYTES];
         if recv_stream.read_exact(&mut length).await.is_err() {
@@ -416,10 +429,13 @@ async fn handle_control_stream(
         if recv_stream.read_exact(&mut payload).await.is_err() {
             break;
         }
-        route_control_payload(&payload, &control_channel.cmd_tx, &outbound_tx, &connection_id, &remote_ip).await;
+        route_control_payload(&payload, &control_channel.cmd_tx, &outbound_tx, &connection_id, &remote_ip, &management).await;
     }
     telemetry_task.abort();
     writer_task.abort();
+    if management.connection_closed(&connection_id) {
+        let _ = control_channel.cmd_tx.send(crate::control::ControlCommand::Stop).await;
+    }
 }
 
 async fn route_control_payload(
@@ -428,6 +444,7 @@ async fn route_control_payload(
     outbound_tx: &mpsc::Sender<Vec<u8>>,
     connection_id: &str,
     remote_ip: &str,
+    management: &ManagementState,
 ) {
     let Ok(mut command) = serde_json::from_slice::<crate::control::ControlCommand>(payload) else {
         return;
@@ -442,6 +459,7 @@ async fn route_control_payload(
     }
     match command {
         crate::control::ControlCommand::Ping { id } => {
+            management.touch_connection(connection_id);
             let response = crate::control::TelemetryMessage::Pong { id };
             if let Ok(response_payload) = serde_json::to_vec(&response) {
                 let _ = outbound_tx.send(response_payload).await;

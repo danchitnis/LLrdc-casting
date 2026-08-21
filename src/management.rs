@@ -205,15 +205,57 @@ impl ManagementState {
         let _ = self.updates.send(());
     }
 
-    pub fn connection_closed(&self, connection_id: &str) {
-        if let Ok(mut inner) = self.inner.lock() {
+    pub fn connection_closed(&self, connection_id: &str) -> bool {
+        let sender_was_active = if let Ok(mut inner) = self.inner.lock() {
             let elapsed = inner.started.elapsed().as_secs_f64();
             if let Some(connection) = inner.connections.get_mut(connection_id) { connection.connected = false; connection.sharing = false; connection.last_seen_at_sec = elapsed; }
-            if inner.stream.as_ref().and_then(|s| s.sender.as_ref()).is_some_and(|s| s.connection_id == connection_id) {
+            let sender_was_active = inner.stream.as_ref().and_then(|s| s.sender.as_ref()).is_some_and(|s| s.connection_id == connection_id);
+            if sender_was_active {
                 finish_locked(&mut inner, "disconnect");
             }
-        }
+            sender_was_active
+        } else { false };
         self.event("info", "connection", format!("{connection_id} disconnected"));
+        sender_was_active
+    }
+
+    /// Refresh activity for a live WebTransport connection. This is separate
+    /// from frame accounting so a sender can remain connected while its
+    /// browser media pipeline is temporarily paused in a background tab.
+    pub fn touch_connection(&self, connection_id: &str) -> bool {
+        let touched = if let Ok(mut inner) = self.inner.lock() {
+            let elapsed = inner.started.elapsed().as_secs_f64();
+            if let Some(connection) = inner.connections.get_mut(connection_id) {
+                if connection.connected {
+                    connection.last_seen_at_sec = elapsed;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if touched { let _ = self.updates.send(()); }
+        touched
+    }
+
+    /// Return whether the sender owning the active stream has recently
+    /// touched its authenticated connection. A different paired client must
+    /// never keep another client's stream alive.
+    pub fn active_sender_heartbeat_fresh(&self, max_age: Duration) -> bool {
+        let Ok(inner) = self.inner.lock() else { return false; };
+        let Some(sender) = inner.stream.as_ref().and_then(|stream| stream.sender.as_ref()) else {
+            return false;
+        };
+        let Some(connection) = inner.connections.get(&sender.connection_id) else {
+            return false;
+        };
+        if !connection.connected { return false; }
+        let now = inner.started.elapsed().as_secs_f64();
+        now - connection.last_seen_at_sec <= max_age.as_secs_f64()
     }
 
     pub fn start(&self, config: StreamConfigSnapshot, sender: Option<ClientMetadata>) {
@@ -234,6 +276,14 @@ impl ManagementState {
         if let Ok(mut inner) = self.inner.lock() {
             let now = Instant::now();
             let elapsed = inner.started.elapsed().as_secs_f64();
+            let sender_connection_id = inner.stream.as_ref()
+                .and_then(|stream| stream.sender.as_ref())
+                .map(|sender| sender.connection_id.clone());
+            if let Some(connection_id) = sender_connection_id {
+                if let Some(connection) = inner.connections.get_mut(&connection_id) {
+                    connection.last_seen_at_sec = elapsed;
+                }
+            }
             if let Some(stream) = inner.stream.as_mut() {
                 stream.frames += 1; stream.bytes += bytes as u64; stream.sample_bytes += bytes as u64; stream.sample_frames += 1;
                 if let Some(last) = stream.last_seq { if seq > last + 1 { stream.sequence_gaps += (seq - last - 1) as u64; } }
@@ -309,6 +359,14 @@ mod tests {
         StreamConfigSnapshot { codec: "H265".into(), resolution: "1920x1088".into(), fps: 30, bitrate_mbps: 6.0, latency_mode: "ULL".into(), aspect_mode: "preserve".into(), capture_resolution: "1920x1080".into(), encoded_resolution: "1920x1088".into() }
     }
 
+    fn client(connection_id: &str) -> ClientMetadata {
+        ClientMetadata {
+            device_id: connection_id.into(), user_agent: "test".into(), platform: "test".into(),
+            language: "en".into(), page_session_id: format!("page-{connection_id}"),
+            remote_ip: "127.0.0.1".into(), connection_id: connection_id.into(),
+        }
+    }
+
     #[test]
     fn lifecycle_records_frames_and_stop_reason() {
         let state = ManagementState::new();
@@ -331,5 +389,25 @@ mod tests {
         assert!(state.stop("user_stop"));
         assert!(!state.stop("admin_stop"));
         assert_eq!(state.snapshot().history.len(), 1);
+    }
+
+    #[test]
+    fn connection_activity_refreshes_only_live_connections() {
+        let state = ManagementState::new();
+        state.hello(client("sender"));
+        assert!(state.touch_connection("sender"));
+        state.connection_closed("sender");
+        assert!(!state.touch_connection("sender"));
+    }
+
+    #[test]
+    fn active_sender_heartbeat_is_scoped_to_stream_owner() {
+        let state = ManagementState::new();
+        state.hello(client("sender"));
+        state.hello(client("other"));
+        state.start(config(), Some(client("sender")));
+        assert!(state.active_sender_heartbeat_fresh(Duration::from_secs(1)));
+        state.connection_closed("sender");
+        assert!(!state.active_sender_heartbeat_fresh(Duration::from_secs(1)));
     }
 }

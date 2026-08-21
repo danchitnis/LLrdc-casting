@@ -143,6 +143,7 @@ usage() {
   echo "  --dashboard | --no-dashboard                Enable or disable idle dashboard"
   echo "  --dashboard-mode=<raw|hevc>                 Idle dashboard codec"
   echo "  --idle-timeout-sec=<seconds>                Idle timeout (default: 30)"
+  echo "  --sender-liveness-timeout-sec=<seconds>     Sender heartbeat grace (default: 90)"
   echo "  --pairing-code-ttl-sec=<seconds>            Pairing-code lifetime (default: 3600)"
   echo "  --pairing-code=<alphanumeric>               Fixed test pairing code"
   echo "  --http-port=<port>                          HTTP/UI port (default: 8080)"
@@ -184,6 +185,7 @@ write_runtime_env() {
     printf 'IDLE_DASHBOARD=%s\n' "$idle_dashboard"
     printf 'IDLE_DASHBOARD_MODE=%s\n' "$idle_dashboard_mode"
     printf 'IDLE_TIMEOUT_SEC=%s\n' "$idle_timeout_sec"
+    printf 'SENDER_LIVENESS_TIMEOUT_SEC=%s\n' "$sender_liveness_timeout_sec"
     printf 'PAIRING_CODE_TTL_SEC=%s\n' "$pairing_code_ttl_sec"
     printf 'PAIRING_CODE_FIXED=%s\n' "$pairing_code_fixed"
     printf 'HTTP_PORT=%s\n' "$http_port"
@@ -315,6 +317,7 @@ case "$action" in
     dashboard_override=""
     dashboard_mode_override=""
     idle_timeout_override=""
+    sender_liveness_timeout_override=""
     pairing_code_ttl_override=""
     http_port_override=""
     admin_bind_address_override=""
@@ -338,6 +341,7 @@ case "$action" in
         --no-dashboard) dashboard_override=0 ;;
         --dashboard-mode=*) dashboard_mode_override="${1#*=}" ;;
         --idle-timeout-sec=*) idle_timeout_override="${1#*=}" ;;
+        --sender-liveness-timeout-sec=*) sender_liveness_timeout_override="${1#*=}" ;;
         --pairing-code-ttl-sec=*) pairing_code_ttl_override="${1#*=}" ;;
         --cloud=true) cloud_override=1 ;;
         --cloud=false) cloud_override=0 ;;
@@ -375,6 +379,7 @@ case "$action" in
     idle_dashboard="${SERVER_IDLE_DASHBOARD:-${BOARD_IDLE_DASHBOARD:-1}}"
     idle_dashboard_mode="${SERVER_IDLE_DASHBOARD_MODE:-${BOARD_IDLE_DASHBOARD_MODE:-raw}}"
     idle_timeout_sec="${SERVER_IDLE_TIMEOUT_SEC:-${BOARD_IDLE_TIMEOUT_SEC:-30}}"
+    sender_liveness_timeout_sec="${SENDER_LIVENESS_TIMEOUT_SEC:-${SERVER_SENDER_LIVENESS_TIMEOUT_SEC:-${BOARD_SENDER_LIVENESS_TIMEOUT_SEC:-90}}}"
     pairing_code_ttl_sec="${SERVER_PAIRING_CODE_TTL_SEC:-${BOARD_PAIRING_CODE_TTL_SEC:-3600}}"
     http_port="${SERVER_HTTP_PORT:-${BOARD_HTTP_PORT:-8080}}"
     admin_bind_address="${SERVER_ADMIN_BIND_ADDRESS:-${BOARD_ADMIN_BIND_ADDRESS:-$board_ip}}"
@@ -392,6 +397,7 @@ case "$action" in
     if [[ -n "$dashboard_override" ]]; then idle_dashboard="$dashboard_override"; fi
     if [[ -n "$dashboard_mode_override" ]]; then idle_dashboard_mode="$dashboard_mode_override"; fi
     if [[ -n "$idle_timeout_override" ]]; then idle_timeout_sec="$idle_timeout_override"; fi
+    if [[ -n "$sender_liveness_timeout_override" ]]; then sender_liveness_timeout_sec="$sender_liveness_timeout_override"; fi
     if [[ -n "$pairing_code_ttl_override" ]]; then pairing_code_ttl_sec="$pairing_code_ttl_override"; fi
     if [[ -n "$http_port_override" ]]; then http_port="$http_port_override"; fi
     if [[ -n "$admin_bind_address_override" ]]; then admin_bind_address="$admin_bind_address_override"; fi
@@ -419,6 +425,7 @@ case "$action" in
     esac
     [[ "$idle_dashboard_mode" == "raw" || "$idle_dashboard_mode" == "hevc" ]] || die "Dashboard mode must be 'raw' or 'hevc'."
     validate_positive_integer "Idle timeout" "$idle_timeout_sec"
+    validate_positive_integer "Sender liveness timeout" "$sender_liveness_timeout_sec"
     validate_positive_integer "Pairing-code lifetime" "$pairing_code_ttl_sec"
     validate_port "HTTP port" "$http_port"
     validate_port "Admin port" "$admin_port"

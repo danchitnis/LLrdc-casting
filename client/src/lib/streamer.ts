@@ -16,6 +16,8 @@ import {
   updateDisplayFpsGuardrails,
 } from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
+import StreamWorker from './stream-worker.ts?worker&inline';
+import type { StreamWorkerOutboundMessage } from './stream-worker-protocol';
 import {
   CERTIFICATE_CONFIG,
   CODEC_RESOLUTION_LIMITS,
@@ -113,6 +115,9 @@ let trackProcessor: TrackProcessorInstance | null = null;
 let trackProcessorReader: ReadableStreamDefaultReader<VideoFrame> | null = null;
 let videoEncoder: VideoEncoder | null = null;
 let frameCompositor: VideoFrameCompositor | null = null;
+let streamWorker: Worker | null = null;
+let streamWorkerStopPromise: Promise<void> | null = null;
+let streamWorkerStopResolve: (() => void) | null = null;
 let outputGeometry: DisplayGeometry | null = null;
 let isStreaming = false;
 let isRemoteStreaming = false;
@@ -158,7 +163,19 @@ function stopPingSampling(resetMetric = true): void {
 }
 
 async function sendPing(): Promise<void> {
-  if (!controlIsConnected() || document.visibilityState !== 'visible') return;
+  if (!controlIsConnected()) return;
+  const measureRtt = document.visibilityState === 'visible';
+  if (!measureRtt) {
+    // Background tabs still need an application-level liveness signal, but
+    // the hidden-page RTT is not useful to display and may be heavily
+    // timer-throttled by the browser.
+    try {
+      await sendControlMessage({ type: 'ping' });
+    } catch {
+      markControlDisconnected();
+    }
+    return;
+  }
   if (pendingPing) {
     if (performance.now() - pendingPing.sentAt <= TRANSPORT_CONFIG.PING_RESPONSE_TIMEOUT_MS) return;
     pendingPing = null;
@@ -177,7 +194,7 @@ async function sendPing(): Promise<void> {
 
 function startPingSampling(): void {
   stopPingSampling(false);
-  if (!controlIsConnected() || document.visibilityState !== 'visible') return;
+  if (!controlIsConnected()) return;
   void sendPing();
   pingTimer = window.setInterval(() => { void sendPing(); }, TRANSPORT_CONFIG.KEEPALIVE_INTERVAL_MS);
 }
@@ -482,7 +499,11 @@ export function initPairing(): void {
       if (document.visibilityState === 'visible') {
         startPingSampling();
       } else {
-        stopPingSampling();
+        // Keep the interval alive while hidden so the receiver can distinguish
+        // a background-tab media pause from a disconnected sender.
+        pendingPing = null;
+        updateDevicePing(null);
+        if (controlIsConnected() && pingTimer === null) startPingSampling();
       }
     });
     pingVisibilityHandlerInstalled = true;
@@ -506,6 +527,25 @@ export async function stopStreaming(): Promise<void> {
 
   if (controlIsConnected()) {
     try { await sendControlMessage({ type: 'stop' }); } catch (e) {}
+  }
+
+  if (streamWorker) {
+    const worker = streamWorker;
+    const stopWaiter = new Promise<void>((resolve) => { streamWorkerStopResolve = resolve; });
+    streamWorkerStopPromise = stopWaiter;
+    try {
+      worker.postMessage({ type: 'stop' });
+      await Promise.race([
+        stopWaiter,
+        new Promise<void>(resolve => window.setTimeout(resolve, 500)),
+      ]);
+    } catch (e) {
+      log(`[WORKER] Stop handshake failed: ${(e as Error).message}`, true);
+    }
+    worker.terminate();
+    if (streamWorker === worker) streamWorker = null;
+    streamWorkerStopPromise = null;
+    streamWorkerStopResolve = null;
   }
 
   if (uniStreamWriter) {
@@ -699,6 +739,8 @@ export async function toggleCasting(): Promise<void> {
         log('[SCREEN CAPTURE] User stopped casting.');
         stopStreaming();
       };
+      activeVideoTrack.onmute = () => log('[SCREEN CAPTURE] Capture track muted by the browser.', true);
+      activeVideoTrack.onunmute = () => log('[SCREEN CAPTURE] Capture track resumed.');
     }
 
     const trackSettings = activeVideoTrack ? activeVideoTrack.getSettings() : {};
@@ -840,7 +882,90 @@ export async function toggleCasting(): Promise<void> {
 
     log(`[WEBCODECS] Initializing ${wireCodec} Encoder (${codecString}) at ${activeWidth}x${activeHeight} [${isSWRequested ? 'SW CPU' : (hardwarePreferenceSupported ? 'HW preferred' : 'browser default')}]...`);
 
+    const TrackProcessorClass = window.MediaStreamTrackProcessor;
     let forceNextKeyframe = false;
+
+    // Chromium/Edge can keep the capture processor, encoder, compositor, and
+    // WebTransport writer active in a dedicated worker while this page is
+    // backgrounded. Safari continues through the main-thread fallback below.
+    const chromiumWorkerCandidate = /(?:Chrome|Chromium|Edg\/)/.test(navigator.userAgent);
+    if (chromiumWorkerCandidate && TrackProcessorClass && activeVideoTrack && transport) {
+      try {
+        const processor = new TrackProcessorClass({ track: activeVideoTrack });
+        const uniStream = await transport.createUnidirectionalStream();
+        const mediaWritable = uniStream as unknown as WritableStream<Uint8Array>;
+        const worker = new StreamWorker();
+        streamWorker = worker;
+        streamWorkerStopPromise = null;
+        streamWorkerStopResolve = null;
+        worker.onmessage = (event: MessageEvent<StreamWorkerOutboundMessage>) => {
+          const message = event.data;
+          if (message.type === 'progress' && typeof message.sequence === 'number') {
+            seqNum = message.sequence;
+            const frameStat = document.getElementById('statFrameCount');
+            if (frameStat) frameStat.textContent = message.sequence.toString();
+          } else if (message.type === 'log' && message.message) {
+            log(message.message, !!message.isError);
+          } else if (message.type === 'error' && message.message) {
+            log(`[WORKER ERROR] ${message.message}`, true);
+            if (streamWorker === worker) {
+              worker.terminate();
+              streamWorker = null;
+              void stopStreaming();
+            }
+          } else if (message.type === 'stopped') {
+            streamWorkerStopResolve?.();
+            streamWorkerStopResolve = null;
+            if (streamWorkerStopPromise) streamWorkerStopPromise = null;
+            if (isStreaming && streamWorker === worker) {
+              log('[WORKER] Capture processor ended unexpectedly.', true);
+              worker.terminate();
+              streamWorker = null;
+              void stopStreaming();
+            }
+          }
+        };
+        worker.onerror = (event) => {
+          log(`[WORKER ERROR] ${event.message || 'Dedicated worker failed'}`, true);
+          if (streamWorker === worker) {
+            worker.terminate();
+            streamWorker = null;
+            void stopStreaming();
+          }
+        };
+        worker.postMessage({
+          type: 'start',
+          readable: processor.readable,
+          writable: mediaWritable,
+          wireCodec,
+          codecString,
+          width: activeWidth,
+          height: activeHeight,
+          bitrate: targetBitrate,
+          framerate: targetFps,
+          latencyMode: webcodecsLatencyMode as 'quality' | 'realtime',
+          hardwareAcceleration: hardwarePref,
+          aspectMode: compositorAspectMode,
+          displayGeometry,
+          keyframeInterval,
+        }, [processor.readable as unknown as Transferable, mediaWritable as unknown as Transferable]);
+        trackProcessor = processor;
+        frameCompositor = null;
+        updateStatus('active', 'STREAMING');
+        const toggleBtn = document.getElementById('toggleBtn');
+        const toggleText = document.getElementById('toggleText');
+        if (toggleBtn && toggleText) {
+          toggleText.textContent = 'Stop Casting';
+          toggleBtn.className = 'btn-primary stop';
+        }
+        log('[WEBCODECS] Dedicated worker owns capture, encoding, and media transport.');
+        return;
+      } catch (workerError) {
+        streamWorker?.terminate();
+        streamWorker = null;
+        log(`[WORKER] Dedicated media path unavailable; using main-thread fallback: ${(workerError as Error).message}`, true);
+      }
+    }
 
     videoEncoder = new VideoEncoder({
       output: async (chunk, metadata) => {
@@ -885,7 +1010,6 @@ export async function toggleCasting(): Promise<void> {
       toggleBtn.className = 'btn-primary stop';
     }
 
-    const TrackProcessorClass = window.MediaStreamTrackProcessor;
     const minFrameIntervalMs = 1000 / targetFps - ENCODER_GUARDRAILS.FRAME_TIMING_SLACK_MS;
     if (!TrackProcessorClass || !activeVideoTrack) {
       if (!activeVideoTrack || typeof VideoFrame === 'undefined') {
@@ -1014,8 +1138,17 @@ export async function toggleCasting(): Promise<void> {
           rawFrame.close();
         }
       } catch (readErr) {
+        if (isStreaming) {
+          const errObj = readErr as Error;
+          log(`[TRACK PROCESSOR ERROR] ${errObj.message || String(readErr)}`, true);
+        }
         break;
       }
+    }
+
+    if (isStreaming) {
+      log('[TRACK PROCESSOR] Capture readable ended before casting was stopped.', true);
+      await stopStreaming();
     }
 
   } catch (err) {
