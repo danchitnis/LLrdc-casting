@@ -130,6 +130,17 @@ let pingTimer: number | null = null;
 let pingSequence = 0;
 let pendingPing: { id: number; sentAt: number } | null = null;
 let pingVisibilityHandlerInstalled = false;
+type DiagnosticLevel = 'info' | 'warn' | 'error';
+
+interface PendingDiagnostic {
+  level: DiagnosticLevel;
+  message: string;
+}
+
+const MAX_PENDING_DIAGNOSTICS = 100;
+const MAX_DIAGNOSTIC_MESSAGE_CHARS = 4096;
+const pendingDiagnostics: PendingDiagnostic[] = [];
+let diagnosticsFlushActive = false;
 const pageSessionId = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
   ? crypto.randomUUID()
   : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -151,6 +162,66 @@ function getDeviceId(): string {
 function updateDevicePing(value: number | null): void {
   const stat = document.getElementById('statDevicePing');
   if (stat) stat.textContent = value === null ? '--' : `${Math.round(value)} ms`;
+}
+
+function friendlyDiagnostic(message: string): string {
+  const normalized = message.toLowerCase();
+  if (normalized.includes('pairing') || normalized.includes('receiver code')) {
+    return 'Pairing failed. Check the receiver code and try again.';
+  }
+  if (normalized.includes('capture') || normalized.includes('display error') || normalized.includes('screen capture')) {
+    return 'Screen sharing is unavailable or was stopped. Choose a screen and try again.';
+  }
+  if (normalized.includes('unsupported') || normalized.includes('resolution') || normalized.includes('guardrail')) {
+    return 'The selected output is not supported. Choose a lower resolution or another codec.';
+  }
+  if (normalized.includes('connection') || normalized.includes('webtransport') || normalized.includes('control')) {
+    return 'Connection to the receiver was lost. Reconnect and try again.';
+  }
+  if (normalized.includes('encoder') || normalized.includes('worker') || normalized.includes('track processor')) {
+    return 'Casting encountered an encoding problem. Try again or choose H.264.';
+  }
+  return 'Casting needs attention. Check your connection and try again.';
+}
+
+function showUserNotice(message: string, isError = false): void {
+  const notice = document.getElementById('userNotice');
+  if (!notice) return;
+  notice.textContent = message;
+  notice.className = `user-notice ${isError ? 'error' : 'info'}`;
+  notice.removeAttribute('hidden');
+}
+
+function clearUserNotice(): void {
+  const notice = document.getElementById('userNotice');
+  if (!notice) return;
+  notice.textContent = '';
+  notice.setAttribute('hidden', '');
+}
+
+function queueDiagnostic(level: DiagnosticLevel, message: string): void {
+  if (pendingDiagnostics.length >= MAX_PENDING_DIAGNOSTICS) pendingDiagnostics.shift();
+  pendingDiagnostics.push({ level, message: message.slice(0, MAX_DIAGNOSTIC_MESSAGE_CHARS) });
+  if (controlIsConnected()) void flushDiagnostics();
+}
+
+async function flushDiagnostics(): Promise<void> {
+  if (diagnosticsFlushActive || !controlIsConnected()) return;
+  diagnosticsFlushActive = true;
+  try {
+    while (controlIsConnected() && pendingDiagnostics.length > 0) {
+      const diagnostic = pendingDiagnostics.shift();
+      if (!diagnostic) break;
+      try {
+        await sendControlMessage({ type: 'client_diagnostic', ...diagnostic });
+      } catch {
+        pendingDiagnostics.unshift(diagnostic);
+        break;
+      }
+    }
+  } finally {
+    diagnosticsFlushActive = false;
+  }
 }
 
 function stopPingSampling(resetMetric = true): void {
@@ -210,6 +281,7 @@ function markControlDisconnected(): void {
   stopPingSampling();
   controlWriter = null;
   updateStatus('disconnected', 'DISCONNECTED');
+  showUserNotice('Connection to the receiver was lost. Reconnect and try again.', true);
 }
 
 function parseResolution(value: string | undefined): [number, number] | null {
@@ -244,11 +316,6 @@ export function setSettingsDisabled(disabled: boolean): void {
   }
 }
 
-export function clearLogs(): void {
-  const logDiv = document.getElementById('log');
-  if (logDiv) logDiv.textContent = '';
-}
-
 export function log(msg: string, isError = false): void {
   const consoleMessage = `[LLRDC UI] ${msg}`;
   if (isError) {
@@ -256,19 +323,8 @@ export function log(msg: string, isError = false): void {
   } else {
     console.info(consoleMessage);
   }
-  const logDiv = document.getElementById('log');
-  if (!logDiv) return;
-  const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
-  const line = `[${timestamp}] ${msg}\n`;
-  if (isError) {
-    const span = document.createElement('span');
-    span.style.color = '#f87171';
-    span.textContent = line;
-    logDiv.appendChild(span);
-  } else {
-    logDiv.appendChild(document.createTextNode(line));
-  }
-  logDiv.scrollTop = logDiv.scrollHeight;
+  queueDiagnostic(isError ? 'error' : 'info', msg);
+  if (isError) showUserNotice(friendlyDiagnostic(msg), true);
 }
 
 export function updateStatus(state: 'connected' | 'connecting' | 'active' | 'disconnected', label: string): void {
@@ -415,8 +471,10 @@ async function openPairedTransport(): Promise<void> {
     language: navigator.language,
     page_session_id: pageSessionId,
   });
+  await flushDiagnostics();
   await sendControlMessage({ type: 'get_status' });
   updateStatus('connected', 'CONNECTED');
+  clearUserNotice();
   startPingSampling();
   log('[WEBTRANSPORT] Connected directly to receiver over the LAN.');
 }
@@ -524,6 +582,8 @@ export async function stopStreaming(): Promise<void> {
   seqNum = 0;
   const frameStat = document.getElementById('statFrameCount');
   if (frameStat) frameStat.textContent = '0';
+  const outputStat = document.getElementById('statEncodedOutput');
+  if (outputStat) outputStat.textContent = 'Not streaming';
 
   if (controlIsConnected()) {
     try { await sendControlMessage({ type: 'stop' }); } catch (e) {}
@@ -951,6 +1011,7 @@ export async function toggleCasting(): Promise<void> {
         }, [processor.readable as unknown as Transferable, mediaWritable as unknown as Transferable]);
         trackProcessor = processor;
         frameCompositor = null;
+        clearUserNotice();
         updateStatus('active', 'STREAMING');
         const toggleBtn = document.getElementById('toggleBtn');
         const toggleText = document.getElementById('toggleText');
@@ -1001,6 +1062,7 @@ export async function toggleCasting(): Promise<void> {
       hardwareAcceleration: hardwarePref
     });
 
+    clearUserNotice();
     updateStatus('active', 'STREAMING');
 
     const toggleBtn = document.getElementById('toggleBtn');
@@ -1244,6 +1306,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
 
   if (msg.state === 'STREAMING') {
     if (isStreaming) {
+      clearUserNotice();
       updateStatus('active', 'STREAMING');
       setSettingsDisabled(true);
       if (toggleBtn && toggleText) {
@@ -1253,6 +1316,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
       }
     } else {
       isRemoteStreaming = true;
+      clearUserNotice();
       updateStatus('active', 'IN USE');
       setSettingsDisabled(true);
       if (toggleBtn && toggleText) {

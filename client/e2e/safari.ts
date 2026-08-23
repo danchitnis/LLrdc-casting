@@ -133,6 +133,19 @@ class SafariDriver {
     }
     throw new Error(`Timed out waiting for ${description}; last value: ${redact(last)}`);
   }
+
+  async waitForEnabled(selector: string, description: string, timeoutMs = 15_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const enabled = await this.execute<boolean>(`return (() => {
+        const element = document.querySelector(arguments[0]);
+        return Boolean(element && !element.disabled);
+      })()`, [selector]);
+      if (enabled) return;
+      await sleep(250);
+    }
+    throw new Error(`Timed out waiting for ${description} to be enabled`);
+  }
 }
 
 function receiverRead(): string {
@@ -225,6 +238,7 @@ async function runCycle(driver: SafariDriver, codec: 'H265' | 'H264', before: st
   await select(driver, '#videoSource', 'synthetic');
   await select(driver, '#fps', '30');
   await select(driver, '#aspectMode', 'preserve');
+  await driver.waitForEnabled('#toggleBtn', `${codec} Start Casting button`);
   await driver.click('#toggleBtn');
   await driver.waitFor('#statusBadge', value => value.trim() === 'STREAMING', `${codec} STREAMING`, 30_000);
   await driver.waitFor('#settingsLockNotice', value => value.trim().length > 0, `${codec} settings lock`, 15_000);
@@ -266,8 +280,7 @@ async function main(): Promise<void> {
 
     const diagnostics = (await driver.execute<JsonObject>(`return (() => {
       const state = window.__llrdcSafariDiagnostics || { consoleMessages: [], consoleErrors: [], pageErrors: [], requestFailures: [] };
-      const log = document.querySelector('#log');
-      return { ...state, domLog: log ? log.textContent || '' : '' };
+      return state;
     })()`)) || {};
     writeFileSync(diagnosticsPath, JSON.stringify(diagnostics, null, 2));
     const failures = [
@@ -276,10 +289,6 @@ async function main(): Promise<void> {
       ...((diagnostics.requestFailures as string[]) || []),
     ];
     if (failures.length > 0) throw new Error(`Safari browser diagnostics reported failures:\n${failures.join('\n')}`);
-    const domLog = String(diagnostics.domLog || '');
-    if (domLog.includes('[PLAYBACK ERROR]') || domLog.includes('[BITSTREAM ERROR]')) {
-      throw new Error('Safari DOM log reported playback or bitstream errors');
-    }
   } catch (error) {
     try {
       const screenshot = await driver.screenshot();
@@ -289,8 +298,7 @@ async function main(): Promise<void> {
     try {
       const diagnostics = await driver.execute<JsonObject>(`return (() => {
         const state = window.__llrdcSafariDiagnostics || { consoleMessages: [], consoleErrors: [], pageErrors: [], requestFailures: [] };
-        const log = document.querySelector('#log');
-        return { ...state, domLog: log ? log.textContent || '' : '' };
+        return state;
       })()`);
       writeFileSync(diagnosticsPath, redact(JSON.stringify(diagnostics, null, 2)));
     } catch { /* preserve the original failure if the page is gone */ }

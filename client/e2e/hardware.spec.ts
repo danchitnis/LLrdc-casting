@@ -61,7 +61,7 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
   await expect(page.locator('#statusBadge')).toHaveText('CONNECTED', { timeout: 30_000 });
   await expect(page.locator('#toggleText')).toHaveText('Start Casting');
   await expect(page.locator('#settingsLockNotice')).toBeHidden();
-  await expect(page.locator('#log')).toContainText('[STOPPED] Casting session closed.');
+  await expect(page.locator('#userNotice')).toBeHidden();
   console.log(`[E2E] Completed ${testCase.name} cycle ${cycle}/${testCase.cycles}.`);
 }
 
@@ -102,10 +102,10 @@ test.describe('local codec matrix', () => {
     await pairThroughUi(page, process.env.E2E_PAIRING_CODE || '');
     const pairedLogs = receiver.read();
     expect(pairedLogs).not.toContain('[CLOUD DISCOVERY]');
-    await expect(page.locator('#statProtocol')).toHaveText('WebTransport / QUIC');
+    await expect(page.locator('#statusBadge')).toHaveText('CONNECTED');
     await expect.poll(async () => page.locator('#statSignal').textContent()).not.toBe('--');
     await expect.poll(async () => page.locator('#statDevicePing').textContent()).toMatch(/^\d+ ms$/);
-    await expect(page.locator('#log')).toContainText('[WEBTRANSPORT] Connected directly to receiver over the LAN.');
+    await expect(page.locator('#userNotice')).toBeHidden();
 
     await assertCodecSupport(page, 'H265', '1920x1080');
     await assertCodecSupport(page, 'H264', '1920x1080');

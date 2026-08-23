@@ -73,6 +73,13 @@ pub enum ControlCommand {
         id: Option<u64>,
     },
     GetStatus,
+    /// Browser-side diagnostic forwarded over the authenticated control stream.
+    /// The receiver derives the originating connection id from the stream and
+    /// must never trust a client-supplied identity.
+    ClientDiagnostic {
+        level: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

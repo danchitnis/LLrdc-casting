@@ -234,6 +234,34 @@ mod tests {
         assert!(matches!(cmd_rx.recv().await, Some(ControlCommand::GetStatus)));
         assert!(outbound_rx.try_recv().is_err());
     }
+
+    #[tokio::test]
+    async fn client_diagnostics_are_bounded_and_attributed_to_authenticated_connection() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+        let management = ManagementState::new();
+        management.hello(ClientMetadata {
+            device_id: "test-device".into(), user_agent: "test".into(), platform: "test".into(),
+            language: "en".into(), page_session_id: "test-page".into(),
+            remote_ip: "127.0.0.1".into(), connection_id: "wt-7".into(),
+        });
+
+        let long_message = "x".repeat(5000);
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "type": "client_diagnostic",
+            "level": "warning",
+            "message": long_message,
+        })).expect("diagnostic payload");
+        route_control_payload(&payload, &cmd_tx, &outbound_tx, "wt-7", "127.0.0.1", &management).await;
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(outbound_rx.try_recv().is_err());
+        let event = management.snapshot().events.into_iter().last().expect("diagnostic event");
+        assert_eq!(event.kind, "client_diagnostic");
+        assert_eq!(event.level, "warn");
+        assert!(event.message.starts_with("client=wt-7: "));
+        assert_eq!(event.message.chars().count(), "client=wt-7: ".chars().count() + 4096);
+    }
 }
 
 async fn handle_connection(
@@ -463,6 +491,25 @@ async fn route_control_payload(
             let response = crate::control::TelemetryMessage::Pong { id };
             if let Ok(response_payload) = serde_json::to_vec(&response) {
                 let _ = outbound_tx.send(response_payload).await;
+            }
+        }
+        crate::control::ControlCommand::ClientDiagnostic { level, message } => {
+            // Diagnostics are recorded at the authenticated transport boundary
+            // so the client cannot spoof another connection's identity.
+            management.touch_connection(connection_id);
+            let normalized_level = match level.to_ascii_lowercase().as_str() {
+                "error" => "error",
+                "warn" | "warning" => "warn",
+                "debug" => "debug",
+                _ => "info",
+            };
+            let bounded_message: String = message.chars().take(4096).collect();
+            if !bounded_message.is_empty() {
+                management.event(
+                    normalized_level,
+                    "client_diagnostic",
+                    format!("client={connection_id}: {bounded_message}"),
+                );
             }
         }
         command => {

@@ -316,6 +316,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // path remains for the older WebSocket endpoint.
                         control_channel.send_telemetry(control::TelemetryMessage::Pong { id });
                     }
+                    control::ControlCommand::ClientDiagnostic { level, message } => {
+                        let normalized_level = match level.to_ascii_lowercase().as_str() {
+                            "error" => "error",
+                            "warn" | "warning" => "warn",
+                            "debug" => "debug",
+                            _ => "info",
+                        };
+                        let bounded_message: String = message.chars().take(4096).collect();
+                        if !bounded_message.is_empty() {
+                            management.event(normalized_level, "client_diagnostic", format!("client=legacy: {bounded_message}"));
+                        }
+                    }
                     control::ControlCommand::GetStatus => {
                         let is_act = streaming_active.load(Ordering::Relaxed);
                         let state = if is_act { "STREAMING" } else { "IDLE" };

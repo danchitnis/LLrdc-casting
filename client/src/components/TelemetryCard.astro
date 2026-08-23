@@ -7,73 +7,35 @@
       <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
       </svg>
-      <h2>Connection & Telemetry</h2>
+      <h2>Cast status</h2>
     </div>
+    <span class="telemetry-hint">Live overview</span>
   </div>
 
   <div class="telemetry-grid">
     <div class="stat-box">
-      <span class="stat-label">Monitor EDID Info</span>
+      <span class="stat-label">Receiver</span>
       <span class="stat-value highlight" id="statEdidName">--</span>
     </div>
     <div class="stat-box">
-      <span class="stat-label">Monitor EDID Max Cap</span>
-      <span class="stat-value highlight" id="statEdidMax">--</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-label">HDMI Signal</span>
+      <span class="stat-label">Display</span>
       <span class="stat-value highlight" id="statSignal">--</span>
     </div>
-    <div class="stat-box">
-      <span class="stat-label">Physical Panel</span>
-      <span class="stat-value highlight" id="statPanel">--</span>
+    <div class="stat-box stat-box-wide">
+      <span class="stat-label">Output</span>
+      <span class="stat-value" id="statEncodedOutput">Not streaming</span>
+      <span class="stat-detail" id="statCodec">HEVC / H.265</span>
     </div>
     <div class="stat-box">
-      <span class="stat-label">Transport Protocol</span>
-      <span class="stat-value highlight" id="statProtocol">WebTransport / QUIC</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-label">Device Ping</span>
+      <span class="stat-label">Receiver latency</span>
       <span class="stat-value highlight" id="statDevicePing">--</span>
     </div>
     <div class="stat-box">
-      <span class="stat-label">Encoded Output</span>
-      <span class="stat-value" id="statEncodedOutput">--</span>
+      <span class="stat-label">Encoder</span>
+      <span class="stat-value" id="statEncoderHW">Checking...</span>
     </div>
     <div class="stat-box">
-       <span class="stat-label">Encoder Resolution</span>
-       <span class="stat-value" id="statScale">--</span>
-     </div>
-    <div class="stat-box">
-      <span class="stat-label">Native Capture</span>
-      <span class="stat-value" id="statCapture">--</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-label">Encoded Frame</span>
-      <span class="stat-value" id="statEncoded">--</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-label">Compositor Layout</span>
-      <span class="stat-value" id="statLayout">--</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-label">Active Codec</span>
-      <span class="stat-value" id="statCodec">HEVC / H.265</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-label">Client Encoder Mode</span>
-      <span class="stat-value highlight" id="statEncoderHW">Checking...</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-label">Target Bandwidth</span>
-      <span class="stat-value" id="statBitrate">Auto</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-label">Encoding Priority</span>
-      <span class="stat-value" id="statEncoderMode">ULL (Realtime)</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-label">Frames Processed</span>
+      <span class="stat-label">Frames sent</span>
       <span class="stat-value" id="statFrameCount">0</span>
     </div>
   </div>
@@ -110,9 +72,14 @@
     margin: 0;
   }
 
+  .telemetry-hint {
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+  }
+
   .telemetry-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     gap: 12px;
   }
 
@@ -124,7 +91,10 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0;
   }
+
+  .stat-box-wide { grid-column: span 2; }
 
   .stat-label {
     font-size: 0.72rem;
@@ -134,18 +104,29 @@
     letter-spacing: 0.04em;
   }
 
-  .stat-value {
+  .stat-value,
+  .stat-detail {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.95rem;
-    font-weight: 700;
-    color: #f8fafc;
     font-family: var(--font-mono);
   }
 
-  .stat-value.highlight {
-    color: var(--color-accent);
+  .stat-value {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #f8fafc;
+  }
+
+  .stat-detail {
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+  }
+
+  .stat-value.highlight { color: var(--color-accent); }
+
+  @media (max-width: 520px) {
+    .stat-box-wide { grid-column: span 1; }
   }
 </style>

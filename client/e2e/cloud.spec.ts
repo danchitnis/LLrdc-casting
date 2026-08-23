@@ -53,9 +53,8 @@ test.describe('cloud pairing handoff', () => {
       'direct LAN WebTransport handoff',
       30_000,
     );
-    await expect(page.locator('#statProtocol')).toHaveText('WebTransport / QUIC');
+    await expect(page.locator('#statusBadge')).toHaveText('CONNECTED');
     await expect.poll(async () => page.locator('#statSignal').textContent()).not.toBe('--');
-    await expect(page.locator('#log')).toContainText('[WEBTRANSPORT] Connected directly to receiver over the LAN.');
 
     await assertCodecSupport(page, 'H265', '1920x1080');
     await chooseCodec(page, 'H265', '1920x1080');
@@ -85,6 +84,5 @@ test.describe('cloud pairing handoff', () => {
     await expect(page.locator('#statusBadge')).toHaveText('CONNECTED', { timeout: 30_000 });
     await expect(page.locator('#toggleText')).toHaveText('Start Casting');
     await expect(page.locator('#settingsLockNotice')).toBeHidden();
-    await expect(page.locator('#log')).toContainText('[STOPPED] Casting session closed.');
   });
 });
