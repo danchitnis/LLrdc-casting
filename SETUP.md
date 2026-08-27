@@ -85,6 +85,12 @@ The deployment wrapper supports flags for all server settings, including
 `--receiver-registration-secret`, and `--pairing-token-public-key-file`.
 Run `./server.sh --help` for the complete syntax.
 
+After deployment, the Tailscale-only management portal exposes a Cloud
+discovery toggle for the existing `--cloud=true|false` setting. Applying a
+change validates the provisioned Cloudflare credentials, restarts the receiver,
+and reconnects the portal. A subsequent `./server.sh --start` writes its
+effective flag value and resets any portal change.
+
 Retrieve the active local pairing code over SSH without Cloudflare:
 
 ```bash

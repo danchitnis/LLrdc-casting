@@ -5,4 +5,5 @@
 #[derive(Debug, Clone, Copy)]
 pub enum AdminCommand {
     StopSharing,
+    RestartReceiver,
 }

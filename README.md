@@ -176,8 +176,13 @@ HTML file before embedding both files in the Rust binary.
 The portal shows live measured stream traffic, connected devices, process-life
 sharing history, receiver health, and structured events. **Stop sharing** sends
 an isolated admin command through the application boundary and restores the
-idle dashboard. The portal has no separate password because access is limited
-to the configured Tailscale interface.
+idle dashboard. The **Cloud discovery** control can enable or disable the
+existing `--cloud=true|false` setting; applying a change validates the
+provisioned Cloudflare credentials, atomically persists the boolean, and
+restarts the receiver. The portal reconnects automatically after the restart.
+Each later `server.sh --start` writes its effective `--cloud` value and resets
+any portal change. The portal has no separate password because access is
+limited to the configured Tailscale interface.
 
 To use an address without editing `config.yaml`:
 

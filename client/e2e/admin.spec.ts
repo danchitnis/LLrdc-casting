@@ -31,4 +31,38 @@ test.describe('receiver management portal', () => {
       writeDiagnostics(diagnostics, `${testInfo.project.name}-browser`);
     }
   });
+
+  test('toggles cloud discovery through a confirmed receiver restart', async ({ page }, testInfo) => {
+    const diagnostics = trackDiagnostics(page);
+    try {
+      await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });
+      await expect(page.locator('main > section').last()).toContainText('Cloud discovery');
+      await expect(page.locator('#cloudEnabled')).not.toBeChecked();
+      await expect(page.locator('#cloudConfig')).toContainText(/provisioning is ready|prerequisites missing/i);
+
+      await page.locator('#cloudEnabled').check();
+      await page.waitForTimeout(1_500);
+      await expect(page.locator('#cloudEnabled')).toBeChecked();
+      page.once('dialog', dialog => dialog.accept());
+      await page.locator('#saveCloud').click();
+      await expect(page.locator('#cloudSettingStatus')).toContainText(/restarting/i);
+      await expect(page.locator('#cloudEnabled')).toBeChecked({ timeout: 60_000 });
+      await expect(page.locator('#cloudSettingStatus')).toContainText(/active|reconnect/i, { timeout: 60_000 });
+      await expect(page.locator('#saveCloud')).toBeEnabled({ timeout: 60_000 });
+      await expect.poll(async () => (await page.locator('#health .metric').allTextContents()).map(value => value.replace(/\s+/g, '')), { timeout: 90_000 }).toContain('CloudREADY');
+
+      await page.locator('#cloudEnabled').uncheck();
+      await page.waitForTimeout(1_500);
+      await expect(page.locator('#cloudEnabled')).not.toBeChecked();
+      page.once('dialog', dialog => dialog.accept());
+      await page.locator('#saveCloud').click();
+      await expect(page.locator('#cloudSettingStatus')).toContainText(/restarting/i);
+      await expect(page.locator('#cloudEnabled')).not.toBeChecked({ timeout: 60_000 });
+      await expect(page.locator('#health')).toContainText('DISABLED', { timeout: 60_000 });
+      await expect(page.locator('#saveCloud')).toBeEnabled({ timeout: 60_000 });
+      assertDiagnosticsClean(diagnostics);
+    } finally {
+      writeDiagnostics(diagnostics, `${testInfo.project.name}-browser`);
+    }
+  });
 });

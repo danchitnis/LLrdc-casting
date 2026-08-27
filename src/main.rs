@@ -51,6 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 admin_protocol::AdminCommand::StopSharing => {
                     let _ = core_control_tx.send(control::ControlCommand::AdminStop).await;
                 }
+                admin_protocol::AdminCommand::RestartReceiver => {
+                    let _ = core_control_tx.send(control::ControlCommand::RestartReceiver).await;
+                }
             }
         }
     });
@@ -242,6 +245,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             edid_max_res: edid_info.max_res.clone(), edid_max_fps: edid_info.max_fps, display_max_fps: edid_info.max_fps,
                             capture_resolution: String::new(), encoded_resolution: String::new(), aspect_mode: String::new(), content_rect: String::new(), signal_resolution: signal_resolution.clone(), panel_resolution: panel_resolution.clone(),
                         });
+                    }
+                    control::ControlCommand::RestartReceiver => {
+                        println!("[ADMIN] Restart requested for a settings change");
+                        management.stop("settings_restart");
+                        return Ok(());
                     }
                     control::ControlCommand::ClientHello { device_id, user_agent, platform, language, page_session_id, connection_id, remote_ip } => {
                         management.hello(management::ClientMetadata { device_id, user_agent, platform, language, page_session_id, connection_id: connection_id.unwrap_or_else(|| "legacy".into()), remote_ip: remote_ip.unwrap_or_else(|| "unknown".into()) });

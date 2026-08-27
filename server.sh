@@ -12,6 +12,7 @@ SSH_OPTIONS=(
 )
 DEPLOY_TMP_DIR=""
 ARTIFACT_CONTAINER_ID=""
+SETTINGS_DIR="/var/tmp/llrdc-bin/settings"
 
 die() {
   echo "[ERROR] $*" >&2
@@ -218,9 +219,15 @@ start_remote_container() {
       -v /dev:/dev \
       -v /var/lib/llrdc-certs:/certs \
       -v /var/lib/llrdc-pairing:/pairing:ro \
+      -v '$SETTINGS_DIR:/settings:rw' \
       -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting:ro \
       '$runtime_image' >/dev/null
   "
+}
+
+write_cloud_setting() {
+  local value="$1"
+  remote_ssh "mkdir -p '$SETTINGS_DIR' && printf '%s\\n' '$value' > '$SETTINGS_DIR/cloud-discovery-enabled.new' && chmod 0644 '$SETTINGS_DIR/cloud-discovery-enabled.new'"
 }
 
 wait_for_receiver() {
@@ -260,6 +267,10 @@ rollback_remote_deployment() {
     if [ -s /var/tmp/llrdc-bin/runtime.env.previous ]; then
       cp -p /var/tmp/llrdc-bin/runtime.env.previous /var/tmp/llrdc-bin/runtime.env.rollback
       mv -f /var/tmp/llrdc-bin/runtime.env.rollback /var/tmp/llrdc-bin/runtime.env
+    fi
+    rm -f '$SETTINGS_DIR/cloud-discovery-enabled'
+    if [ -e '$SETTINGS_DIR/cloud-discovery-enabled.previous' ]; then
+      mv -f '$SETTINGS_DIR/cloud-discovery-enabled.previous' '$SETTINGS_DIR/cloud-discovery-enabled'
     fi
   "; then
     echo "[ROLLBACK] No valid previous deployment is available." >&2
@@ -471,7 +482,7 @@ case "$action" in
     local_runtime_env="${DEPLOY_TMP_DIR}/runtime.env"
     write_runtime_env "$local_runtime_env"
 
-    remote_ssh "mkdir -p /var/tmp/llrdc-bin && rm -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/runtime.env.new"
+    remote_ssh "mkdir -p /var/tmp/llrdc-bin '$SETTINGS_DIR' && rm -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/runtime.env.new '$SETTINGS_DIR/cloud-discovery-enabled.new'"
 
     # Hash Dockerfile to detect whether the complete runtime image must be transferred.
     dockerfile_hash="$(shasum -a 256 "${SCRIPT_DIR}/Dockerfile" | awk '{print $1}')"
@@ -512,6 +523,7 @@ case "$action" in
     echo "[TRANSFER] Uploading verified receiver binary (${binary_size})..."
     scp "${SSH_OPTIONS[@]}" "$local_binary" "${board_ip}:/var/tmp/llrdc-bin/llrdc-casting.new"
     scp "${SSH_OPTIONS[@]}" "$local_runtime_env" "${board_ip}:/var/tmp/llrdc-bin/runtime.env.new"
+    write_cloud_setting "$cloud_discovery_enabled"
     remote_binary_hash="$(remote_ssh "sha256sum /var/tmp/llrdc-bin/llrdc-casting.new | awk '{print \$1}'")"
     [[ "$remote_binary_hash" == "$local_binary_hash" ]] || die "Transferred binary checksum mismatch. The active receiver was not changed."
 
@@ -523,10 +535,15 @@ case "$action" in
       if [ -s /var/tmp/llrdc-bin/runtime.env ]; then
         cp -p /var/tmp/llrdc-bin/runtime.env /var/tmp/llrdc-bin/runtime.env.previous
       fi
+      if [ -e '$SETTINGS_DIR/cloud-discovery-enabled' ]; then
+        rm -f '$SETTINGS_DIR/cloud-discovery-enabled.previous'
+        mv -f '$SETTINGS_DIR/cloud-discovery-enabled' '$SETTINGS_DIR/cloud-discovery-enabled.previous'
+      fi
       chmod 0755 /var/tmp/llrdc-bin/llrdc-casting.new
       chmod 0600 /var/tmp/llrdc-bin/runtime.env.new
       mv -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/llrdc-casting
       mv -f /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/runtime.env
+      mv -f '$SETTINGS_DIR/cloud-discovery-enabled.new' '$SETTINGS_DIR/cloud-discovery-enabled'
     '
 
     if ! start_remote_container "$IMAGE"; then

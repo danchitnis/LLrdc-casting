@@ -153,6 +153,11 @@ if ! ssh -o BatchMode=yes "$board_ip" "docker inspect -f '{{range .Config.Env}}{
   echo "[E2E] Receiver cloud-discovery environment does not match the $MODE suite; see $artifact_dir/deploy.log" >&2
   exit 1
 fi
+expected_cloud_setting="$([[ "$cloud_flag" == true ]] && echo 1 || echo 0)"
+if ! ssh -o BatchMode=yes "$board_ip" "test \"\$(cat /var/tmp/llrdc-bin/settings/cloud-discovery-enabled 2>/dev/null)\" = '$expected_cloud_setting'" 2>/dev/null; then
+  echo "[E2E] Receiver persisted cloud setting does not match the $MODE suite; see $artifact_dir/deploy.log" >&2
+  exit 1
+fi
 
 if [[ "$MODE" == "codec" ]]; then
   echo "[E2E] Cloudflare disabled; retrieving the live local pairing code..."
@@ -185,7 +190,12 @@ else
       --json 2>"$artifact_dir/cloud-query.stderr" \
       | python3 -c 'import json, sys
 payload = json.load(sys.stdin)
-rows = payload[0].get("results", []) if payload else []
+if isinstance(payload, list):
+    rows = payload[0].get("results", []) if payload else []
+elif isinstance(payload, dict):
+    rows = payload.get("results", [])
+else:
+    rows = []
 print(rows[0].get("pairing_code", "") if rows else "")'
   )"
 fi

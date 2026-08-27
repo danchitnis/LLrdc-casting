@@ -38,6 +38,10 @@ import ManagementCard from '../components/ManagementCard.astro';
       .value { display: block; margin-top: 5px; font: 600 1.05rem ui-monospace, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       button { border-radius: 8px; padding: 10px 15px; font-weight: 800; cursor: pointer; }
       button:disabled { opacity: .45; cursor: not-allowed; }
+      input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--blue); }
+      .setting-row { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+      .setting-help { margin: 10px 0 0; color: var(--muted); }
+      .setting-status { min-height: 1.3em; margin: 10px 0 0; }
       .danger { background: var(--red); border: 0; color: #19050a; }
       .secondary { background: #1b3150; border: 1px solid #355477; color: var(--text); }
       table { width: 100%; border-collapse: collapse; font-size: .84rem; }
@@ -93,6 +97,17 @@ import ManagementCard from '../components/ManagementCard.astro';
       <ManagementCard title="Receiver health &amp; events">
         <div id="health" class="grid"></div>
         <pre id="events"></pre>
+      </ManagementCard>
+
+      <ManagementCard title="Cloud discovery">
+        <div class="setting-row">
+          <input id="cloudEnabled" type="checkbox" aria-describedby="cloudHelp" />
+          <label for="cloudEnabled">Enable Cloudflare discovery</label>
+          <button id="saveCloud" class="secondary" type="button" disabled>Apply</button>
+        </div>
+        <p id="cloudHelp" class="setting-help">Cloudflare carries pairing discovery only; media remains on the receiver LAN. Applying a change restarts the receiver and interrupts active sharing.</p>
+        <p id="cloudConfig" class="setting-help"></p>
+        <p id="cloudSettingStatus" class="setting-status" role="status" aria-live="polite"></p>
       </ManagementCard>
     </main>
 

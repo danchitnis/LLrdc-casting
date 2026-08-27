@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
@@ -19,6 +20,13 @@ use crate::admin_protocol::AdminCommand;
 
 const ADMIN_SOCKET_PATH: &str = "/run/llrdc-casting-admin.sock";
 static ADMIN_HTML: &str = include_str!("../client/admin.html");
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudSettingRequest {
+    enabled: bool,
+    confirm_restart: bool,
+}
 
 pub async fn run_server(pairing_state: PairingState, management: ManagementState, commands: mpsc::Sender<AdminCommand>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let socket_state = pairing_state.clone();
@@ -76,20 +84,85 @@ async fn run_http_server(bind_addr: String, port: u16, commands: mpsc::Sender<Ad
 }
 
 async fn handle_http_connection<S>(mut stream: S, _peer: String, commands: mpsc::Sender<AdminCommand>, management: ManagementState, pairing: PairingState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> where S: AsyncRead + AsyncWrite + Unpin + Send + 'static {
-    let mut buf = vec![0u8; 16 * 1024]; let n = stream.read(&mut buf).await?; if n == 0 { return Ok(()); } let initial = &buf[..n]; let request = String::from_utf8_lossy(initial); let first = request.lines().next().unwrap_or("");
-    if request.to_ascii_lowercase().contains("upgrade: websocket") { return handle_websocket(PrefixStream { prefix: Some(initial.to_vec()), inner: stream }, commands, management, pairing).await; }
-    let mut parts = first.split_whitespace(); let method = parts.next().unwrap_or(""); let path = parts.next().unwrap_or("/");
-    let (status, content_type, body) = if method == "GET" && (path == "/" || path == "/index.html") { ("200 OK", "text/html; charset=utf-8", ADMIN_HTML.as_bytes().to_vec()) }
+    let mut buf = vec![0u8; config::server::HTTP_REQUEST_BUFFER_BYTES];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 { return Ok(()); }
+    let initial = &buf[..n];
+    let request_text = String::from_utf8_lossy(initial);
+    if request_text.to_ascii_lowercase().contains("upgrade: websocket") {
+        return handle_websocket(PrefixStream { prefix: Some(initial.to_vec()), inner: stream }, commands, management, pairing).await;
+    }
+    let mut request = initial.to_vec();
+    let header_end = loop {
+        if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") { break index; }
+        if request.len() >= config::server::HTTP_REQUEST_BUFFER_BYTES { return write_http_response(&mut stream, "413 Payload Too Large", "text/plain; charset=utf-8", b"Payload Too Large").await; }
+        let read = stream.read(&mut buf).await?;
+        if read == 0 { return Ok(()); }
+        request.extend_from_slice(&buf[..read]);
+    };
+    let header_text = String::from_utf8_lossy(&request[..header_end]).into_owned();
+    let mut lines = header_text.lines();
+    let first = lines.next().unwrap_or("").to_string();
+    let mut headers = std::collections::HashMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') { headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string()); }
+    }
+    let content_length = headers.get("content-length").and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+    if content_length > 4096 { return write_http_response(&mut stream, "413 Payload Too Large", "text/plain; charset=utf-8", b"Payload Too Large").await; }
+    let body_start = header_end + 4;
+    while request.len() < body_start + content_length {
+        let read = stream.read(&mut buf).await?;
+        if read == 0 { return write_http_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", b"Incomplete request body").await; }
+        request.extend_from_slice(&buf[..read]);
+    }
+    let mut parts = first.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("/");
+    let body = &request[body_start..body_start + content_length];
+    let origin_ok = headers.get("origin").map_or(true, |origin| headers.get("host").map_or(false, |host| origin == &format!("https://{host}") || origin == &format!("http://{host}")));
+    let mut restart = false;
+    let (status, content_type, response_body) = if method == "GET" && (path == "/" || path == "/index.html") { ("200 OK", "text/html; charset=utf-8", ADMIN_HTML.as_bytes().to_vec()) }
         else if method == "GET" && path == "/api/snapshot" { ("200 OK", "application/json", snapshot_json(&management, &pairing)) }
         else if method == "GET" && path == "/health" { ("200 OK", "text/plain; charset=utf-8", b"OK".to_vec()) }
         else if method == "GET" && path == "/favicon.ico" { ("204 No Content", "image/x-icon", Vec::new()) }
         else if method == "POST" && path == "/api/stream/stop" { let _ = commands.send(AdminCommand::StopSharing).await; management.event("info", "admin_action", "administrative stop requested"); ("202 Accepted", "application/json", br#"{"ok":true}"#.to_vec()) }
-        else if method != "GET" && method != "POST" { ("405 Method Not Allowed", "text/plain; charset=utf-8", b"Method Not Allowed".to_vec()) }
+        else if method == "PUT" && path == "/api/settings/cloud" {
+            if !origin_ok { ("403 Forbidden", "application/json", br#"{"error":"cross_origin"}"#.to_vec()) }
+            else if !headers.get("content-type").is_some_and(|value| value.split(';').next().is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json"))) { ("415 Unsupported Media Type", "application/json", br#"{"error":"application_json_required"}"#.to_vec()) }
+            else {
+                match serde_json::from_slice::<CloudSettingRequest>(body) {
+                    Err(_) => ("400 Bad Request", "application/json", br#"{"error":"invalid_json"}"#.to_vec()),
+                    Ok(request) => {
+                        let current = crate::cloud_discovery::cloud_discovery_enabled();
+                        if request.enabled == current { ("200 OK", "application/json", serde_json::to_vec(&json!({"ok": true, "cloud_discovery_enabled": current, "restart_scheduled": false})).unwrap_or_default()) }
+                        else if !request.confirm_restart { ("409 Conflict", "application/json", br#"{"error":"restart_confirmation_required"}"#.to_vec()) }
+                        else if request.enabled {
+                            let missing = crate::cloud_discovery::cloud_configuration_missing();
+                            if !missing.is_empty() { ("422 Unprocessable Entity", "application/json", serde_json::to_vec(&json!({"error":"cloud_not_provisioned", "missing": missing})).unwrap_or_default()) }
+                            else if let Err(error) = crate::cloud_discovery::persist_cloud_discovery_enabled(true) { eprintln!("[ADMIN] Could not persist cloud setting: {error}"); ("500 Internal Server Error", "application/json", br#"{"error":"settings_persist_failed"}"#.to_vec()) }
+                            else { restart = true; management.event("info", "settings", "cloud discovery enabled; receiver restart scheduled"); ("202 Accepted", "application/json", br#"{"ok":true,"cloud_discovery_enabled":true,"restart_scheduled":true}"#.to_vec()) }
+                        } else if let Err(error) = crate::cloud_discovery::persist_cloud_discovery_enabled(false) { eprintln!("[ADMIN] Could not persist cloud setting: {error}"); ("500 Internal Server Error", "application/json", br#"{"error":"settings_persist_failed"}"#.to_vec()) }
+                        else { restart = true; management.event("info", "settings", "cloud discovery disabled; receiver restart scheduled"); ("202 Accepted", "application/json", br#"{"ok":true,"cloud_discovery_enabled":false,"restart_scheduled":true}"#.to_vec()) }
+                    }
+                }
+            }
+        }
+        else if method != "GET" && method != "POST" && method != "PUT" { ("405 Method Not Allowed", "text/plain; charset=utf-8", b"Method Not Allowed".to_vec()) }
         else { ("404 Not Found", "text/plain; charset=utf-8", b"Not Found".to_vec()) };
-    let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len()); stream.write_all(response.as_bytes()).await?; stream.write_all(&body).await?; stream.flush().await?; Ok(())
+    write_http_response(&mut stream, status, content_type, &response_body).await?;
+    if restart { let _ = commands.send(AdminCommand::RestartReceiver).await; }
+    Ok(())
 }
 
-fn snapshot_json(management: &ManagementState, pairing: &PairingState) -> Vec<u8> { management.refresh_system_health(); serde_json::to_vec(&json!({ "management": management.snapshot(), "pairing": pairing.snapshot() })).unwrap_or_else(|_| b"{}".to_vec()) }
+async fn write_http_response<S>(stream: &mut S, status: &str, content_type: &str, body: &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> where S: AsyncWrite + Unpin {
+    let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len());
+    stream.write_all(response.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+fn snapshot_json(management: &ManagementState, pairing: &PairingState) -> Vec<u8> { management.refresh_system_health(); serde_json::to_vec(&json!({ "management": management.snapshot(), "pairing": pairing.snapshot(), "settings": crate::cloud_discovery::settings_snapshot() })).unwrap_or_else(|_| b"{}".to_vec()) }
 
 async fn handle_websocket<S>(stream: S, commands: mpsc::Sender<AdminCommand>, management: ManagementState, pairing: PairingState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> where S: AsyncRead + AsyncWrite + Unpin + Send + 'static {
     let ws = tokio_tungstenite::accept_async(stream).await?; let (mut tx, mut rx) = ws.split();

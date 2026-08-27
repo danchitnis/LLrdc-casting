@@ -96,6 +96,13 @@ interface Snapshot {
     local_status: string;
     cloud_status: string;
   };
+  settings: CloudSettingsSnapshot;
+}
+
+interface CloudSettingsSnapshot {
+  cloud_discovery_enabled: boolean;
+  cloud_configuration_ready: boolean;
+  cloud_configuration_missing: string[];
 }
 
 const CHART_WINDOW_SEC = 60;
@@ -105,6 +112,9 @@ let chartSessionId: number | null = null;
 let chartOriginElapsed = 0;
 let lastSnapshot: Snapshot | null = null;
 let serverUptimeSec = 0;
+let pendingRestartValue: boolean | null = null;
+let portalDisconnected = false;
+let cloudSettingDirty = false;
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -122,6 +132,10 @@ const historyBody = element<HTMLTableSectionElement>('history');
 const health = element<HTMLDivElement>('health');
 const events = element<HTMLPreElement>('events');
 const chart = element<HTMLCanvasElement>('chart');
+const cloudEnabled = element<HTMLInputElement>('cloudEnabled');
+const saveCloud = element<HTMLButtonElement>('saveCloud');
+const cloudConfig = element<HTMLParagraphElement>('cloudConfig');
+const cloudSettingStatus = element<HTMLParagraphElement>('cloudSettingStatus');
 
 function formatBytes(value: number): string {
   if (!value) return '0 B';
@@ -282,6 +296,24 @@ function render(snapshot: Snapshot): void {
   const management = snapshot.management;
   const active = management.active_stream;
   serverUptimeSec = management.server_uptime_sec;
+  const settings = snapshot.settings;
+  if (!cloudSettingDirty && pendingRestartValue === null) cloudEnabled.checked = settings.cloud_discovery_enabled;
+  cloudEnabled.disabled = pendingRestartValue !== null || portalDisconnected;
+  saveCloud.disabled = pendingRestartValue !== null;
+  if (settings.cloud_configuration_ready) {
+    cloudConfig.textContent = 'Cloudflare provisioning is ready.';
+  } else {
+    cloudConfig.textContent = `Enablement prerequisites missing: ${settings.cloud_configuration_missing.join(', ')}. Run setup_cloudflare.sh to provision the receiver.`;
+  }
+  if (pendingRestartValue !== null && settings.cloud_discovery_enabled === pendingRestartValue && portalDisconnected) {
+    pendingRestartValue = null;
+    portalDisconnected = false;
+    cloudSettingDirty = false;
+    cloudEnabled.checked = settings.cloud_discovery_enabled;
+    cloudEnabled.disabled = false;
+    cloudSettingStatus.textContent = 'Receiver restarted; cloud setting is active.';
+    saveCloud.disabled = false;
+  }
   state.textContent = management.state;
   state.style.color = management.state === 'STREAMING' ? '#35d49a' : '#90a4bd';
   stopButton.disabled = !active;
@@ -345,7 +377,7 @@ function render(snapshot: Snapshot): void {
 function isSnapshot(value: unknown): value is Snapshot {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<Snapshot>;
-  return Boolean(candidate.management && candidate.pairing && Array.isArray(candidate.management.connections));
+  return Boolean(candidate.management && candidate.pairing && candidate.settings && Array.isArray(candidate.management.connections));
 }
 
 function resetChart(): void {
@@ -368,6 +400,57 @@ async function stopSharing(): Promise<void> {
   if (!response.ok) state.textContent = `STOP FAILED (${response.status})`;
 }
 
+async function saveCloudSetting(): Promise<void> {
+  const enabled = cloudEnabled.checked;
+  const current = lastSnapshot?.settings.cloud_discovery_enabled;
+  if (current === enabled) {
+    cloudSettingDirty = false;
+    return;
+  }
+  const active = Boolean(lastSnapshot?.management.active_stream);
+  const warning = active
+    ? 'Changing cloud discovery will restart the receiver and stop the active share. Continue?'
+    : 'Changing cloud discovery will restart the receiver. Continue?';
+  if (!confirm(warning)) {
+    cloudEnabled.checked = current ?? enabled;
+    cloudSettingDirty = false;
+    return;
+  }
+  saveCloud.disabled = true;
+  cloudEnabled.disabled = true;
+  cloudSettingDirty = false;
+  cloudSettingStatus.textContent = 'Saving setting…';
+  try {
+    const response = await fetch('/api/settings/cloud', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, confirm_restart: true }),
+    });
+    const payload: unknown = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = payload && typeof payload === 'object' && 'missing' in payload && Array.isArray(payload.missing)
+        ? ` Missing: ${(payload.missing as unknown[]).join(', ')}.`
+        : '';
+      throw new Error(`Cloud setting was not applied (${response.status}).${detail}`);
+    }
+    const scheduled = Boolean(payload && typeof payload === 'object' && 'restart_scheduled' in payload && payload.restart_scheduled);
+    if (scheduled) {
+      pendingRestartValue = enabled;
+      cloudSettingStatus.textContent = 'Receiver restarting; waiting for management portal to reconnect…';
+    } else {
+      saveCloud.disabled = false;
+      cloudEnabled.disabled = false;
+      cloudSettingStatus.textContent = 'Cloud setting already active.';
+    }
+  } catch (error) {
+    cloudEnabled.checked = current ?? !enabled;
+    cloudSettingDirty = false;
+    saveCloud.disabled = false;
+    cloudEnabled.disabled = false;
+    cloudSettingStatus.textContent = error instanceof Error ? error.message : 'Cloud setting update failed.';
+  }
+}
+
 function connect(): void {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
   const socket = new WebSocket(`${protocol}://${location.host}/ws`);
@@ -381,6 +464,8 @@ function connect(): void {
     }
   });
   socket.addEventListener('close', () => {
+    portalDisconnected = true;
+    if (pendingRestartValue !== null) cloudSettingStatus.textContent = 'Receiver restarting; waiting for management portal to reconnect…';
     state.textContent = 'DISCONNECTED';
     window.setTimeout(connect, 1500);
   });
@@ -389,5 +474,10 @@ function connect(): void {
 
 resetChartButton.addEventListener('click', resetChart);
 stopButton.addEventListener('click', () => void stopSharing());
+cloudEnabled.addEventListener('change', () => {
+  const current = lastSnapshot?.settings.cloud_discovery_enabled;
+  cloudSettingDirty = current === undefined || cloudEnabled.checked !== current;
+});
+saveCloud.addEventListener('click', () => void saveCloudSetting());
 window.addEventListener('resize', drawChart);
 connect();
