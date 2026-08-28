@@ -11,6 +11,7 @@ use crate::config::pairing::{
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PairingSnapshot {
+    #[serde(skip_serializing)]
     pub code: Option<String>,
     pub local_status: String,
     pub cloud_status: String,
@@ -22,6 +23,7 @@ struct PairingData {
     expires_at: Option<Instant>,
     failed_attempts: HashMap<String, (u32, Instant)>,
     fixed_code: Option<String>,
+    local_pairing_code_required: bool,
 }
 
 #[derive(Clone)]
@@ -30,7 +32,7 @@ pub struct PairingState {
 }
 
 impl PairingState {
-    pub fn with_fixed_code(code: Option<String>) -> Result<Self, &'static str> {
+    pub fn with_fixed_code(code: Option<String>, local_pairing_code_required: bool) -> Result<Self, &'static str> {
         let fixed_code = code
             .map(|value| value.to_ascii_uppercase())
             .map(|value| {
@@ -46,13 +48,14 @@ impl PairingState {
             inner: Arc::new(Mutex::new(PairingData {
                 snapshot: PairingSnapshot {
                     code: None,
-                    local_status: "WAITING".to_string(),
+                    local_status: if local_pairing_code_required { "WAITING" } else { "DISABLED" }.to_string(),
                     cloud_status: "DISABLED".to_string(),
                     cloud_ip: None,
                 },
                 expires_at: None,
                 failed_attempts: HashMap::new(),
                 fixed_code,
+                local_pairing_code_required,
             })),
         })
     }
@@ -67,7 +70,7 @@ impl PairingState {
             });
             let ttl = pairing_code_ttl_seconds();
             data.snapshot.code = Some(code.clone());
-            data.snapshot.local_status = "READY".to_string();
+            data.snapshot.local_status = if data.local_pairing_code_required { "READY" } else { "DISABLED" }.to_string();
             data.expires_at = Some(Instant::now() + Duration::from_secs(ttl));
             data.failed_attempts.clear();
             return code;
@@ -98,9 +101,18 @@ impl PairingState {
         };
         if data.expires_at.is_some_and(|expires_at| expires_at <= Instant::now()) {
             data.snapshot.code = None;
-            data.snapshot.local_status = "EXPIRED".to_string();
+            data.snapshot.local_status = if data.local_pairing_code_required { "EXPIRED" } else { "DISABLED" }.to_string();
         }
         data.snapshot.clone()
+    }
+
+    pub fn dashboard_code(&self) -> Option<String> {
+        let Ok(data) = self.inner.lock() else { return None; };
+        if data.local_pairing_code_required || data.snapshot.cloud_status != "DISABLED" {
+            data.snapshot.code.clone()
+        } else {
+            None
+        }
     }
 
     pub fn validate_code(&self, code: &str, peer: &str) -> Result<(), &'static str> {
@@ -154,7 +166,8 @@ mod tests {
 
     #[test]
     fn generated_codes_are_four_uppercase_alphanumeric_characters() {
-        let code = PairingState::with_fixed_code(None).unwrap().rotate_code();
+        let state = PairingState::with_fixed_code(None, true).unwrap();
+        let code = state.rotate_code();
 
         assert_eq!(code.len(), 4);
         assert!(code.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()));
@@ -162,7 +175,7 @@ mod tests {
 
     #[test]
     fn fixed_code_is_used_and_normalized() {
-        let state = PairingState::with_fixed_code(Some("ab12".to_string())).unwrap();
+        let state = PairingState::with_fixed_code(Some("ab12".to_string()), true).unwrap();
 
         assert_eq!(state.rotate_code(), "AB12");
         assert!(state.validate_code("ab12", "peer").is_ok());
@@ -171,7 +184,7 @@ mod tests {
 
     #[test]
     fn local_and_cloud_statuses_are_independent() {
-        let state = PairingState::with_fixed_code(None).unwrap();
+        let state = PairingState::with_fixed_code(None, true).unwrap();
 
         let initial = state.snapshot();
         assert_eq!(initial.local_status, "WAITING");
@@ -197,8 +210,8 @@ mod tests {
 
     #[test]
     fn fixed_code_requires_four_alphanumeric_characters() {
-        assert!(PairingState::with_fixed_code(Some("123".to_string())).is_err());
-        assert!(PairingState::with_fixed_code(Some("12-4".to_string())).is_err());
+        assert!(PairingState::with_fixed_code(Some("123".to_string()), true).is_err());
+        assert!(PairingState::with_fixed_code(Some("12-4".to_string()), true).is_err());
     }
 
     #[test]
@@ -208,5 +221,22 @@ mod tests {
         assert!(!is_valid_pairing_code("123"));
         assert!(!is_valid_pairing_code("12345"));
         assert!(!is_valid_pairing_code("A7-Q"));
+    }
+
+    #[test]
+    fn disabled_local_pairing_keeps_code_for_cloud_but_marks_local_disabled() {
+        let state = PairingState::with_fixed_code(Some("ab12".to_string()), false).unwrap();
+        assert_eq!(state.rotate_code(), "AB12");
+        assert_eq!(state.snapshot().local_status, "DISABLED");
+        assert!(state.validate_code("ab12", "peer").is_ok());
+    }
+
+    #[test]
+    fn pairing_code_is_not_serialized_in_snapshots() {
+        let state = PairingState::with_fixed_code(Some("ab12".to_string()), true).unwrap();
+        state.rotate_code();
+        let json = serde_json::to_string(&state.snapshot()).unwrap();
+        assert!(!json.contains("AB12"));
+        assert!(!json.contains("code"));
     }
 }

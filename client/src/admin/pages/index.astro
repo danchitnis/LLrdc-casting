@@ -42,6 +42,15 @@ import ManagementCard from '../components/ManagementCard.astro';
       .setting-row { display: flex; align-items: center; gap: 10px; font-weight: 700; }
       .setting-help { margin: 10px 0 0; color: var(--muted); }
       .setting-status { min-height: 1.3em; margin: 10px 0 0; }
+      .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+      .tab { background: #1b3150; border: 1px solid #355477; color: var(--text); }
+      .tab.active { background: var(--blue); color: #06111d; }
+      .tab-panel[hidden] { display: none; }
+      .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+      .field { display: grid; gap: 5px; color: var(--muted); font-size: .8rem; }
+      .field input, .field select { width: 100%; border: 1px solid var(--line); border-radius: 7px; padding: 9px; background: #0b1729; color: var(--text); }
+      .field input:read-only { opacity: .7; }
+      .settings-actions { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
       .danger { background: var(--red); border: 0; color: #19050a; }
       .secondary { background: #1b3150; border: 1px solid #355477; color: var(--text); }
       table { width: 100%; border-collapse: collapse; font-size: .84rem; }
@@ -66,6 +75,12 @@ import ManagementCard from '../components/ManagementCard.astro';
         <span id="state" class="badge">CONNECTING</span>
       </header>
 
+      <nav class="tabs" aria-label="Management sections">
+        <button class="tab active" id="overviewTabButton" type="button" aria-controls="overviewTab" aria-selected="true">Overview</button>
+        <button class="tab" id="settingsTabButton" type="button" aria-controls="settingsTab" aria-selected="false">Settings</button>
+      </nav>
+
+      <div id="overviewTab" class="tab-panel">
       <ManagementCard title="Live stream">
         <div slot="actions">
           <button id="resetChart" class="secondary" type="button">Reset plot</button>
@@ -98,17 +113,54 @@ import ManagementCard from '../components/ManagementCard.astro';
         <div id="health" class="grid"></div>
         <pre id="events"></pre>
       </ManagementCard>
+      </div>
 
+      <div id="settingsTab" class="tab-panel" hidden>
+      <ManagementCard title="Display">
+        <div class="form-grid">
+          <label class="field">DRM connector ID<input id="settingDrmConnector" /></label>
+          <label class="field">DRM plane ID<input id="settingDrmPlane" /></label>
+          <label class="field">Idle dashboard<select id="settingIdleDashboard"><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
+          <label class="field">Dashboard mode<select id="settingDashboardMode"><option value="raw">Raw</option><option value="hevc">HEVC</option></select></label>
+        </div>
+      </ManagementCard>
+      <ManagementCard title="Receiver ports">
+        <div class="form-grid">
+          <label class="field">Video UDP port<input id="settingPort" type="number" min="1" max="65535" /></label>
+          <label class="field">WebTransport port<input id="settingWebtransportPort" type="number" min="1" max="65535" /></label>
+          <label class="field">HTTP/UI port<input id="settingHttpPort" type="number" min="1" max="65535" /></label>
+        </div>
+      </ManagementCard>
+      <ManagementCard title="Buffering and timeouts">
+        <div class="form-grid">
+          <label class="field">UDP buffer (MB)<input id="settingUdpBuffer" type="number" min="1" /></label>
+          <label class="field">Idle timeout (seconds)<input id="settingIdleTimeout" type="number" min="1" /></label>
+          <label class="field">Sender liveness timeout (seconds)<input id="settingLivenessTimeout" type="number" min="1" /></label>
+          <label class="field">Pairing-code TTL (seconds)<input id="settingPairingTtl" type="number" min="1" /></label>
+        </div>
+      </ManagementCard>
+      <ManagementCard title="Deployment-managed settings">
+        <div id="deploymentSettings" class="grid"></div>
+        <p class="setting-help">These values come from the local repository and deployment provisioning and cannot be changed here.</p>
+      </ManagementCard>
+      <ManagementCard title="Pairing security">
+        <div class="setting-row">
+          <input id="localPairingRequired" type="checkbox" aria-describedby="pairingSecurityHelp" />
+          <label for="localPairingRequired">Require a security code for direct LAN clients</label>
+        </div>
+        <p id="pairingSecuritySource" class="setting-help"></p>
+        <p id="pairingSecurityHelp" class="setting-help">Disabling this allows any client that can reach the receiver on the network to connect without a code. Applying a change restarts the receiver and interrupts active sharing.</p>
+      </ManagementCard>
       <ManagementCard title="Cloud discovery">
         <div class="setting-row">
           <input id="cloudEnabled" type="checkbox" aria-describedby="cloudHelp" />
           <label for="cloudEnabled">Enable Cloudflare discovery</label>
-          <button id="saveCloud" class="secondary" type="button" disabled>Apply</button>
         </div>
-        <p id="cloudHelp" class="setting-help">Cloudflare carries pairing discovery only; media remains on the receiver LAN. Applying a change restarts the receiver and interrupts active sharing.</p>
+        <p id="cloudHelp" class="setting-help">Cloudflare carries pairing discovery only; media remains on the receiver LAN. Use Apply settings below to save changes; the receiver restarts and active sharing is interrupted.</p>
         <p id="cloudConfig" class="setting-help"></p>
-        <p id="cloudSettingStatus" class="setting-status" role="status" aria-live="polite"></p>
       </ManagementCard>
+      <div class="settings-actions"><button id="saveSettings" class="secondary" type="button" disabled>Apply settings</button><p id="settingsStatus" class="setting-status" role="status" aria-live="polite"></p></div>
+      </div>
     </main>
 
     <script>

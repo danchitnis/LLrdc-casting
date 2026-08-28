@@ -22,6 +22,7 @@ export interface BrowserDiagnostics {
   readonly consoleErrors: string[];
   readonly pageErrors: string[];
   readonly requestFailures: string[];
+  readonly optionalThirdPartyFailures: string[];
 }
 
 export interface ReceiverLogReader {
@@ -55,6 +56,14 @@ export function attachDiagnostics(page: Page): BrowserDiagnostics {
     consoleErrors: [],
     pageErrors: [],
     requestFailures: [],
+    optionalThirdPartyFailures: [],
+  };
+  const removeOptionalBeaconConsoleError = (): void => {
+    const generic = '[error] Failed to load resource: net::ERR_CONNECTION_REFUSED';
+    const index = diagnostics.consoleErrors.indexOf(generic);
+    if (index >= 0) diagnostics.consoleErrors.splice(index, 1);
+    const messageIndex = diagnostics.consoleMessages.indexOf(generic);
+    if (messageIndex >= 0) diagnostics.consoleMessages.splice(messageIndex, 1);
   };
   page.on('console', message => {
     const text = redact(`[${message.type()}] ${message.text()}`);
@@ -64,6 +73,14 @@ export function attachDiagnostics(page: Page): BrowserDiagnostics {
   page.on('pageerror', error => diagnostics.pageErrors.push(redact(error.message)));
   page.on('requestfailed', request => {
     const url = request.url();
+    if (url.startsWith('https://static.cloudflareinsights.com/')) {
+      // Cloudflare injects this optional analytics script on the public page.
+      // Restricted/offline test networks may refuse it; it is unrelated to
+      // pairing, LAN handoff, or receiver streaming.
+      diagnostics.optionalThirdPartyFailures.push(redact(`${request.method()} ${url}: ${request.failure()?.errorText || 'unknown failure'}`));
+      removeOptionalBeaconConsoleError();
+      return;
+    }
     // The UI's decorative Google Fonts are intentionally non-blocking.
     if (url.startsWith('https://fonts.googleapis.com/') || url.startsWith('https://fonts.gstatic.com/')) return;
     diagnostics.requestFailures.push(redact(`${request.method()} ${url}: ${request.failure()?.errorText || 'unknown failure'}`));
@@ -94,7 +111,11 @@ export function assertDiagnosticsClean(diagnostics: BrowserDiagnostics): void {
     ...diagnostics.consoleErrors,
     ...diagnostics.pageErrors.map(value => `[pageerror] ${value}`),
     ...diagnostics.requestFailures.map(value => `[requestfailed] ${value}`),
-  ];
+  ].filter((failure, index, all) => {
+    if (failure !== '[error] Failed to load resource: net::ERR_CONNECTION_REFUSED') return true;
+    const optionalAllowance = diagnostics.optionalThirdPartyFailures.length;
+    return index >= all.findIndex(candidate => candidate === failure) + optionalAllowance;
+  });
   if (failures.length > 0) throw new Error(`Browser diagnostics reported failures:\n${failures.join('\n')}`);
 }
 

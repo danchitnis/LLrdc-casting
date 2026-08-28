@@ -100,9 +100,29 @@ interface Snapshot {
 }
 
 interface CloudSettingsSnapshot {
+  port: number;
+  webtransport_port: number;
+  http_port: number;
+  admin_bind_address: string;
+  admin_port: number;
+  drm_connector_id: string;
+  drm_plane_id: string;
+  idle_dashboard: boolean;
+  idle_dashboard_mode: string;
+  idle_timeout_sec: number;
+  sender_liveness_timeout_sec: number;
+  udp_buffer_size_mb: number;
+  cert_dir: string;
+  pairing_worker_url: string;
+  receiver_id: string;
+  pairing_code_ttl_sec: number;
+  local_pairing_code_required: boolean;
+  pairing_token_public_key_file: string;
   cloud_discovery_enabled: boolean;
   cloud_configuration_ready: boolean;
   cloud_configuration_missing: string[];
+  cloud_state: string;
+  pairing_code_source: 'fixed' | 'rotating';
 }
 
 const CHART_WINDOW_SEC = 60;
@@ -114,7 +134,7 @@ let lastSnapshot: Snapshot | null = null;
 let serverUptimeSec = 0;
 let pendingRestartValue: boolean | null = null;
 let portalDisconnected = false;
-let cloudSettingDirty = false;
+let settingsDirty = false;
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -133,9 +153,29 @@ const health = element<HTMLDivElement>('health');
 const events = element<HTMLPreElement>('events');
 const chart = element<HTMLCanvasElement>('chart');
 const cloudEnabled = element<HTMLInputElement>('cloudEnabled');
-const saveCloud = element<HTMLButtonElement>('saveCloud');
 const cloudConfig = element<HTMLParagraphElement>('cloudConfig');
-const cloudSettingStatus = element<HTMLParagraphElement>('cloudSettingStatus');
+const saveSettings = element<HTMLButtonElement>('saveSettings');
+const settingsStatus = element<HTMLParagraphElement>('settingsStatus');
+const deploymentSettings = element<HTMLDivElement>('deploymentSettings');
+const localPairingRequired = element<HTMLInputElement>('localPairingRequired');
+const pairingSecuritySource = element<HTMLParagraphElement>('pairingSecuritySource');
+const overviewTab = element<HTMLDivElement>('overviewTab');
+const settingsTab = element<HTMLDivElement>('settingsTab');
+const overviewTabButton = element<HTMLButtonElement>('overviewTabButton');
+const settingsTabButton = element<HTMLButtonElement>('settingsTabButton');
+const settingInputs = {
+  port: element<HTMLInputElement>('settingPort'),
+  webtransport_port: element<HTMLInputElement>('settingWebtransportPort'),
+  http_port: element<HTMLInputElement>('settingHttpPort'),
+  drm_connector_id: element<HTMLInputElement>('settingDrmConnector'),
+  drm_plane_id: element<HTMLInputElement>('settingDrmPlane'),
+  idle_dashboard: element<HTMLSelectElement>('settingIdleDashboard'),
+  idle_dashboard_mode: element<HTMLSelectElement>('settingDashboardMode'),
+  idle_timeout_sec: element<HTMLInputElement>('settingIdleTimeout'),
+  sender_liveness_timeout_sec: element<HTMLInputElement>('settingLivenessTimeout'),
+  udp_buffer_size_mb: element<HTMLInputElement>('settingUdpBuffer'),
+  pairing_code_ttl_sec: element<HTMLInputElement>('settingPairingTtl'),
+};
 
 function formatBytes(value: number): string {
   if (!value) return '0 B';
@@ -297,22 +337,32 @@ function render(snapshot: Snapshot): void {
   const active = management.active_stream;
   serverUptimeSec = management.server_uptime_sec;
   const settings = snapshot.settings;
-  if (!cloudSettingDirty && pendingRestartValue === null) cloudEnabled.checked = settings.cloud_discovery_enabled;
+  if (!settingsDirty && pendingRestartValue === null) cloudEnabled.checked = settings.cloud_discovery_enabled;
+  if (!settingsDirty && pendingRestartValue === null) localPairingRequired.checked = settings.local_pairing_code_required;
+  if (!settingsDirty && pendingRestartValue === null) populateSettings(settings);
   cloudEnabled.disabled = pendingRestartValue !== null || portalDisconnected;
-  saveCloud.disabled = pendingRestartValue !== null;
+  localPairingRequired.disabled = pendingRestartValue !== null || portalDisconnected;
+  Object.values(settingInputs).forEach((input) => { input.disabled = pendingRestartValue !== null || portalDisconnected; });
+  saveSettings.disabled = pendingRestartValue !== null || portalDisconnected || !settingsDirty;
   if (settings.cloud_configuration_ready) {
-    cloudConfig.textContent = 'Cloudflare provisioning is ready.';
+    cloudConfig.textContent = `Cloudflare provisioning is ready (${settings.cloud_state}). Worker: ${settings.pairing_worker_url}; receiver: ${settings.receiver_id || 'not configured'}.`;
   } else {
     cloudConfig.textContent = `Enablement prerequisites missing: ${settings.cloud_configuration_missing.join(', ')}. Run setup_cloudflare.sh to provision the receiver.`;
   }
+  deploymentSettings.replaceChildren(
+    metric('Management bind', `${settings.admin_bind_address || '--'}:${settings.admin_port}`),
+    metric('Certificate directory', settings.cert_dir),
+    metric('Pairing public key', settings.pairing_token_public_key_file),
+  );
+  pairingSecuritySource.textContent = `Code source: ${settings.pairing_code_source === 'fixed' ? 'fixed deployment code' : 'rotating receiver code'}${settings.local_pairing_code_required ? '.' : '; code enforcement is disabled for direct LAN clients.'}`;
   if (pendingRestartValue !== null && settings.cloud_discovery_enabled === pendingRestartValue && portalDisconnected) {
     pendingRestartValue = null;
     portalDisconnected = false;
-    cloudSettingDirty = false;
+    settingsDirty = false;
     cloudEnabled.checked = settings.cloud_discovery_enabled;
     cloudEnabled.disabled = false;
-    cloudSettingStatus.textContent = 'Receiver restarted; cloud setting is active.';
-    saveCloud.disabled = false;
+    Object.values(settingInputs).forEach((input) => { input.disabled = false; });
+    settingsStatus.textContent = 'Receiver restarted; settings are active.';
   }
   state.textContent = management.state;
   state.style.color = management.state === 'STREAMING' ? '#35d49a' : '#90a4bd';
@@ -374,6 +424,66 @@ function render(snapshot: Snapshot): void {
     .join('\n') || 'No events';
 }
 
+function populateSettings(settings: CloudSettingsSnapshot): void {
+  settingInputs.port.value = String(settings.port);
+  settingInputs.webtransport_port.value = String(settings.webtransport_port);
+  settingInputs.http_port.value = String(settings.http_port);
+  settingInputs.drm_connector_id.value = settings.drm_connector_id;
+  settingInputs.drm_plane_id.value = settings.drm_plane_id;
+  settingInputs.idle_dashboard.value = String(settings.idle_dashboard);
+  settingInputs.idle_dashboard_mode.value = settings.idle_dashboard_mode;
+  settingInputs.idle_timeout_sec.value = String(settings.idle_timeout_sec);
+  settingInputs.sender_liveness_timeout_sec.value = String(settings.sender_liveness_timeout_sec);
+  settingInputs.udp_buffer_size_mb.value = String(settings.udp_buffer_size_mb);
+  settingInputs.pairing_code_ttl_sec.value = String(settings.pairing_code_ttl_sec);
+  localPairingRequired.checked = settings.local_pairing_code_required;
+}
+
+function readEditableSettings(): Record<string, unknown> {
+  return {
+    port: Number(settingInputs.port.value), webtransport_port: Number(settingInputs.webtransport_port.value), http_port: Number(settingInputs.http_port.value),
+    drm_connector_id: settingInputs.drm_connector_id.value, drm_plane_id: settingInputs.drm_plane_id.value,
+    idle_dashboard: settingInputs.idle_dashboard.value === 'true', idle_dashboard_mode: settingInputs.idle_dashboard_mode.value,
+    idle_timeout_sec: Number(settingInputs.idle_timeout_sec.value), sender_liveness_timeout_sec: Number(settingInputs.sender_liveness_timeout_sec.value),
+    udp_buffer_size_mb: Number(settingInputs.udp_buffer_size_mb.value), pairing_code_ttl_sec: Number(settingInputs.pairing_code_ttl_sec.value),
+    cloud_discovery_enabled: cloudEnabled.checked,
+    local_pairing_code_required: localPairingRequired.checked,
+  };
+}
+
+async function saveAllSettings(): Promise<void> {
+  if (!lastSnapshot || !settingsDirty) return;
+  if (!confirm(lastSnapshot.management.active_stream ? 'Applying settings restarts the receiver and stops the active share. Continue?' : 'Applying settings restarts the receiver. Continue?')) return;
+  saveSettings.disabled = true; cloudEnabled.disabled = true; localPairingRequired.disabled = true;
+  settingsStatus.textContent = 'Saving settings; receiver restarting…';
+  try {
+    const response = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: readEditableSettings(), confirm_restart: true }) });
+    const payload: unknown = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = payload && typeof payload === 'object' && 'missing' in payload && Array.isArray(payload.missing) ? ` Missing: ${(payload.missing as unknown[]).join(', ')}.` : '';
+      throw new Error(`Settings were not applied (${response.status}).${detail}`);
+    }
+    const scheduled = Boolean(payload && typeof payload === 'object' && 'restart_scheduled' in payload && payload.restart_scheduled);
+    if (scheduled) {
+      pendingRestartValue = Boolean(readEditableSettings().cloud_discovery_enabled);
+      settingsStatus.textContent = 'Receiver restarting; waiting for management portal to reconnect…';
+    } else {
+      settingsDirty = false; settingsStatus.textContent = 'Settings already active.';
+    }
+  } catch (error) {
+    saveSettings.disabled = false; cloudEnabled.disabled = false; localPairingRequired.disabled = false;
+    Object.values(settingInputs).forEach((input) => { input.disabled = false; });
+    settingsStatus.textContent = error instanceof Error ? error.message : 'Settings update failed.';
+  }
+}
+
+function selectTab(name: 'overview' | 'settings'): void {
+  const settingsSelected = name === 'settings';
+  overviewTab.hidden = settingsSelected; settingsTab.hidden = !settingsSelected;
+  overviewTabButton.classList.toggle('active', !settingsSelected); settingsTabButton.classList.toggle('active', settingsSelected);
+  overviewTabButton.setAttribute('aria-selected', String(!settingsSelected)); settingsTabButton.setAttribute('aria-selected', String(settingsSelected));
+}
+
 function isSnapshot(value: unknown): value is Snapshot {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<Snapshot>;
@@ -400,57 +510,6 @@ async function stopSharing(): Promise<void> {
   if (!response.ok) state.textContent = `STOP FAILED (${response.status})`;
 }
 
-async function saveCloudSetting(): Promise<void> {
-  const enabled = cloudEnabled.checked;
-  const current = lastSnapshot?.settings.cloud_discovery_enabled;
-  if (current === enabled) {
-    cloudSettingDirty = false;
-    return;
-  }
-  const active = Boolean(lastSnapshot?.management.active_stream);
-  const warning = active
-    ? 'Changing cloud discovery will restart the receiver and stop the active share. Continue?'
-    : 'Changing cloud discovery will restart the receiver. Continue?';
-  if (!confirm(warning)) {
-    cloudEnabled.checked = current ?? enabled;
-    cloudSettingDirty = false;
-    return;
-  }
-  saveCloud.disabled = true;
-  cloudEnabled.disabled = true;
-  cloudSettingDirty = false;
-  cloudSettingStatus.textContent = 'Saving setting…';
-  try {
-    const response = await fetch('/api/settings/cloud', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled, confirm_restart: true }),
-    });
-    const payload: unknown = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const detail = payload && typeof payload === 'object' && 'missing' in payload && Array.isArray(payload.missing)
-        ? ` Missing: ${(payload.missing as unknown[]).join(', ')}.`
-        : '';
-      throw new Error(`Cloud setting was not applied (${response.status}).${detail}`);
-    }
-    const scheduled = Boolean(payload && typeof payload === 'object' && 'restart_scheduled' in payload && payload.restart_scheduled);
-    if (scheduled) {
-      pendingRestartValue = enabled;
-      cloudSettingStatus.textContent = 'Receiver restarting; waiting for management portal to reconnect…';
-    } else {
-      saveCloud.disabled = false;
-      cloudEnabled.disabled = false;
-      cloudSettingStatus.textContent = 'Cloud setting already active.';
-    }
-  } catch (error) {
-    cloudEnabled.checked = current ?? !enabled;
-    cloudSettingDirty = false;
-    saveCloud.disabled = false;
-    cloudEnabled.disabled = false;
-    cloudSettingStatus.textContent = error instanceof Error ? error.message : 'Cloud setting update failed.';
-  }
-}
-
 function connect(): void {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
   const socket = new WebSocket(`${protocol}://${location.host}/ws`);
@@ -465,7 +524,7 @@ function connect(): void {
   });
   socket.addEventListener('close', () => {
     portalDisconnected = true;
-    if (pendingRestartValue !== null) cloudSettingStatus.textContent = 'Receiver restarting; waiting for management portal to reconnect…';
+    if (pendingRestartValue !== null) settingsStatus.textContent = 'Receiver restarting; waiting for management portal to reconnect…';
     state.textContent = 'DISCONNECTED';
     window.setTimeout(connect, 1500);
   });
@@ -475,9 +534,16 @@ function connect(): void {
 resetChartButton.addEventListener('click', resetChart);
 stopButton.addEventListener('click', () => void stopSharing());
 cloudEnabled.addEventListener('change', () => {
-  const current = lastSnapshot?.settings.cloud_discovery_enabled;
-  cloudSettingDirty = current === undefined || cloudEnabled.checked !== current;
+  settingsDirty = true;
+  saveSettings.disabled = false;
 });
-saveCloud.addEventListener('click', () => void saveCloudSetting());
+localPairingRequired.addEventListener('change', () => {
+  settingsDirty = true;
+  saveSettings.disabled = false;
+});
+saveSettings.addEventListener('click', () => void saveAllSettings());
+Object.values(settingInputs).forEach((input) => input.addEventListener('input', () => { settingsDirty = true; saveSettings.disabled = false; }));
+overviewTabButton.addEventListener('click', () => selectTab('overview'));
+settingsTabButton.addEventListener('click', () => selectTab('settings'));
 window.addEventListener('resize', drawChart);
 connect();

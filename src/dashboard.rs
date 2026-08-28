@@ -55,13 +55,14 @@ impl RawDashboardFeeder {
         } else {
             pairing.local_status.as_str()
         };
+        let dashboard_code = self.pairing_state.dashboard_code();
         crate::text::draw_ip_dashboard_argb(
             &mut pixels,
             self.width,
             self.height,
             vrefresh,
             &ips,
-            pairing.code.as_deref(),
+            dashboard_code.as_deref(),
             local_status,
             &pairing.cloud_status,
             pairing.cloud_ip.as_deref(),
@@ -172,13 +173,14 @@ impl PersistentDashboardEncoder {
         } else {
             pairing.local_status.as_str()
         };
+        let dashboard_code = self.pairing_state.dashboard_code();
         crate::text::draw_ip_dashboard_argb(
             &mut pixels,
             self.width,
             self.height,
             vrefresh,
             &ips,
-            pairing.code.as_deref(),
+            dashboard_code.as_deref(),
             local_status,
             &pairing.cloud_status,
             pairing.cloud_ip.as_deref(),

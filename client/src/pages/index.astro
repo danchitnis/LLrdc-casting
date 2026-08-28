@@ -220,7 +220,7 @@ import { PAIRING_CONFIG } from '../lib/config';
 
   <section class="pairing-card" aria-labelledby="pairingTitle">
     <h2 id="pairingTitle">Connect to a receiver</h2>
-    <p>Enter the {PAIRING_CONFIG.CODE_LENGTH}-character code shown on the receiver's HDMI screen. Video stays on the local network.</p>
+    <p id="pairingHelp">Enter the {PAIRING_CONFIG.CODE_LENGTH}-character code shown on the receiver's HDMI screen. Video stays on the local network.</p>
     <form id="pairForm">
       <div class="pairing-row">
         <input id="pairCode" name="code" inputmode="text" pattern={PAIRING_CONFIG.CODE_PATTERN.source} maxlength={PAIRING_CONFIG.CODE_LENGTH} autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="A78Q" aria-label={`${PAIRING_CONFIG.CODE_LENGTH}-character receiver code`} required />
@@ -298,9 +298,8 @@ import { PAIRING_CONFIG } from '../lib/config';
 
     await checkBrowserCodecCapabilities(log);
 
-    log('[PAIRING] Enter the HDMI code.');
     const bootstrapConnection = window.__LLRDC_BOOTSTRAP_CONNECTION__;
-    if (bootstrapConnection) {
+    if (bootstrapConnection?.code) {
       if (pairCode) pairCode.value = bootstrapConnection.code;
       try {
         await pairWithCode(bootstrapConnection.code);

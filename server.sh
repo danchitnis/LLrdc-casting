@@ -12,7 +12,8 @@ SSH_OPTIONS=(
 )
 DEPLOY_TMP_DIR=""
 ARTIFACT_CONTAINER_ID=""
-SETTINGS_DIR="/var/tmp/llrdc-bin/settings"
+DEVICE_CONFIG_DIR="/var/lib/llrdc-config"
+DEVICE_SECRETS_DIR="/var/lib/llrdc-secrets"
 
 die() {
   echo "[ERROR] $*" >&2
@@ -111,10 +112,11 @@ PRE_PAIRING_WORKER_URL="${PAIRING_WORKER_URL:-}"
 PRE_RECEIVER_ID="${RECEIVER_ID:-}"
 PRE_RECEIVER_REGISTRATION_SECRET="${RECEIVER_REGISTRATION_SECRET:-}"
 PRE_PAIRING_TOKEN_PUBLIC_KEY_FILE="${PAIRING_TOKEN_PUBLIC_KEY_FILE:-}"
+PRE_LOCAL_PAIRING_CODE_REQUIRED="${LOCAL_PAIRING_CODE_REQUIRED:-}"
 load_config
-# Optional generated Cloudflare receiver credentials. Load these after the
-# YAML defaults so setup values are not overwritten by cloud_discovery_enabled:
-# false in config.yaml.
+# Optional generated Cloudflare receiver credentials. Provisioning supplies
+# identity and secret material, but never controls the cloud enable flag.
+CONFIG_CLOUD_DISCOVERY_ENABLED="${SERVER_CLOUD_DISCOVERY_ENABLED:-}"
 RECEIVER_ENV_FILE="${SCRIPT_DIR}/.cloudflare/receiver.env"
 if [ -f "$RECEIVER_ENV_FILE" ]; then
   set -a
@@ -122,12 +124,14 @@ if [ -f "$RECEIVER_ENV_FILE" ]; then
   . "$RECEIVER_ENV_FILE"
   set +a
 fi
+if [[ -n "$CONFIG_CLOUD_DISCOVERY_ENABLED" ]]; then SERVER_CLOUD_DISCOVERY_ENABLED="$CONFIG_CLOUD_DISCOVERY_ENABLED"; else unset SERVER_CLOUD_DISCOVERY_ENABLED || true; fi
 if [ -n "$PRE_BOARD_IP" ]; then BOARD_IP="$PRE_BOARD_IP"; fi
 if [ -n "$PRE_PAIRING_WORKER_URL" ]; then SERVER_PAIRING_WORKER_URL="$PRE_PAIRING_WORKER_URL"; fi
 if [ -n "$PRE_CLOUD_DISCOVERY_ENABLED" ]; then SERVER_CLOUD_DISCOVERY_ENABLED="$PRE_CLOUD_DISCOVERY_ENABLED"; fi
 if [ -n "$PRE_RECEIVER_ID" ]; then SERVER_RECEIVER_ID="$PRE_RECEIVER_ID"; fi
 if [ -n "$PRE_RECEIVER_REGISTRATION_SECRET" ]; then SERVER_RECEIVER_REGISTRATION_SECRET="$PRE_RECEIVER_REGISTRATION_SECRET"; fi
 if [ -n "$PRE_PAIRING_TOKEN_PUBLIC_KEY_FILE" ]; then SERVER_PAIRING_TOKEN_PUBLIC_KEY_FILE="$PRE_PAIRING_TOKEN_PUBLIC_KEY_FILE"; fi
+if [ -n "$PRE_LOCAL_PAIRING_CODE_REQUIRED" ]; then SERVER_LOCAL_PAIRING_CODE_REQUIRED="$PRE_LOCAL_PAIRING_CODE_REQUIRED"; fi
 BOARD_IP="${BOARD_IP:-}"
 CONNECTOR_ID="${PRE_CONNECTOR_ID:-${BOARD_DRM_CONNECTOR_ID:-${DRM_CONNECTOR_ID:-auto}}}"
 
@@ -146,6 +150,7 @@ usage() {
   echo "  --idle-timeout-sec=<seconds>                Idle timeout (default: 30)"
   echo "  --sender-liveness-timeout-sec=<seconds>     Sender heartbeat grace (default: 90)"
   echo "  --pairing-code-ttl-sec=<seconds>            Pairing-code lifetime (default: 3600)"
+  echo "  --pairing-code-required=true|false          Require a code for direct LAN clients"
   echo "  --pairing-code=<alphanumeric>               Fixed test pairing code"
   echo "  --http-port=<port>                          HTTP/UI port (default: 8080)"
   echo "  --admin-bind-address=<address>              Tailscale-only admin bind address"
@@ -188,6 +193,7 @@ write_runtime_env() {
     printf 'IDLE_TIMEOUT_SEC=%s\n' "$idle_timeout_sec"
     printf 'SENDER_LIVENESS_TIMEOUT_SEC=%s\n' "$sender_liveness_timeout_sec"
     printf 'PAIRING_CODE_TTL_SEC=%s\n' "$pairing_code_ttl_sec"
+    printf 'LOCAL_PAIRING_CODE_REQUIRED=%s\n' "$local_pairing_code_required"
     printf 'PAIRING_CODE_FIXED=%s\n' "$pairing_code_fixed"
     printf 'HTTP_PORT=%s\n' "$http_port"
     printf 'ADMIN_BIND_ADDR=%s\n' "$admin_bind_address"
@@ -204,10 +210,31 @@ write_runtime_env() {
   } >"$destination"
 }
 
+write_device_config() {
+  local destination="$1"
+  python3 - "$destination" "$board_port" "$webtransport_port" "$http_port" "$admin_bind_address" "$admin_port" "$drm_connector_id" "$drm_plane_id" "$idle_dashboard" "$idle_dashboard_mode" "$idle_timeout_sec" "$sender_liveness_timeout_sec" "$udp_buffer_size_mb" "$cert_dir" "$pairing_worker_url" "$cloud_discovery_enabled" "$receiver_id" "$pairing_code_ttl_sec" "$local_pairing_code_required" "$pairing_token_public_key_file" <<'PY'
+import json, sys
+out, port, wt, http, bind, admin, connector, plane, dashboard, mode, idle, liveness, buffer, certs, worker, cloud, receiver, ttl, pairing_required, key = sys.argv[1:]
+def scalar(name, value):
+    if name in ('idle_dashboard', 'cloud_discovery_enabled', 'local_pairing_code_required'):
+        return 'true' if value == '1' else 'false'
+    if name in ('port', 'webtransport_port', 'http_port', 'admin_port', 'idle_timeout_sec', 'sender_liveness_timeout_sec', 'udp_buffer_size_mb', 'pairing_code_ttl_sec'):
+        return value
+    return json.dumps(value)
+lines = ['version: 1', 'server:']
+for name, value in [('port', port), ('webtransport_port', wt), ('http_port', http), ('admin_bind_address', bind), ('admin_port', admin), ('drm_connector_id', connector), ('drm_plane_id', plane), ('idle_dashboard', dashboard), ('idle_dashboard_mode', mode), ('idle_timeout_sec', idle), ('sender_liveness_timeout_sec', liveness), ('udp_buffer_size_mb', buffer), ('cert_dir', certs), ('pairing_worker_url', worker), ('cloud_discovery_enabled', cloud), ('receiver_id', receiver), ('pairing_code_ttl_sec', ttl), ('local_pairing_code_required', pairing_required), ('pairing_token_public_key_file', key)]:
+    lines.append(f'  {name}: {scalar(name, value)}')
+with open(out, 'w', encoding='utf-8') as stream:
+    stream.write('\n'.join(lines) + '\n')
+PY
+}
+
 start_remote_container() {
   local runtime_image="$1"
   remote_ssh "
     set -eu
+    env_file='$DEVICE_SECRETS_DIR/runtime.env'
+    if [ -s /var/tmp/llrdc-bin/runtime.env.new ]; then env_file=/var/tmp/llrdc-bin/runtime.env.new; fi
     for existing in '$IMAGE' rock5c-v4l2-drm; do
       if docker container inspect \"\$existing\" >/dev/null 2>&1; then
         docker stop -t 2 \"\$existing\" >/dev/null 2>&1 || docker kill \"\$existing\" >/dev/null
@@ -215,19 +242,15 @@ start_remote_container() {
       fi
     done
     docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged \
-      --env-file /var/tmp/llrdc-bin/runtime.env \
+      --env-file "\$env_file" \
       -v /dev:/dev \
       -v /var/lib/llrdc-certs:/certs \
       -v /var/lib/llrdc-pairing:/pairing:ro \
-      -v '$SETTINGS_DIR:/settings:rw' \
+      -v '$DEVICE_SECRETS_DIR:/secrets:ro' \
+      -v '$DEVICE_CONFIG_DIR:/config:rw' \
       -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting:ro \
       '$runtime_image' >/dev/null
   "
-}
-
-write_cloud_setting() {
-  local value="$1"
-  remote_ssh "mkdir -p '$SETTINGS_DIR' && printf '%s\\n' '$value' > '$SETTINGS_DIR/cloud-discovery-enabled.new' && chmod 0644 '$SETTINGS_DIR/cloud-discovery-enabled.new'"
 }
 
 wait_for_receiver() {
@@ -264,14 +287,8 @@ rollback_remote_deployment() {
     test -s /var/tmp/llrdc-bin/llrdc-casting.previous
     cp -p /var/tmp/llrdc-bin/llrdc-casting.previous /var/tmp/llrdc-bin/llrdc-casting.rollback
     mv -f /var/tmp/llrdc-bin/llrdc-casting.rollback /var/tmp/llrdc-bin/llrdc-casting
-    if [ -s /var/tmp/llrdc-bin/runtime.env.previous ]; then
-      cp -p /var/tmp/llrdc-bin/runtime.env.previous /var/tmp/llrdc-bin/runtime.env.rollback
-      mv -f /var/tmp/llrdc-bin/runtime.env.rollback /var/tmp/llrdc-bin/runtime.env
-    fi
-    rm -f '$SETTINGS_DIR/cloud-discovery-enabled'
-    if [ -e '$SETTINGS_DIR/cloud-discovery-enabled.previous' ]; then
-      mv -f '$SETTINGS_DIR/cloud-discovery-enabled.previous' '$SETTINGS_DIR/cloud-discovery-enabled'
-    fi
+    docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_CONFIG_DIR:/config' -v '$DEVICE_SECRETS_DIR:/secrets' '$IMAGE' -c 'set -eu; if [ -s /stage/runtime.env.previous ]; then cp -p /stage/runtime.env.previous /secrets/runtime.env.rollback; mv -f /secrets/runtime.env.rollback /secrets/runtime.env; chown root:root /secrets/runtime.env; chmod 0600 /secrets/runtime.env; fi; if [ -s /stage/config.yaml.previous ]; then cp -p /stage/config.yaml.previous /config/config.yaml.rollback; mv -f /config/config.yaml.rollback /config/config.yaml; chown root:root /config/config.yaml; chmod 0640 /config/config.yaml; fi'
+    rm -f /var/tmp/llrdc-bin/runtime.env.new
   "; then
     echo "[ROLLBACK] No valid previous deployment is available." >&2
     return 1
@@ -330,6 +347,7 @@ case "$action" in
     idle_timeout_override=""
     sender_liveness_timeout_override=""
     pairing_code_ttl_override=""
+    pairing_code_required_override=""
     http_port_override=""
     admin_bind_address_override=""
     admin_port_override=""
@@ -354,6 +372,12 @@ case "$action" in
         --idle-timeout-sec=*) idle_timeout_override="${1#*=}" ;;
         --sender-liveness-timeout-sec=*) sender_liveness_timeout_override="${1#*=}" ;;
         --pairing-code-ttl-sec=*) pairing_code_ttl_override="${1#*=}" ;;
+        --pairing-code-required=true) pairing_code_required_override=1 ;;
+        --pairing-code-required=false) pairing_code_required_override=0 ;;
+        --pairing-code-required=*)
+          echo "Pairing-code requirement must be configured as true or false." >&2
+          exit 2
+          ;;
         --cloud=true) cloud_override=1 ;;
         --cloud=false) cloud_override=0 ;;
         --cloud=*)
@@ -392,6 +416,7 @@ case "$action" in
     idle_timeout_sec="${SERVER_IDLE_TIMEOUT_SEC:-${BOARD_IDLE_TIMEOUT_SEC:-30}}"
     sender_liveness_timeout_sec="${SENDER_LIVENESS_TIMEOUT_SEC:-${SERVER_SENDER_LIVENESS_TIMEOUT_SEC:-${BOARD_SENDER_LIVENESS_TIMEOUT_SEC:-90}}}"
     pairing_code_ttl_sec="${SERVER_PAIRING_CODE_TTL_SEC:-${BOARD_PAIRING_CODE_TTL_SEC:-3600}}"
+    local_pairing_code_required="${SERVER_LOCAL_PAIRING_CODE_REQUIRED:-${BOARD_LOCAL_PAIRING_CODE_REQUIRED:-1}}"
     http_port="${SERVER_HTTP_PORT:-${BOARD_HTTP_PORT:-8080}}"
     admin_bind_address="${SERVER_ADMIN_BIND_ADDRESS:-${BOARD_ADMIN_BIND_ADDRESS:-$board_ip}}"
     admin_port="${SERVER_ADMIN_PORT:-${BOARD_ADMIN_PORT:-9090}}"
@@ -410,6 +435,7 @@ case "$action" in
     if [[ -n "$idle_timeout_override" ]]; then idle_timeout_sec="$idle_timeout_override"; fi
     if [[ -n "$sender_liveness_timeout_override" ]]; then sender_liveness_timeout_sec="$sender_liveness_timeout_override"; fi
     if [[ -n "$pairing_code_ttl_override" ]]; then pairing_code_ttl_sec="$pairing_code_ttl_override"; fi
+    if [[ -n "$pairing_code_required_override" ]]; then local_pairing_code_required="$pairing_code_required_override"; fi
     if [[ -n "$http_port_override" ]]; then http_port="$http_port_override"; fi
     if [[ -n "$admin_bind_address_override" ]]; then admin_bind_address="$admin_bind_address_override"; fi
     if [[ -n "$admin_port_override" ]]; then admin_port="$admin_port_override"; fi
@@ -438,6 +464,11 @@ case "$action" in
     validate_positive_integer "Idle timeout" "$idle_timeout_sec"
     validate_positive_integer "Sender liveness timeout" "$sender_liveness_timeout_sec"
     validate_positive_integer "Pairing-code lifetime" "$pairing_code_ttl_sec"
+    case "$local_pairing_code_required" in
+      1|true|TRUE|yes|YES) local_pairing_code_required=1 ;;
+      0|false|FALSE|no|NO) local_pairing_code_required=0 ;;
+      *) die "Pairing-code requirement must be configured as true or false." ;;
+    esac
     validate_port "HTTP port" "$http_port"
     validate_port "Admin port" "$admin_port"
     validate_port "WebTransport port" "$webtransport_port"
@@ -480,9 +511,11 @@ case "$action" in
     DEPLOY_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/llrdc-deploy.XXXXXX")"
     local_binary="${DEPLOY_TMP_DIR}/llrdc-casting"
     local_runtime_env="${DEPLOY_TMP_DIR}/runtime.env"
+    local_device_config="${DEPLOY_TMP_DIR}/config.yaml"
     write_runtime_env "$local_runtime_env"
+    write_device_config "$local_device_config"
 
-    remote_ssh "mkdir -p /var/tmp/llrdc-bin '$SETTINGS_DIR' && rm -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/runtime.env.new '$SETTINGS_DIR/cloud-discovery-enabled.new'"
+    remote_ssh "mkdir -p /var/tmp/llrdc-bin && rm -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/config.yaml.new"
 
     # Hash Dockerfile to detect whether the complete runtime image must be transferred.
     dockerfile_hash="$(shasum -a 256 "${SCRIPT_DIR}/Dockerfile" | awk '{print $1}')"
@@ -523,28 +556,17 @@ case "$action" in
     echo "[TRANSFER] Uploading verified receiver binary (${binary_size})..."
     scp "${SSH_OPTIONS[@]}" "$local_binary" "${board_ip}:/var/tmp/llrdc-bin/llrdc-casting.new"
     scp "${SSH_OPTIONS[@]}" "$local_runtime_env" "${board_ip}:/var/tmp/llrdc-bin/runtime.env.new"
-    write_cloud_setting "$cloud_discovery_enabled"
+    scp "${SSH_OPTIONS[@]}" "$local_device_config" "${board_ip}:/var/tmp/llrdc-bin/config.yaml.new"
     remote_binary_hash="$(remote_ssh "sha256sum /var/tmp/llrdc-bin/llrdc-casting.new | awk '{print \$1}'")"
     [[ "$remote_binary_hash" == "$local_binary_hash" ]] || die "Transferred binary checksum mismatch. The active receiver was not changed."
 
-    remote_ssh '
+    remote_ssh "
       set -eu
-      if [ -s /var/tmp/llrdc-bin/llrdc-casting ]; then
-        cp -p /var/tmp/llrdc-bin/llrdc-casting /var/tmp/llrdc-bin/llrdc-casting.previous
-      fi
-      if [ -s /var/tmp/llrdc-bin/runtime.env ]; then
-        cp -p /var/tmp/llrdc-bin/runtime.env /var/tmp/llrdc-bin/runtime.env.previous
-      fi
-      if [ -e '$SETTINGS_DIR/cloud-discovery-enabled' ]; then
-        rm -f '$SETTINGS_DIR/cloud-discovery-enabled.previous'
-        mv -f '$SETTINGS_DIR/cloud-discovery-enabled' '$SETTINGS_DIR/cloud-discovery-enabled.previous'
-      fi
+      if [ -s /var/tmp/llrdc-bin/llrdc-casting ]; then cp -p /var/tmp/llrdc-bin/llrdc-casting /var/tmp/llrdc-bin/llrdc-casting.previous; fi
       chmod 0755 /var/tmp/llrdc-bin/llrdc-casting.new
-      chmod 0600 /var/tmp/llrdc-bin/runtime.env.new
       mv -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/llrdc-casting
-      mv -f /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/runtime.env
-      mv -f '$SETTINGS_DIR/cloud-discovery-enabled.new' '$SETTINGS_DIR/cloud-discovery-enabled'
-    '
+      docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_CONFIG_DIR:/config' -v '$DEVICE_SECRETS_DIR:/secrets' '$IMAGE' -c 'set -eu; if [ -s /secrets/runtime.env ]; then cp -p /secrets/runtime.env /stage/runtime.env.previous; elif [ -s /stage/runtime.env ]; then cp -p /stage/runtime.env /stage/runtime.env.previous; fi; if [ -s /config/config.yaml ]; then cp -p /config/config.yaml /stage/config.yaml.previous; fi; chmod 0600 /stage/runtime.env.new; chmod 0640 /stage/config.yaml.new; mv -f /stage/config.yaml.new /config/config.yaml; chown root:root /config/config.yaml; chmod 0640 /config/config.yaml'
+    "
 
     if ! start_remote_container "$IMAGE"; then
       if rollback_remote_deployment; then
@@ -562,6 +584,11 @@ case "$action" in
       die "Deployment failed readiness checks and rollback also failed."
     fi
 
+    remote_ssh "docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_SECRETS_DIR:/secrets' '$IMAGE' -c 'set -eu; mv -f /stage/runtime.env.new /secrets/runtime.env; chown root:root /secrets/runtime.env; chmod 0600 /secrets/runtime.env'"
+
+    # Secrets and superseded configuration remain only in the durable,
+    # root-owned locations after the new container is healthy.
+    remote_ssh "rm -f /var/tmp/llrdc-bin/runtime.env /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/runtime.env.previous /var/tmp/llrdc-bin/config.yaml.previous"
     remote_ssh "printf '%s\\n' '$dockerfile_hash' > /var/tmp/llrdc-bin/Dockerfile.sha256 && printf '%s\\n' '$local_binary_hash' > /var/tmp/llrdc-bin/llrdc-casting.sha256"
     remote_ssh "docker logs --tail 30 '$IMAGE' 2>&1"
     echo "[DEPLOY] Receiver is healthy; binary checksum ${local_binary_hash:0:12}..."

@@ -7,17 +7,18 @@ shift || true
 
 usage() {
   cat <<'EOF'
-Usage: ./test_browser.sh <codec|cloud|all> [chrome|safari] [--board-ip=<address>]
+Usage: ./test_browser.sh <codec|cloud|management|all> [chrome|safari] [--board-ip=<address>]
 
 codec  Run the local codec suite in branded Chrome (default) or installed Safari.
 cloud  Deploy with Cloudflare enabled and run pairing plus one HEVC stream.
+management  Deploy a private fixed-code receiver and run the settings/pairing suite.
 all    Run the Chrome codec suite first, then cloud.
 
 Safari is run separately: ./test_browser.sh codec safari
 EOF
 }
 
-if [[ "$MODE" != "codec" && "$MODE" != "cloud" && "$MODE" != "all" ]]; then
+if [[ "$MODE" != "codec" && "$MODE" != "cloud" && "$MODE" != "management" && "$MODE" != "all" ]]; then
   usage >&2
   exit 2
 fi
@@ -115,11 +116,109 @@ stop_safari_driver() {
   safari_driver_pid=""
 }
 
+management_backup="$artifact_dir/device-config.yaml"
+management_runtime_backup=""
+management_secret_tmp=""
+management_restore_needed=0
+
+restore_management_config() {
+  if [[ "$MODE" != "management" || "$management_restore_needed" != 1 || ! -s "$management_backup" ]]; then
+    return 0
+  fi
+  echo "[E2E] Restoring the pre-test device configuration..."
+  scp -q "$management_backup" "$board_ip:/var/tmp/llrdc-management-config.restore"
+  scp -q "$management_runtime_backup" "$board_ip:/var/tmp/llrdc-management-runtime.restore"
+  ssh -o BatchMode=yes "$board_ip" \
+    "set -eu
+     docker run --rm --entrypoint /bin/sh \
+       -v /var/tmp:/stage:ro \
+       -v /var/lib/llrdc-config:/config \
+       -v /var/lib/llrdc-secrets:/secrets \
+       llrdc-casting -c 'set -eu; cp -p /stage/llrdc-management-config.restore /config/config.yaml.restore; chmod 640 /config/config.yaml.restore; sync; mv -f /config/config.yaml.restore /config/config.yaml; cp -p /stage/llrdc-management-runtime.restore /secrets/runtime.env.restore; chmod 600 /secrets/runtime.env.restore; sync; mv -f /secrets/runtime.env.restore /secrets/runtime.env; sync'
+     docker rm -f llrdc-casting >/dev/null 2>&1 || true
+     docker run -d --name llrdc-casting --restart unless-stopped --net host --privileged \
+       --env-file /var/lib/llrdc-secrets/runtime.env \
+       -v /dev:/dev \
+       -v /var/lib/llrdc-certs:/certs \
+       -v /var/lib/llrdc-pairing:/pairing:ro \
+       -v /var/lib/llrdc-secrets:/secrets:ro \
+       -v /var/lib/llrdc-config:/config:rw \
+       -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting:ro \
+       llrdc-casting >/dev/null
+     rm -f /var/tmp/llrdc-management-config.restore /var/tmp/llrdc-management-runtime.restore"
+  for _ in {1..60}; do
+    if curl -fsSk --connect-timeout 2 --max-time 3 "https://${board_ip}:9090/health" >/dev/null 2>&1; then
+      expected_hash="$(shasum -a 256 "$management_backup" | awk '{print $1}')"
+      restored_hash="$(ssh -o BatchMode=yes "$board_ip" 'docker exec llrdc-casting sha256sum /config/config.yaml' | awk '{print $1}')"
+      if [[ "$expected_hash" != "$restored_hash" ]]; then
+        echo "[E2E] Restored device configuration checksum does not match the pre-test backup." >&2
+        return 1
+      fi
+      expected_runtime_hash="$(shasum -a 256 "$management_runtime_backup" | awk '{print $1}')"
+      restored_runtime_hash="$(ssh -o BatchMode=yes "$board_ip" 'docker exec llrdc-casting sha256sum /secrets/runtime.env' | awk '{print $1}')"
+      if [[ "$expected_runtime_hash" != "$restored_runtime_hash" ]]; then
+        echo "[E2E] Restored runtime secret checksum does not match the pre-test backup." >&2
+        return 1
+      fi
+      management_restore_needed=0
+      echo "[E2E] Pre-test device configuration restored."
+      return 0
+    fi
+    sleep 1
+  done
+  echo "[E2E] Device configuration restoration did not become healthy." >&2
+  return 1
+}
+
 on_exit() {
+  local exit_status=$?
   stop_safari_driver
+  if ! restore_management_config; then
+    exit_status=1
+  fi
   collect_receiver_logs
+  if [[ -n "$management_secret_tmp" && -d "$management_secret_tmp" ]]; then
+    rm -rf -- "$management_secret_tmp"
+  fi
+  exit "$exit_status"
 }
 trap on_exit EXIT
+
+if [[ "$MODE" == "management" ]]; then
+  echo "[E2E] Backing up the device configuration for the management suite..."
+  ssh -o BatchMode=yes "$board_ip" 'docker exec llrdc-casting cat /config/config.yaml' > "$management_backup"
+  [[ -s "$management_backup" ]] || { echo "[E2E] Could not back up /config/config.yaml." >&2; exit 1; }
+  management_secret_tmp="$(mktemp -d "${TMPDIR:-/tmp}/llrdc-management.XXXXXX")"
+  chmod 700 "$management_secret_tmp"
+  management_runtime_backup="$management_secret_tmp/runtime.env"
+  ssh -o BatchMode=yes "$board_ip" 'docker exec llrdc-casting cat /secrets/runtime.env' > "$management_runtime_backup"
+  chmod 600 "$management_runtime_backup"
+  [[ -s "$management_runtime_backup" ]] || { echo "[E2E] Could not back up the receiver runtime environment." >&2; exit 1; }
+  management_restore_needed=1
+  printf '%s\n' '[E2E] Backups captured; deploying a controlled cloud-disabled fixed-code receiver for the management suite.' > "$artifact_dir/deploy.log"
+  set +e
+  "$SCRIPT_DIR/server.sh" --start --cloud=false --pairing-code=AB12 --pairing-code-required=true --board-ip="$board_ip" 2>&1 | tee -a "$artifact_dir/deploy.log"
+  management_deploy_status=${PIPESTATUS[0]}
+  set -e
+  if (( management_deploy_status != 0 )); then
+    echo "[E2E] Controlled management deployment failed; see $artifact_dir/deploy.log" >&2
+    exit 1
+  fi
+  if ! ssh -o BatchMode=yes "$board_ip" "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' llrdc-casting" 2>/dev/null | grep -Fxq 'PAIRING_CODE_FIXED=AB12'; then
+    echo "[E2E] Management suite did not deploy the controlled fixed-code environment; see $artifact_dir/deploy.log" >&2
+    exit 1
+  fi
+  export E2E_MODE=management
+  export E2E_BOARD_IP="$board_ip"
+  export E2E_ARTIFACT_DIR="$artifact_dir"
+  export E2E_MANAGEMENT_FIXED_CODE=AB12
+  export E2E_MANAGEMENT_INITIAL_CONFIG="$management_backup"
+  set +e
+  (cd "$SCRIPT_DIR/client" && npm run test:e2e:admin)
+  management_status=$?
+  set -e
+  exit "$management_status"
+fi
 
 cloud_flag=false
 if [[ "$MODE" == "cloud" ]]; then cloud_flag=true; fi
@@ -153,8 +252,8 @@ if ! ssh -o BatchMode=yes "$board_ip" "docker inspect -f '{{range .Config.Env}}{
   echo "[E2E] Receiver cloud-discovery environment does not match the $MODE suite; see $artifact_dir/deploy.log" >&2
   exit 1
 fi
-expected_cloud_setting="$([[ "$cloud_flag" == true ]] && echo 1 || echo 0)"
-if ! ssh -o BatchMode=yes "$board_ip" "test \"\$(cat /var/tmp/llrdc-bin/settings/cloud-discovery-enabled 2>/dev/null)\" = '$expected_cloud_setting'" 2>/dev/null; then
+expected_cloud_setting="$([[ "$cloud_flag" == true ]] && echo true || echo false)"
+if ! ssh -o BatchMode=yes "$board_ip" "docker exec llrdc-casting awk '/^[[:space:]]*cloud_discovery_enabled:/ {print \$2; exit}' /config/config.yaml 2>/dev/null | tr -d '\"' | grep -Fxq '$expected_cloud_setting'" 2>/dev/null; then
   echo "[E2E] Receiver persisted cloud setting does not match the $MODE suite; see $artifact_dir/deploy.log" >&2
   exit 1
 fi

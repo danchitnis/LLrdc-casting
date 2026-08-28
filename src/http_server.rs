@@ -161,10 +161,15 @@ where
         stream.write_all(response.as_bytes()).await?;
         return Ok(());
     }
+    let pairing_settings = config::settings();
+    let pairing_config_body = format!(r#"{{"required":{},"webtransport_port":{}}}"#, pairing_settings.local_pairing_code_required, pairing_settings.webtransport_port);
 
     let (status, content_type, body) = match path {
         "/" | "/index.html" => ("200 OK", "text/html; charset=utf-8", INDEX_HTML.as_bytes()),
         "/cert_hash" => ("200 OK", "text/plain; charset=utf-8", cert_hash.as_bytes()),
+        "/pairing-config" => {
+            ("200 OK", "application/json; charset=utf-8", pairing_config_body.as_bytes())
+        },
         "/health" => ("200 OK", "text/plain; charset=utf-8", b"OK" as &[u8]),
         "/favicon.ico" => ("204 No Content", "image/x-icon", b"" as &[u8]),
         _ => ("404 Not Found", "text/plain; charset=utf-8", b"Not Found" as &[u8]),

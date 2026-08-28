@@ -36,6 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    config::initialize().map_err(|error| std::io::Error::other(error.to_string()))?;
+    let receiver_settings = config::settings();
     sys_monitor::spawn_dmesg_kernel_monitor();
     let _ = drm_kms::inspect_live_scanout_status();
 
@@ -69,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if fixed_pairing_code.is_some() && cloud_discovery_enabled {
         return Err("fixed pairing codes cannot be used with Cloudflare discovery enabled".into());
     }
-    let pairing_state = local_pairing::PairingState::with_fixed_code(fixed_pairing_code)?;
+    let pairing_state = local_pairing::PairingState::with_fixed_code(fixed_pairing_code, receiver_settings.local_pairing_code_required)?;
     local_pairing::spawn_local_pairing(pairing_state.clone());
     if cloud_discovery_enabled {
         cloud_discovery::spawn_registration(pairing_state.clone(), cert_hash_hex.clone());

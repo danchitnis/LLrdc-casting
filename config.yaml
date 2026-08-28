@@ -1,4 +1,5 @@
 # Target Device & System Configuration
+version: 1
 board:
   ip: "100.100.1.72"
 
@@ -11,14 +12,16 @@ server:
   drm_connector_id: "auto"     # DRM display connector ID (auto or e.g. 54)
   drm_plane_id: "33"           # DRM overlay plane ID
   idle_dashboard: true         # Enable idle IP screen when no stream is active
+  idle_dashboard_mode: "raw"   # Idle dashboard codec (raw or hevc)
   idle_timeout_sec: 30         # Seconds of stream inactivity before restoring dashboard
+  sender_liveness_timeout_sec: 90 # Sender heartbeat grace period
   udp_buffer_size_mb: 8        # UDP socket receive buffer size in MB
   cert_dir: "/certs"           # Directory for TLS certificates
   pairing_worker_url: "https://cast.llrdc.com"  # Cloudflare control-plane base URL
   cloud_discovery_enabled: false
   receiver_id: ""               # Provisioned unique receiver identifier
   pairing_code_ttl_sec: 3600
-  receiver_registration_secret: "" # Base64url device registration key
+  local_pairing_code_required: true # Require a code for direct LAN clients
   pairing_token_public_key_file: "/pairing/public.pem"
 
 test-stream:

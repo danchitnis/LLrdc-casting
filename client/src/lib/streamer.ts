@@ -53,7 +53,7 @@ export interface BootstrapConnection {
   ip: string;
   port: number;
   certHash: string;
-  code: string;
+  code?: string;
   token?: string;
 }
 
@@ -453,7 +453,8 @@ async function openPairedTransport(): Promise<void> {
     const options: WebTransportOptions = {
       serverCertificateHashes: [{ algorithm: 'sha-256', value: certBytes.buffer as ArrayBuffer }],
     };
-    const query = new URLSearchParams({ code: pairedConnection.code });
+    const query = new URLSearchParams();
+    if (pairedConnection.code) query.set('code', pairedConnection.code);
     if (pairedConnection.token) query.set('token', pairedConnection.token);
     const url = `https://${pairedConnection.ip}:${pairedConnection.port}/?${query.toString()}`;
     transport = new window.WebTransport(url, options);
@@ -492,12 +493,14 @@ export async function pairWithCode(rawCode: string): Promise<void> {
   updateStatus('connecting', 'PAIRING');
   const localMode = isDirectIpPage();
   if (localMode) {
+    const pairingResponse = await fetch('/pairing-config', { cache: 'no-store' });
+    const pairingSettings = pairingResponse.ok ? await pairingResponse.json() as { webtransport_port?: number } : {};
     const response = await fetch('/cert_hash', { cache: 'no-store' });
     if (!response.ok) throw new Error('Receiver certificate is unavailable.');
     const certHash = (await response.text()).trim();
     pairedConnection = {
       ip: window.location.hostname,
-      port: PAIRING_CONFIG.DIRECT_WEBTRANSPORT_PORT,
+      port: pairingSettings.webtransport_port || PAIRING_CONFIG.DIRECT_WEBTRANSPORT_PORT,
       certHash,
       code,
     };
@@ -571,6 +574,34 @@ export function initPairing(): void {
   const button = document.getElementById('toggleBtn') as HTMLButtonElement | null;
   if (button) button.disabled = true;
   updateStatus('disconnected', 'ENTER CODE');
+  if (isDirectIpPage() && !window.__LLRDC_BOOTSTRAP_CONNECTION__) {
+    void fetch('/pairing-config', { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Pairing configuration is unavailable.');
+        const config = await response.json() as { required?: boolean; webtransport_port?: number };
+        if (config.required !== false) return;
+        const certResponse = await fetch('/cert_hash', { cache: 'no-store' });
+        if (!certResponse.ok) throw new Error('Receiver certificate is unavailable.');
+        pairedConnection = { ip: window.location.hostname, port: config.webtransport_port || PAIRING_CONFIG.DIRECT_WEBTRANSPORT_PORT, certHash: (await certResponse.text()).trim() };
+        await openPairedTransport();
+        setSettingsDisabled(false);
+        const button = document.getElementById('toggleBtn') as HTMLButtonElement | null;
+        if (button) button.disabled = false;
+        const form = document.getElementById('pairForm');
+        if (form) form.hidden = true;
+        const help = document.getElementById('pairingHelp');
+        if (help) help.textContent = 'Security-code pairing is disabled for this receiver. Video stays on the local network.';
+        const status = document.getElementById('pairStatus');
+        if (status) status.textContent = 'PAIRED (CODE DISABLED)';
+        const notice = document.getElementById('userNotice');
+        if (notice) { notice.hidden = false; notice.textContent = 'Security-code pairing is disabled for direct LAN clients.'; notice.className = 'user-notice info'; }
+      })
+      .catch((error: unknown) => {
+        const status = document.getElementById('pairStatus');
+        if (status) status.textContent = 'PAIR FAILED';
+        log(`[PAIRING] Automatic connection failed: ${error instanceof Error ? error.message : 'unknown error'}`, true);
+      });
+  }
 }
 
 export async function stopStreaming(): Promise<void> {

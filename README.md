@@ -176,13 +176,17 @@ HTML file before embedding both files in the Rust binary.
 The portal shows live measured stream traffic, connected devices, process-life
 sharing history, receiver health, and structured events. **Stop sharing** sends
 an isolated admin command through the application boundary and restores the
-idle dashboard. The **Cloud discovery** control can enable or disable the
-existing `--cloud=true|false` setting; applying a change validates the
-provisioned Cloudflare credentials, atomically persists the boolean, and
-restarts the receiver. The portal reconnects automatically after the restart.
-Each later `server.sh --start` writes its effective `--cloud` value and resets
-any portal change. The portal has no separate password because access is
-limited to the configured Tailscale interface.
+idle dashboard. Its Settings tab edits receiver runtime values, atomically
+persists them on the device, and restarts the receiver; the portal reconnects
+automatically. Cloudflare identity and secrets remain deployment-controlled and
+are never returned by the portal. Each later `server.sh --start` resolves the
+local `config.yaml` and deployment flags again, replacing portal edits. The
+portal has no separate password because access is limited to the configured
+Tailscale interface.
+
+The resolved receiver document is stored on the board at
+`/var/lib/llrdc-config/config.yaml`; Cloudflare registration secrets are stored
+separately with root-only permissions.
 
 To use an address without editing `config.yaml`:
 
@@ -270,7 +274,9 @@ For deliberate local stress testing, use a fixed code for one deployment:
 ./server.sh --start --cloud=false --pairing-code=0000
 ```
 
-Random rotating pairing codes remain the default. Fixed-code mode is rejected
+Random rotating pairing codes remain the default. The management portal can
+disable the code requirement for direct LAN clients; this intentionally allows
+any network-reachable client to connect. Fixed-code mode is rejected
 when Cloudflare discovery is enabled and should not be persisted in configuration.
 
 Select **Stop Casting** when finished. The receiver returns to its

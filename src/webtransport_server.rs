@@ -87,7 +87,7 @@ pub async fn run_server_with_identity(
         match ConnectionTokenVerifier::from_environment() {
             Ok(verifier) => Some(Arc::new(verifier)),
             Err(error) => {
-                eprintln!("[WEBTRANSPORT] Optional cloud token verification unavailable: {error}");
+                eprintln!("[WEBTRANSPORT] Cloud token verification unavailable: {error}");
                 None
             }
         }
@@ -157,7 +157,7 @@ pub async fn run_server_with_identity(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_peer_ip, route_control_payload, udp_receive_buffer_bytes};
+    use super::{normalize_peer_ip, pairing_admission, route_control_payload, udp_receive_buffer_bytes};
     use crate::control::{ControlCommand, TelemetryMessage};
     use crate::management::{ClientMetadata, ManagementState};
     use std::net::IpAddr;
@@ -179,6 +179,14 @@ mod tests {
         let mapped: IpAddr = "::ffff:192.0.2.44".parse().expect("mapped IPv4 address");
         assert_eq!(normalize_peer_ip(mapped), "192.0.2.44");
         assert_eq!(normalize_peer_ip("2001:db8::1".parse().unwrap()), "2001:db8::1");
+    }
+
+    #[test]
+    fn pairing_admission_allows_only_code_free_lan_when_disabled() {
+        assert!(pairing_admission(false, false, false).is_ok());
+        assert!(pairing_admission(true, false, false).is_err());
+        assert!(pairing_admission(false, true, false).is_ok());
+        assert!(pairing_admission(false, false, true).is_err());
     }
 
     #[tokio::test]
@@ -276,20 +284,27 @@ async fn handle_connection(
     println!("[WEBTRANSPORT] Connection request received");
 
     let (code, token) = connection_query(session_request.path());
-    let Some(code) = code else {
+    let pairing_required = crate::config::settings().local_pairing_code_required;
+    if let Err(reason) = pairing_admission(pairing_required, code.is_some(), token.is_some()) {
         session_request.forbidden().await;
-        return Err("missing local pairing code".into());
-    };
+        return Err(reason.into());
+    }
     let peer = normalize_peer_ip(session_request.remote_address().ip());
     let connection_id = format!("wt-{}", NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed));
-    if let Err(reason) = pairing_state.validate_code(&code, &peer) {
-        session_request.forbidden().await;
-        return Err(format!("local pairing rejected: {reason}").into());
+    if let Some(code) = code.as_deref() {
+        if let Err(reason) = pairing_state.validate_code(code, &peer) {
+            session_request.forbidden().await;
+            return Err(format!("local pairing rejected: {reason}").into());
+        }
     }
-    if let (Some(token), Some(token_verifier)) = (token.as_deref(), token_verifier.as_ref()) {
+    if let Some(token) = token.as_deref() {
+        let Some(token_verifier) = token_verifier.as_ref() else {
+            session_request.forbidden().await;
+            return Err("cloud token verifier unavailable".into());
+        };
         if let Err(reason) = token_verifier.verify(token) {
             session_request.forbidden().await;
-            return Err(format!("optional cloud token rejected: {reason}").into());
+            return Err(format!("cloud token rejected: {reason}").into());
         }
     }
     let connection = session_request.accept().await?;
@@ -386,6 +401,14 @@ fn connection_query(path: &str) -> (Option<String>, Option<String>) {
         }
     }
     (code, token)
+}
+
+fn pairing_admission(pairing_required: bool, has_code: bool, has_token: bool) -> Result<(), &'static str> {
+    if !has_code && (pairing_required || has_token) {
+        Err(if has_token { "cloud token requires a pairing code" } else { "missing local pairing code" })
+    } else {
+        Ok(())
+    }
 }
 
 async fn handle_control_stream(

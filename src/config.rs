@@ -4,7 +4,269 @@
 //! runtime overrides. This module is the single home for compiled defaults
 //! and limits used by the Rust server.
 
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::str::FromStr;
+use std::sync::OnceLock;
+
+pub const DEVICE_CONFIG_PATH: &str = "/config/config.yaml";
+pub const DEVICE_CONFIG_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceConfigDocument {
+    pub version: u32,
+    pub server: ReceiverSettings,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiverSettings {
+    pub port: u16,
+    pub webtransport_port: u16,
+    pub http_port: u16,
+    pub admin_bind_address: String,
+    pub admin_port: u16,
+    pub drm_connector_id: String,
+    pub drm_plane_id: String,
+    pub idle_dashboard: bool,
+    pub idle_dashboard_mode: String,
+    pub idle_timeout_sec: u64,
+    pub sender_liveness_timeout_sec: u64,
+    pub udp_buffer_size_mb: usize,
+    pub cert_dir: String,
+    pub pairing_worker_url: String,
+    pub cloud_discovery_enabled: bool,
+    pub receiver_id: String,
+    pub pairing_code_ttl_sec: u64,
+    #[serde(default = "default_local_pairing_code_required")]
+    pub local_pairing_code_required: bool,
+    pub pairing_token_public_key_file: String,
+}
+
+fn default_local_pairing_code_required() -> bool { true }
+
+impl Default for ReceiverSettings {
+    fn default() -> Self {
+        Self {
+            port: server::DEFAULT_BOARD_PORT,
+            webtransport_port: server::DEFAULT_WEBTRANSPORT_PORT,
+            http_port: server::DEFAULT_HTTP_PORT,
+            admin_bind_address: String::new(),
+            admin_port: server::DEFAULT_ADMIN_PORT,
+            drm_connector_id: "auto".to_string(),
+            drm_plane_id: server::DEFAULT_DRM_PLANE_ID.to_string(),
+            idle_dashboard: true,
+            idle_dashboard_mode: dashboard::DEFAULT_MODE.to_string(),
+            idle_timeout_sec: server::DEFAULT_IDLE_TIMEOUT_SEC,
+            sender_liveness_timeout_sec: server::DEFAULT_SENDER_LIVENESS_TIMEOUT_SEC,
+            udp_buffer_size_mb: server::DEFAULT_UDP_BUFFER_SIZE_MB,
+            cert_dir: server::DEFAULT_CERTS_DIR.to_string(),
+            pairing_worker_url: "https://cast.llrdc.com".to_string(),
+            cloud_discovery_enabled: false,
+            receiver_id: String::new(),
+            pairing_code_ttl_sec: pairing::PAIRING_CODE_TTL_SEC,
+            local_pairing_code_required: true,
+            pairing_token_public_key_file: server::DEFAULT_PAIRING_PUBLIC_KEY_FILE.to_string(),
+        }
+    }
+}
+
+impl ReceiverSettings {
+    pub fn from_environment() -> Self {
+        let defaults = Self::default();
+        Self {
+            port: env_or("BOARD_PORT", defaults.port),
+            webtransport_port: env_or("WEBTRANSPORT_PORT", defaults.webtransport_port),
+            http_port: env_or("HTTP_PORT", defaults.http_port),
+            admin_bind_address: env_string_or("ADMIN_BIND_ADDR", &defaults.admin_bind_address),
+            admin_port: env_or("ADMIN_PORT", defaults.admin_port),
+            drm_connector_id: env_string_or("DRM_CONNECTOR_ID", &defaults.drm_connector_id),
+            drm_plane_id: env_string_or("DRM_PLANE_ID", &defaults.drm_plane_id),
+            idle_dashboard: env_bool_or("IDLE_DASHBOARD", defaults.idle_dashboard),
+            idle_dashboard_mode: env_string_or("IDLE_DASHBOARD_MODE", &defaults.idle_dashboard_mode),
+            idle_timeout_sec: env_or("IDLE_TIMEOUT_SEC", defaults.idle_timeout_sec),
+            sender_liveness_timeout_sec: env_or("SENDER_LIVENESS_TIMEOUT_SEC", defaults.sender_liveness_timeout_sec),
+            udp_buffer_size_mb: env_or("UDP_BUFFER_SIZE_MB", defaults.udp_buffer_size_mb),
+            cert_dir: env_string_or("CERTS_DIR", &defaults.cert_dir),
+            pairing_worker_url: env_string_or("PAIRING_WORKER_URL", &defaults.pairing_worker_url),
+            cloud_discovery_enabled: env_bool_or("CLOUD_DISCOVERY_ENABLED", defaults.cloud_discovery_enabled),
+            receiver_id: env_string_or("RECEIVER_ID", &defaults.receiver_id),
+            pairing_code_ttl_sec: env_or("PAIRING_CODE_TTL_SEC", defaults.pairing_code_ttl_sec),
+            local_pairing_code_required: env_bool_or("LOCAL_PAIRING_CODE_REQUIRED", defaults.local_pairing_code_required),
+            pairing_token_public_key_file: env_string_or("PAIRING_TOKEN_PUBLIC_KEY_FILE", &defaults.pairing_token_public_key_file),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [("admin_bind_address", &self.admin_bind_address), ("drm_connector_id", &self.drm_connector_id), ("drm_plane_id", &self.drm_plane_id), ("idle_dashboard_mode", &self.idle_dashboard_mode), ("cert_dir", &self.cert_dir), ("pairing_worker_url", &self.pairing_worker_url), ("receiver_id", &self.receiver_id), ("pairing_token_public_key_file", &self.pairing_token_public_key_file)] {
+            if value.chars().any(|character| character == '\n' || character == '\r') { return Err(format!("{name} must be a single line")); }
+        }
+        for (name, value) in [("port", self.port), ("webtransport_port", self.webtransport_port), ("http_port", self.http_port), ("admin_port", self.admin_port)] {
+            if value == 0 { return Err(format!("{name} must be between 1 and 65535")); }
+        }
+        if self.port == self.webtransport_port || self.port == self.http_port || self.port == self.admin_port || self.webtransport_port == self.http_port || self.webtransport_port == self.admin_port || self.http_port == self.admin_port {
+            return Err("receiver ports must be unique".to_string());
+        }
+        if self.idle_timeout_sec == 0 || self.sender_liveness_timeout_sec == 0 || self.udp_buffer_size_mb == 0 || self.pairing_code_ttl_sec == 0 {
+            return Err("timeouts, buffer size, and pairing TTL must be positive".to_string());
+        }
+        if self.drm_connector_id != "auto" && !self.drm_connector_id.chars().all(|c| c.is_ascii_digit()) {
+            return Err("drm_connector_id must be auto or numeric".to_string());
+        }
+        if !self.drm_plane_id.chars().all(|c| c.is_ascii_digit()) {
+            return Err("drm_plane_id must be numeric".to_string());
+        }
+        if self.idle_dashboard_mode != "raw" && self.idle_dashboard_mode != "hevc" {
+            return Err("idle_dashboard_mode must be raw or hevc".to_string());
+        }
+        Ok(())
+    }
+}
+
+static DEVICE_CONFIG: OnceLock<ReceiverSettings> = OnceLock::new();
+
+pub fn initialize() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path = Path::new(DEVICE_CONFIG_PATH);
+    let settings = if path.is_file() {
+        let text = std::fs::read_to_string(path)?;
+        let document = parse_document(&text)?;
+        if document.version != DEVICE_CONFIG_VERSION { return Err(format!("unsupported device config version {}", document.version).into()); }
+        document.server
+    } else {
+        ReceiverSettings::from_environment()
+    };
+    settings.validate().map_err(|error| format!("invalid receiver configuration: {error}"))?;
+    export_environment(&settings);
+    let _ = DEVICE_CONFIG.set(settings);
+    Ok(())
+}
+
+fn parse_document(text: &str) -> Result<DeviceConfigDocument, Box<dyn std::error::Error + Send + Sync>> {
+    if let Ok(document) = serde_json::from_str(text) { return Ok(document); }
+    // Accept the small, flat YAML shape used by config.yaml without adding a
+    // second parser dependency. The deployment writer and this fallback share
+    // the same deliberately limited, typed document shape.
+    let mut version = None;
+    let mut server = serde_json::Map::new();
+    let mut in_server = false;
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim_end();
+        if line.trim().is_empty() { continue; }
+        let trimmed = line.trim();
+        if trimmed == "server:" { in_server = true; continue; }
+        let Some((key, raw_value)) = trimmed.split_once(':') else { return Err(format!("invalid config line: {trimmed}").into()); };
+        let key = key.trim();
+        let value = raw_value.trim();
+        if key == "version" { version = Some(value.parse::<u32>()?); continue; }
+        if !in_server { return Err(format!("unknown top-level config key: {key}").into()); }
+        let json_value = serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.trim_matches(|character| character == '"' || character == '\'').to_string()));
+        server.insert(key.replace('-', "_"), json_value);
+    }
+    let value = serde_json::json!({"version": version.ok_or("config version is missing")?, "server": server});
+    Ok(serde_json::from_value(value)?)
+}
+
+pub fn settings() -> ReceiverSettings {
+    DEVICE_CONFIG.get().cloned().unwrap_or_else(ReceiverSettings::from_environment)
+}
+
+pub fn persist_document(settings: &ReceiverSettings) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    persist_document_at(Path::new(DEVICE_CONFIG_PATH), settings)
+}
+
+pub fn persist_document_at(path: &Path, settings: &ReceiverSettings) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    settings.validate().map_err(|error| format!("invalid receiver configuration: {error}"))?;
+    let parent = path.parent().ok_or("device config has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join("config.yaml.new");
+    let bytes = render_yaml(settings).into_bytes();
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    #[cfg(unix)] std::fs::set_permissions(&temporary, std::os::unix::fs::PermissionsExt::from_mode(0o640))?;
+    std::fs::rename(&temporary, path)?;
+    let directory = std::fs::File::open(parent)?;
+    directory.sync_all()?;
+    Ok(())
+}
+
+fn render_yaml(settings: &ReceiverSettings) -> String {
+    let quote = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
+    format!("version: 1\nserver:\n  port: {}\n  webtransport_port: {}\n  http_port: {}\n  admin_bind_address: {}\n  admin_port: {}\n  drm_connector_id: {}\n  drm_plane_id: {}\n  idle_dashboard: {}\n  idle_dashboard_mode: {}\n  idle_timeout_sec: {}\n  sender_liveness_timeout_sec: {}\n  udp_buffer_size_mb: {}\n  cert_dir: {}\n  pairing_worker_url: {}\n  cloud_discovery_enabled: {}\n  receiver_id: {}\n  pairing_code_ttl_sec: {}\n  local_pairing_code_required: {}\n  pairing_token_public_key_file: {}\n", settings.port, settings.webtransport_port, settings.http_port, quote(&settings.admin_bind_address), settings.admin_port, quote(&settings.drm_connector_id), quote(&settings.drm_plane_id), settings.idle_dashboard, quote(&settings.idle_dashboard_mode), settings.idle_timeout_sec, settings.sender_liveness_timeout_sec, settings.udp_buffer_size_mb, quote(&settings.cert_dir), quote(&settings.pairing_worker_url), settings.cloud_discovery_enabled, quote(&settings.receiver_id), settings.pairing_code_ttl_sec, settings.local_pairing_code_required, quote(&settings.pairing_token_public_key_file))
+}
+
+fn export_environment(settings: &ReceiverSettings) {
+    let pairs = [
+        ("BOARD_PORT", settings.port.to_string()), ("UDP_PORT", settings.port.to_string()),
+        ("WEBTRANSPORT_PORT", settings.webtransport_port.to_string()), ("HTTP_PORT", settings.http_port.to_string()),
+        ("ADMIN_BIND_ADDR", settings.admin_bind_address.clone()), ("ADMIN_PORT", settings.admin_port.to_string()),
+        ("DRM_CONNECTOR_ID", settings.drm_connector_id.clone()), ("DRM_PLANE_ID", settings.drm_plane_id.clone()),
+        ("IDLE_DASHBOARD", settings.idle_dashboard.to_string()), ("IDLE_DASHBOARD_MODE", settings.idle_dashboard_mode.clone()),
+        ("IDLE_TIMEOUT_SEC", settings.idle_timeout_sec.to_string()), ("SENDER_LIVENESS_TIMEOUT_SEC", settings.sender_liveness_timeout_sec.to_string()),
+        ("UDP_BUFFER_SIZE_MB", settings.udp_buffer_size_mb.to_string()), ("CERTS_DIR", settings.cert_dir.clone()),
+        ("PAIRING_WORKER_URL", settings.pairing_worker_url.clone()), ("CLOUD_DISCOVERY_ENABLED", settings.cloud_discovery_enabled.to_string()),
+        ("RECEIVER_ID", settings.receiver_id.clone()), ("PAIRING_CODE_TTL_SEC", settings.pairing_code_ttl_sec.to_string()), ("LOCAL_PAIRING_CODE_REQUIRED", settings.local_pairing_code_required.to_string()),
+        ("PAIRING_TOKEN_PUBLIC_KEY_FILE", settings.pairing_token_public_key_file.clone()),
+    ];
+    for (name, value) in pairs { std::env::set_var(name, value); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yaml_round_trip_preserves_settings() {
+        let settings = ReceiverSettings::default();
+        let text = render_yaml(&settings);
+        let parsed = parse_document(&text).unwrap();
+        assert_eq!(parsed.server, settings);
+    }
+
+    #[test]
+    fn atomic_persistence_replaces_previous_document() {
+        let path = std::env::temp_dir().join(format!("llrdc-config-{}", std::process::id()));
+        let first = ReceiverSettings::default();
+        persist_document_at(&path, &first).unwrap();
+        let mut second = first.clone(); second.http_port = 8081;
+        persist_document_at(&path, &second).unwrap();
+        let parsed = parse_document(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.server, second);
+        assert!(!path.with_file_name("config.yaml.new").exists());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_port_and_mode_are_rejected() {
+        let mut settings = ReceiverSettings::default(); settings.http_port = settings.port;
+        assert!(settings.validate().is_err());
+        settings.http_port = 8080; settings.idle_dashboard_mode = "bad".to_string();
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn hand_authored_yaml_is_supported_and_unknown_fields_fail() {
+        let yaml = "version: 1\nserver:\n  port: 4434\n  webtransport_port: 4433\n  http_port: 8080\n  admin_bind_address: 100.100.1.72\n  admin_port: 9090\n  drm_connector_id: auto\n  drm_plane_id: '33'\n  idle_dashboard: true\n  idle_dashboard_mode: raw\n  idle_timeout_sec: 30\n  sender_liveness_timeout_sec: 90\n  udp_buffer_size_mb: 8\n  cert_dir: /certs\n  pairing_worker_url: https://cast.llrdc.com\n  cloud_discovery_enabled: false\n  receiver_id: ''\n  pairing_code_ttl_sec: 3600\n  local_pairing_code_required: true\n  pairing_token_public_key_file: /pairing/public.pem\n";
+        assert!(parse_document(yaml).is_ok());
+        assert!(parse_document(&yaml.replace("  port: 4434", "  unknown: true\n  port: 4434")).is_err());
+    }
+
+    #[test]
+    fn older_device_documents_default_to_required_pairing() {
+        let yaml = render_yaml(&ReceiverSettings::default()).replace("  local_pairing_code_required: true\n", "");
+        assert!(parse_document(&yaml).unwrap().server.local_pairing_code_required);
+    }
+
+    #[test]
+    fn environment_can_disable_local_pairing_requirement() {
+        std::env::set_var("LOCAL_PAIRING_CODE_REQUIRED", "false");
+        let settings = ReceiverSettings::from_environment();
+        std::env::remove_var("LOCAL_PAIRING_CODE_REQUIRED");
+        assert!(!settings.local_pairing_code_required);
+    }
+}
 
 /// Parse a typed environment override, retaining the supplied fallback when
 /// the variable is absent or cannot be parsed.

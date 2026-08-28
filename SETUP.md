@@ -81,15 +81,16 @@ The deployment wrapper supports flags for all server settings, including
 `--board-ip`, `--drm-connector-id`, `--drm-plane-id`, `--dashboard-mode`,
 `--idle-timeout-sec`, `--pairing-code-ttl-sec`, `--http-port`,
 `--webtransport-port`, `--board-port`, `--udp-buffer-size-mb`, `--cert-dir`,
-`--cloud`, `--pairing-worker-url`, `--receiver-id`,
+`--cloud`, `--pairing-code-required`, `--pairing-worker-url`, `--receiver-id`,
 `--receiver-registration-secret`, and `--pairing-token-public-key-file`.
 Run `./server.sh --help` for the complete syntax.
 
-After deployment, the Tailscale-only management portal exposes a Cloud
-discovery toggle for the existing `--cloud=true|false` setting. Applying a
-change validates the provisioned Cloudflare credentials, restarts the receiver,
-and reconnects the portal. A subsequent `./server.sh --start` writes its
-effective flag value and resets any portal change.
+After deployment, the Tailscale-only management portal exposes a Settings tab
+for receiver runtime values, a LAN pairing-code requirement toggle, and a Cloud discovery toggle. Changes are written
+to the durable device configuration and survive reboots, but a subsequent
+`./server.sh --start` resolves the repository configuration and deployment
+flags again, replacing portal edits. Cloudflare identity and secrets remain
+deployment-controlled and are never returned by the portal.
 
 Retrieve the active local pairing code over SSH without Cloudflare:
 

@@ -16,13 +16,15 @@ use crate::local_pairing::PairingState;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const SETTINGS_PATH: &str = "/settings/cloud-discovery-enabled";
-
 #[derive(Clone, Debug, Serialize)]
 pub struct CloudSettingsSnapshot {
-    pub cloud_discovery_enabled: bool,
+    #[serde(flatten)]
+    pub receiver: config::ReceiverSettings,
     pub cloud_configuration_ready: bool,
     pub cloud_configuration_missing: Vec<String>,
+    pub cloud_state: String,
+    pub worker_url: String,
+    pub pairing_code_source: String,
 }
 
 #[derive(Serialize)]
@@ -124,49 +126,7 @@ impl ConnectionTokenVerifier {
 }
 
 pub fn cloud_discovery_enabled() -> bool {
-    resolve_persisted_enabled(Path::new(SETTINGS_PATH), config::env_bool_or("CLOUD_DISCOVERY_ENABLED", false))
-}
-
-fn resolve_persisted_enabled(path: &Path, fallback: bool) -> bool {
-    match std::fs::read_to_string(path) {
-        Ok(value) => match parse_enabled(&value) {
-            Some(enabled) => enabled,
-            None => {
-                eprintln!("[CLOUD DISCOVERY] Invalid persisted setting; cloud discovery is disabled");
-                false
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fallback
-        }
-        Err(error) => {
-            eprintln!("[CLOUD DISCOVERY] Could not read persisted setting ({error}); cloud discovery is disabled");
-            false
-        }
-    }
-}
-
-fn parse_enabled(value: &str) -> Option<bool> {
-    match value.trim() {
-        "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
-        "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
-        _ => None,
-    }
-}
-
-pub fn persist_cloud_discovery_enabled(enabled: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    persist_cloud_discovery_enabled_at(Path::new(SETTINGS_PATH), enabled)
-}
-
-fn persist_cloud_discovery_enabled_at(path: &Path, enabled: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let parent = path.parent().ok_or("persisted cloud setting has no parent")?;
-    std::fs::create_dir_all(parent)?;
-    let temporary = parent.join("cloud-discovery-enabled.new");
-    std::fs::write(&temporary, if enabled { "1\n" } else { "0\n" })?;
-    #[cfg(unix)]
-    std::fs::set_permissions(&temporary, std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
-    std::fs::rename(temporary, path)?;
-    Ok(())
+    config::settings().cloud_discovery_enabled
 }
 
 pub fn cloud_configuration_missing() -> Vec<String> {
@@ -205,10 +165,15 @@ pub fn cloud_configuration_missing() -> Vec<String> {
 
 pub fn settings_snapshot() -> CloudSettingsSnapshot {
     let missing = cloud_configuration_missing();
+    let settings = config::settings();
+    let cloud_state = if !settings.cloud_discovery_enabled { "DISABLED" } else if missing.is_empty() { "WAITING" } else { "NOT_CONFIGURED" };
     CloudSettingsSnapshot {
-        cloud_discovery_enabled: cloud_discovery_enabled(),
+        receiver: settings.clone(),
         cloud_configuration_ready: missing.is_empty(),
         cloud_configuration_missing: missing,
+        cloud_state: cloud_state.to_string(),
+        worker_url: settings.pairing_worker_url,
+        pairing_code_source: if std::env::var("PAIRING_CODE_FIXED").ok().is_some_and(|value| !value.trim().is_empty()) { "fixed" } else { "rotating" }.to_string(),
     }
 }
 
@@ -323,63 +288,4 @@ fn random_nonce() -> String {
 
 fn unix_seconds() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_secs()).unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn temporary_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("llrdc-{name}-{}", std::process::id()))
-    }
-
-    #[test]
-    fn environment_fallback_is_used_when_persisted_setting_is_absent() {
-        let path = temporary_path("cloud-fallback");
-        let _ = std::fs::remove_file(&path);
-        assert!(resolve_persisted_enabled(&path, true));
-        assert!(!resolve_persisted_enabled(&path, false));
-    }
-
-    #[test]
-    fn persisted_setting_takes_precedence_over_environment_fallback() {
-        let path = temporary_path("cloud-precedence");
-        std::fs::write(&path, "0\n").expect("write setting");
-        assert!(!resolve_persisted_enabled(&path, true));
-        std::fs::write(&path, "1\n").expect("write setting");
-        assert!(resolve_persisted_enabled(&path, false));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn malformed_persisted_setting_fails_closed() {
-        let path = temporary_path("cloud-malformed");
-        std::fs::write(&path, "maybe\n").expect("write setting");
-        assert!(!resolve_persisted_enabled(&path, true));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn persisted_updates_are_atomic_and_replace_the_old_value() {
-        let path = temporary_path("cloud-atomic");
-        let temporary = path.with_file_name("cloud-atomic.new");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&temporary);
-        persist_cloud_discovery_enabled_at(&path, true).expect("persist setting");
-        assert!(resolve_persisted_enabled(&path, false));
-        assert!(!temporary.exists());
-        persist_cloud_discovery_enabled_at(&path, false).expect("replace setting");
-        assert!(!resolve_persisted_enabled(&path, true));
-        assert!(!temporary.exists());
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn persistence_failure_does_not_report_success() {
-        let parent = temporary_path("cloud-failure-parent");
-        std::fs::write(&parent, "not a directory").expect("write blocker");
-        let path = parent.join("setting");
-        assert!(persist_cloud_discovery_enabled_at(&path, true).is_err());
-        let _ = std::fs::remove_file(parent);
-    }
 }
