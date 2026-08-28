@@ -20,7 +20,8 @@ use crate::management::ManagementState;
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 pub async fn get_or_create_identity() -> Result<Identity, Box<dyn Error + Send + Sync>> {
-    crate::cert::get_or_create_identity().await
+    let (cert_path, key_path) = crate::cert::get_cert_and_key_paths();
+    Ok(Identity::load_pemfiles(cert_path, key_path).await?)
 }
 
 pub fn extract_cert_hash_hex(identity: &Identity) -> String {
@@ -285,31 +286,36 @@ async fn handle_connection(
 
     let (code, token) = connection_query(session_request.path());
     let pairing_required = crate::config::settings().local_pairing_code_required;
+    let peer = normalize_peer_ip(session_request.remote_address().ip());
     if let Err(reason) = pairing_admission(pairing_required, code.is_some(), token.is_some()) {
+        management.event("warn", "security_rejected", format!("peer={peer} reason={reason}"));
         session_request.forbidden().await;
         return Err(reason.into());
     }
-    let peer = normalize_peer_ip(session_request.remote_address().ip());
     let connection_id = format!("wt-{}", NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed));
     if let Some(code) = code.as_deref() {
         if let Err(reason) = pairing_state.validate_code(code, &peer) {
+            management.event("warn", "pairing_rejected", format!("peer={peer} reason={reason}"));
             session_request.forbidden().await;
             return Err(format!("local pairing rejected: {reason}").into());
         }
     }
     if let Some(token) = token.as_deref() {
         let Some(token_verifier) = token_verifier.as_ref() else {
+            management.event("error", "cloud_token_rejected", format!("peer={peer} reason=verifier_unavailable"));
             session_request.forbidden().await;
             return Err("cloud token verifier unavailable".into());
         };
         if let Err(reason) = token_verifier.verify(token) {
+            management.event("warn", "cloud_token_rejected", format!("peer={peer} reason={reason}"));
             session_request.forbidden().await;
             return Err(format!("cloud token rejected: {reason}").into());
         }
     }
     let connection = session_request.accept().await?;
     println!("[WEBTRANSPORT] Client connected successfully via QUIC/UDP!");
-    management.event("info", "connection", format!("{connection_id} connected from {peer}"));
+    let authentication = if token.is_some() { "cloud_token" } else if code.is_some() { "lan_security_code" } else { "direct_lan" };
+    management.event("info", "connection_accepted", format!("connection={connection_id} peer={peer} authentication={authentication}"));
 
     loop {
         tokio::select! {

@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 bytemuck = "1.25"
 drm = "0.15"
-nix = { version = "0.31", features = ["mman", "fs", "ioctl", "net"] }
+nix = { version = "0.31", features = ["mman", "fs", "ioctl", "net", "signal"] }
 rustix = { version = "1.1", features = ["net", "process"] }
 thread-priority = "3.1"
 tokio = { version = "1.44", features = ["full"] }
@@ -27,6 +27,7 @@ signature = "2"
 sha2 = "0.10"
 hmac = "0.12"
 rand = "0.8"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 opt-level = 2

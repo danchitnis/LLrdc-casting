@@ -127,22 +127,13 @@ impl ReceiverSettings {
 static DEVICE_CONFIG: OnceLock<ReceiverSettings> = OnceLock::new();
 
 pub fn initialize() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let path = Path::new(DEVICE_CONFIG_PATH);
-    let settings = if path.is_file() {
-        let text = std::fs::read_to_string(path)?;
-        let document = parse_document(&text)?;
-        if document.version != DEVICE_CONFIG_VERSION { return Err(format!("unsupported device config version {}", document.version).into()); }
-        document.server
-    } else {
-        ReceiverSettings::from_environment()
-    };
-    settings.validate().map_err(|error| format!("invalid receiver configuration: {error}"))?;
+    let settings = load_settings_at(Path::new(DEVICE_CONFIG_PATH))?;
     export_environment(&settings);
     let _ = DEVICE_CONFIG.set(settings);
     Ok(())
 }
 
-fn parse_document(text: &str) -> Result<DeviceConfigDocument, Box<dyn std::error::Error + Send + Sync>> {
+pub fn parse_document(text: &str) -> Result<DeviceConfigDocument, Box<dyn std::error::Error + Send + Sync>> {
     if let Ok(document) = serde_json::from_str(text) { return Ok(document); }
     // Accept the small, flat YAML shape used by config.yaml without adding a
     // second parser dependency. The deployment writer and this fallback share
@@ -167,8 +158,26 @@ fn parse_document(text: &str) -> Result<DeviceConfigDocument, Box<dyn std::error
     Ok(serde_json::from_value(value)?)
 }
 
+pub fn load_settings_at(path: &Path) -> Result<ReceiverSettings, Box<dyn std::error::Error + Send + Sync>> {
+    let settings = if path.is_file() {
+        let document = parse_document(&std::fs::read_to_string(path)?)?;
+        if document.version != DEVICE_CONFIG_VERSION {
+            return Err(format!("unsupported device config version {}", document.version).into());
+        }
+        document.server
+    } else {
+        ReceiverSettings::from_environment()
+    };
+    settings.validate().map_err(|error| format!("invalid receiver configuration: {error}"))?;
+    Ok(settings)
+}
+
 pub fn settings() -> ReceiverSettings {
     DEVICE_CONFIG.get().cloned().unwrap_or_else(ReceiverSettings::from_environment)
+}
+
+pub fn codec_diagnostics_enabled() -> bool {
+    env_bool_or("LLRDC_CODEC_DIAGNOSTICS", false)
 }
 
 pub fn persist_document(settings: &ReceiverSettings) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

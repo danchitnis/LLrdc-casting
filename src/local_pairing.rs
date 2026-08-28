@@ -2,16 +2,16 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::pairing::{
     PAIRING_ATTEMPT_LIMIT, PAIRING_ATTEMPT_WINDOW_SEC, PAIRING_CODE_ALPHABET,
     PAIRING_CODE_LENGTH, PAIRING_CODE_TTL_SEC,
 };
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairingSnapshot {
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, default)]
     pub code: Option<String>,
     pub local_status: String,
     pub cloud_status: String,

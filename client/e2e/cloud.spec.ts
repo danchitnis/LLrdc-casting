@@ -23,6 +23,10 @@ function receiverDelta(before: string, after: string): string {
 test.describe('cloud pairing handoff', () => {
   test.beforeEach(async ({ page }) => {
     trackDiagnostics(page);
+    await page.context().grantPermissions(
+      ['local-network-access'],
+      { origin: 'https://cast.llrdc.com' },
+    );
     await page.goto('https://cast.llrdc.com/', { waitUntil: 'domcontentloaded' });
     await page.locator('#pair-code').waitFor({ state: 'visible', timeout: 45_000 });
   });

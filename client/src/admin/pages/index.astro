@@ -19,6 +19,7 @@ import ManagementCard from '../components/ManagementCard.astro';
         --muted: #90a4bd;
         --blue: #45c2ff;
         --green: #35d49a;
+        --yellow: #ffc857;
         --red: #ff647c;
       }
 
@@ -42,9 +43,10 @@ import ManagementCard from '../components/ManagementCard.astro';
       .setting-row { display: flex; align-items: center; gap: 10px; font-weight: 700; }
       .setting-help { margin: 10px 0 0; color: var(--muted); }
       .setting-status { min-height: 1.3em; margin: 10px 0 0; }
-      .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+      .tabs { display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto; padding-bottom: 2px; }
       .tab { background: #1b3150; border: 1px solid #355477; color: var(--text); }
       .tab.active { background: var(--blue); color: #06111d; }
+      .tab:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
       .tab-panel[hidden] { display: none; }
       .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
       .field { display: grid; gap: 5px; color: var(--muted); font-size: .8rem; }
@@ -56,15 +58,37 @@ import ManagementCard from '../components/ManagementCard.astro';
       table { width: 100%; border-collapse: collapse; font-size: .84rem; }
       th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
       th { color: var(--muted); font-size: .7rem; text-transform: uppercase; }
-      pre { max-height: 210px; overflow: auto; margin: 0; color: #b9c8dc; font-size: .75rem; white-space: pre-wrap; }
       canvas { width: 100%; height: 180px; background: #0b1729; border-radius: 8px; }
       .muted { color: var(--muted); }
       .table-scroll { overflow: auto; }
       #metrics { margin-top: 12px; }
+      .log-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+      .log-toolbar select, .log-toolbar input { min-height: 38px; border: 1px solid #355477; border-radius: 8px; padding: 7px 10px; background: #0b1729; color: var(--text); }
+      .log-toolbar input { min-width: min(260px, 65vw); }
+      .log-summary { display: flex; justify-content: space-between; gap: 12px; margin: 12px 0 8px; color: var(--muted); font-size: .78rem; }
+      .log-viewer { max-height: min(68vh, 760px); min-height: 280px; overflow-y: auto; overscroll-behavior: contain; scrollbar-color: #3d628b #0b1729; border: 1px solid var(--line); border-radius: 10px; background: #081321; }
+      .log-viewer.compact { min-height: 140px; max-height: 320px; }
+      .log-list { list-style: none; padding: 0; margin: 0; }
+      .log-entry { position: relative; display: grid; grid-template-columns: minmax(150px, 205px) minmax(0, 1fr); gap: 8px 16px; padding: 11px 14px 11px 18px; border-bottom: 1px solid rgba(38, 56, 82, .72); }
+      .log-entry::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--blue); }
+      .log-entry:hover { background: rgba(69, 194, 255, .055); }
+      .log-entry.log-error { background: rgba(255, 100, 124, .07); }
+      .log-entry.log-error::before { background: var(--red); }
+      .log-entry.log-warn::before { background: var(--yellow); }
+      .log-entry.log-info::before { background: var(--green); }
+      .log-meta { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 6px; color: var(--muted); font: .72rem ui-monospace, monospace; }
+      .log-severity, .log-category, .log-generation { display: inline-flex; align-items: center; border-radius: 99px; padding: 2px 7px; border: 1px solid var(--line); }
+      .log-severity { color: var(--green); font-weight: 900; }
+      .log-error .log-severity { color: var(--red); border-color: rgba(255, 100, 124, .45); }
+      .log-warn .log-severity { color: var(--yellow); border-color: rgba(255, 200, 87, .45); }
+      .log-category { color: var(--blue); }
+      .log-message { margin: 0; color: #d9e7f7; font: .79rem/1.55 ui-monospace, "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .log-empty { display: grid; min-height: 160px; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
 
       @media (max-width: 560px) {
         body { padding: 14px; }
         .card-heading { align-items: flex-start; flex-direction: column; }
+        .log-entry { grid-template-columns: 1fr; }
       }
     </style>
   </head>
@@ -75,12 +99,13 @@ import ManagementCard from '../components/ManagementCard.astro';
         <span id="state" class="badge">CONNECTING</span>
       </header>
 
-      <nav class="tabs" aria-label="Management sections">
-        <button class="tab active" id="overviewTabButton" type="button" aria-controls="overviewTab" aria-selected="true">Overview</button>
-        <button class="tab" id="settingsTabButton" type="button" aria-controls="settingsTab" aria-selected="false">Settings</button>
+      <nav class="tabs" role="tablist" aria-label="Management sections">
+        <button class="tab active" id="overviewTabButton" type="button" role="tab" aria-controls="overviewTab" aria-selected="true">Overview</button>
+        <button class="tab" id="logsTabButton" type="button" role="tab" aria-controls="logsTab" aria-selected="false" tabindex="-1">Logs</button>
+        <button class="tab" id="settingsTabButton" type="button" role="tab" aria-controls="settingsTab" aria-selected="false" tabindex="-1">Settings</button>
       </nav>
 
-      <div id="overviewTab" class="tab-panel">
+      <div id="overviewTab" class="tab-panel" role="tabpanel" aria-labelledby="overviewTabButton">
       <ManagementCard title="Live stream">
         <div slot="actions">
           <button id="resetChart" class="secondary" type="button">Reset plot</button>
@@ -109,13 +134,39 @@ import ManagementCard from '../components/ManagementCard.astro';
         </div>
       </ManagementCard>
 
-      <ManagementCard title="Receiver health &amp; events">
+      <ManagementCard title="Watchdog">
+        <div slot="actions"><button id="restartReceiver" class="danger" type="button">Restart receiver</button></div>
+        <div id="watchdog" class="grid"></div>
+        <p id="watchdogStatus" class="setting-status" role="status" aria-live="polite"></p>
+      </ManagementCard>
+
+      <ManagementCard title="Receiver health">
         <div id="health" class="grid"></div>
-        <pre id="events"></pre>
       </ManagementCard>
       </div>
 
-      <div id="settingsTab" class="tab-panel" hidden>
+      <div id="logsTab" class="tab-panel" role="tabpanel" aria-labelledby="logsTabButton" hidden>
+      <ManagementCard title="Operational logs">
+        <div slot="actions">
+          <button id="downloadLogs" class="secondary" type="button">Download diagnostic ZIP</button>
+        </div>
+        <div class="log-toolbar" aria-label="Operational log filters">
+          <select id="logSeverity" aria-label="Log severity"><option value="all">All severity</option><option value="error">Errors</option><option value="warn">Warnings</option><option value="info">Information</option></select>
+          <select id="logCategory" aria-label="Log category"><option value="all">All categories</option></select>
+          <input id="logSearch" type="search" placeholder="Search messages" aria-label="Search operational logs" />
+          <button id="jumpLatest" class="secondary" type="button">Jump to latest</button>
+        </div>
+        <div class="log-summary"><span id="logCount">Loading operational events…</span><span>Newest events appear at the bottom</span></div>
+        <div id="operationalLogs" class="log-viewer" role="log" aria-label="Operational event journal" tabindex="0"><div class="log-empty">Loading operational events…</div></div>
+      </ManagementCard>
+
+      <ManagementCard title="Live receiver events">
+        <p class="setting-help">Recent in-memory receiver events for the current generation.</p>
+        <div id="events" class="log-viewer compact" role="log" aria-label="Live receiver events" tabindex="0"><div class="log-empty">No receiver events</div></div>
+      </ManagementCard>
+      </div>
+
+      <div id="settingsTab" class="tab-panel" role="tabpanel" aria-labelledby="settingsTabButton" hidden>
       <ManagementCard title="Display">
         <div class="form-grid">
           <label class="field">DRM connector ID<input id="settingDrmConnector" /></label>

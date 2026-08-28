@@ -118,6 +118,7 @@ stop_safari_driver() {
 
 management_backup="$artifact_dir/device-config.yaml"
 management_runtime_backup=""
+management_history_backup=""
 management_secret_tmp=""
 management_restore_needed=0
 
@@ -128,13 +129,15 @@ restore_management_config() {
   echo "[E2E] Restoring the pre-test device configuration..."
   scp -q "$management_backup" "$board_ip:/var/tmp/llrdc-management-config.restore"
   scp -q "$management_runtime_backup" "$board_ip:/var/tmp/llrdc-management-runtime.restore"
+  scp -q "$management_history_backup" "$board_ip:/var/tmp/llrdc-management-history.restore.tar"
   ssh -o BatchMode=yes "$board_ip" \
     "set -eu
      docker run --rm --entrypoint /bin/sh \
        -v /var/tmp:/stage:ro \
        -v /var/lib/llrdc-config:/config \
        -v /var/lib/llrdc-secrets:/secrets \
-       llrdc-casting -c 'set -eu; cp -p /stage/llrdc-management-config.restore /config/config.yaml.restore; chmod 640 /config/config.yaml.restore; sync; mv -f /config/config.yaml.restore /config/config.yaml; cp -p /stage/llrdc-management-runtime.restore /secrets/runtime.env.restore; chmod 600 /secrets/runtime.env.restore; sync; mv -f /secrets/runtime.env.restore /secrets/runtime.env; sync'
+       -v /var/lib/llrdc-management:/management \
+       llrdc-casting -c 'set -eu; cp -p /stage/llrdc-management-config.restore /config/config.yaml.restore; chmod 640 /config/config.yaml.restore; sync; mv -f /config/config.yaml.restore /config/config.yaml; cp -p /stage/llrdc-management-runtime.restore /secrets/runtime.env.restore; chmod 600 /secrets/runtime.env.restore; sync; mv -f /secrets/runtime.env.restore /secrets/runtime.env; find /management -mindepth 1 -maxdepth 1 -delete; tar -C /management -xf /stage/llrdc-management-history.restore.tar; chmod 700 /management; sync'
      docker rm -f llrdc-casting >/dev/null 2>&1 || true
      docker run -d --name llrdc-casting --restart unless-stopped --net host --privileged \
        --env-file /var/lib/llrdc-secrets/runtime.env \
@@ -143,9 +146,11 @@ restore_management_config() {
        -v /var/lib/llrdc-pairing:/pairing:ro \
        -v /var/lib/llrdc-secrets:/secrets:ro \
        -v /var/lib/llrdc-config:/config:rw \
+       -v /var/lib/llrdc-management:/management:rw \
        -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting:ro \
+       -v /var/tmp/llrdc-bin/llrdc-management:/usr/local/bin/llrdc-management:ro \
        llrdc-casting >/dev/null
-     rm -f /var/tmp/llrdc-management-config.restore /var/tmp/llrdc-management-runtime.restore"
+     rm -f /var/tmp/llrdc-management-config.restore /var/tmp/llrdc-management-runtime.restore /var/tmp/llrdc-management-history.restore.tar"
   for _ in {1..60}; do
     if curl -fsSk --connect-timeout 2 --max-time 3 "https://${board_ip}:9090/health" >/dev/null 2>&1; then
       expected_hash="$(shasum -a 256 "$management_backup" | awk '{print $1}')"
@@ -191,9 +196,12 @@ if [[ "$MODE" == "management" ]]; then
   management_secret_tmp="$(mktemp -d "${TMPDIR:-/tmp}/llrdc-management.XXXXXX")"
   chmod 700 "$management_secret_tmp"
   management_runtime_backup="$management_secret_tmp/runtime.env"
+  management_history_backup="$management_secret_tmp/management-history.tar"
   ssh -o BatchMode=yes "$board_ip" 'docker exec llrdc-casting cat /secrets/runtime.env' > "$management_runtime_backup"
   chmod 600 "$management_runtime_backup"
   [[ -s "$management_runtime_backup" ]] || { echo "[E2E] Could not back up the receiver runtime environment." >&2; exit 1; }
+  ssh -o BatchMode=yes "$board_ip" 'docker run --rm --entrypoint /bin/sh -v /var/lib/llrdc-management:/management:ro llrdc-casting -c "tar -C /management -cf - ."' > "$management_history_backup"
+  [[ -s "$management_history_backup" ]] || { echo "[E2E] Could not back up management history." >&2; exit 1; }
   management_restore_needed=1
   printf '%s\n' '[E2E] Backups captured; deploying a controlled cloud-disabled fixed-code receiver for the management suite.' > "$artifact_dir/deploy.log"
   set +e
@@ -231,7 +239,7 @@ else
   echo "[E2E] Deploying receiver for $MODE suite (cloud=$cloud_flag)."
   echo "[E2E] Build/deploy output follows live; a cold Docker build can take several minutes."
   set +e
-  "$SCRIPT_DIR/server.sh" --start --cloud="$cloud_flag" --board-ip="$board_ip" 2>&1 | tee "$artifact_dir/deploy.log"
+  LLRDC_CODEC_DIAGNOSTICS=1 "$SCRIPT_DIR/server.sh" --start --cloud="$cloud_flag" --board-ip="$board_ip" 2>&1 | tee "$artifact_dir/deploy.log"
   deploy_status=${PIPESTATUS[0]}
   set -e
   if (( deploy_status != 0 )); then
@@ -282,12 +290,16 @@ else
   fi
 
   echo "[E2E] Registration is ready; querying D1 for the unexpired pairing code..."
-  pairing_code="$(
-    cd "$SCRIPT_DIR/cloudflare/worker"
-    ./node_modules/.bin/wrangler d1 execute cast-pairing --remote \
-      --command "SELECT pairing_code FROM active_receivers WHERE pairing_code IS NOT NULL AND code_expires_at > unixepoch() AND registration_expires_at > unixepoch() LIMIT 1" \
-      --json 2>"$artifact_dir/cloud-query.stderr" \
-      | python3 -c 'import json, sys
+  : > "$artifact_dir/cloud-query.stderr"
+  pairing_code=""
+  for query_attempt in {1..5}; do
+    pairing_candidate=""
+    if pairing_candidate="$(
+      cd "$SCRIPT_DIR/cloudflare/worker"
+      ./node_modules/.bin/wrangler d1 execute cast-pairing --remote \
+        --command "SELECT pairing_code FROM active_receivers WHERE pairing_code IS NOT NULL AND code_expires_at > unixepoch() AND registration_expires_at > unixepoch() LIMIT 1" \
+        --json 2>>"$artifact_dir/cloud-query.stderr" \
+        | python3 -c 'import json, sys
 payload = json.load(sys.stdin)
 if isinstance(payload, list):
     rows = payload[0].get("results", []) if payload else []
@@ -296,7 +308,13 @@ elif isinstance(payload, dict):
 else:
     rows = []
 print(rows[0].get("pairing_code", "") if rows else "")'
-  )"
+    )" && [[ "$pairing_candidate" =~ ^[A-Z0-9]{4}$ ]]; then
+      pairing_code="$pairing_candidate"
+      break
+    fi
+    echo "[E2E] D1 query attempt $query_attempt did not return a live code; retrying..."
+    sleep 2
+  done
 fi
 
 if [[ ! "$pairing_code" =~ ^[A-Z0-9]{4}$ ]]; then

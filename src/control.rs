@@ -52,6 +52,7 @@ pub enum ControlCommand {
     Stop,
     AdminStop,
     RestartReceiver,
+    Shutdown { reason: String },
     ClientHello {
         device_id: String,
         #[serde(default)]

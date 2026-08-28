@@ -133,7 +133,7 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     let now = Instant::now();
     let mut assemblies = ASSEMBLIES.lock().expect("assembly mutex poisoned");
 
-    if seq == 1 && chunk_index == 0 {
+    if crate::config::codec_diagnostics_enabled() && seq == 1 && chunk_index == 0 {
         println!("[PROBE RECV] seq=1 first chunk arrived at {:?}", Instant::now());
     }
 
@@ -176,7 +176,7 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     for chunk in completed.chunks { access_unit.extend_from_slice(chunk.as_deref()?); }
 
     let completed_count = STATS_COMPLETED.fetch_add(1, Ordering::Relaxed) + 1;
-    if completed_count == 1 || completed_count % 60 == 0 {
+    if crate::config::codec_diagnostics_enabled() && (completed_count == 1 || completed_count % 60 == 0) {
         let chunks_cnt = STATS_CHUNKS.load(Ordering::Relaxed);
         let timeout_cnt = STATS_DROPPED_TIMEOUT.load(Ordering::Relaxed);
         let evicted_cnt = STATS_DROPPED_EVICTED.load(Ordering::Relaxed);
@@ -196,6 +196,7 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
 }
 
 fn validate_access_unit_bitstream(frame: &VideoFrame) {
+    if !crate::config::codec_diagnostics_enabled() { return; }
     let buf = &frame.access_unit;
     if buf.len() < 4 {
         eprintln!("[BITSTREAM ERROR] seq={} access unit length too short ({} bytes)", frame.seq, buf.len());

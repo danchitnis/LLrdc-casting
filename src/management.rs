@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 const MAX_EVENTS: usize = 2_000;
@@ -25,7 +25,7 @@ struct Inner {
     health: HealthSnapshot,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClientMetadata {
     pub device_id: String,
     pub user_agent: String,
@@ -36,7 +36,7 @@ pub struct ClientMetadata {
     pub connection_id: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionRecord {
     pub connection_id: String,
     pub remote_ip: String,
@@ -51,7 +51,7 @@ pub struct ConnectionRecord {
     pub sharing: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamConfigSnapshot {
     pub codec: String,
     pub resolution: String,
@@ -63,14 +63,14 @@ pub struct StreamConfigSnapshot {
     pub encoded_resolution: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricSample {
     pub elapsed_sec: f64,
     pub bitrate_mbps: f64,
     pub fps: f64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: u64,
     pub sender: Option<ClientMetadata>,
@@ -83,10 +83,13 @@ pub struct SessionRecord {
     pub average_bitrate_mbps: f64,
     pub peak_bitrate_mbps: f64,
     pub sequence_gaps: u64,
+    pub latency_p50_ms: f64,
+    pub latency_p95_ms: f64,
+    pub latency_max_ms: f64,
     pub end_reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EventRecord {
     pub elapsed_sec: f64,
     pub level: String,
@@ -94,7 +97,7 @@ pub struct EventRecord {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Serialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct HealthSnapshot {
     pub display_resolution: String,
     pub display_fps: u32,
@@ -112,7 +115,7 @@ pub struct HealthSnapshot {
     pub temperature: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveStreamSnapshot {
     pub id: u64,
     pub sender: Option<ClientMetadata>,
@@ -130,7 +133,7 @@ pub struct ActiveStreamSnapshot {
     pub samples: Vec<MetricSample>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub server_uptime_sec: f64,
     pub state: String,
@@ -159,6 +162,11 @@ struct ActiveStream {
     last_sample_at: Instant,
     sample_bytes: u64,
     sample_frames: u64,
+    latency_window: VecDeque<(Instant, f64)>,
+    latency_samples: Vec<f64>,
+    last_latency_evaluation: Instant,
+    high_latency: bool,
+    healthy_latency_windows: u8,
 }
 
 impl ManagementState {
@@ -199,23 +207,27 @@ impl ManagementState {
                 page_session_id: metadata.page_session_id.clone(), connected: true,
                 connected_at_sec: elapsed, last_seen_at_sec: elapsed, sharing: false,
             });
-            inner.events.push_back(EventRecord { elapsed_sec: elapsed, level: "info".into(), kind: "connection".into(), message: format!("{} connected from {}", metadata.device_id, metadata.remote_ip) });
+            inner.events.push_back(EventRecord { elapsed_sec: elapsed, level: "info".into(), kind: "connection_metadata".into(), message: format!("connection={} device={} ip={} platform={} user_agent={}", metadata.connection_id, metadata.device_id, metadata.remote_ip, metadata.platform, metadata.user_agent) });
             while inner.events.len() > MAX_EVENTS { inner.events.pop_front(); }
         }
         let _ = self.updates.send(());
     }
 
     pub fn connection_closed(&self, connection_id: &str) -> bool {
+        let mut disconnect_message = format!("connection={connection_id} cause=peer_close");
         let sender_was_active = if let Ok(mut inner) = self.inner.lock() {
             let elapsed = inner.started.elapsed().as_secs_f64();
-            if let Some(connection) = inner.connections.get_mut(connection_id) { connection.connected = false; connection.sharing = false; connection.last_seen_at_sec = elapsed; }
+            if let Some(connection) = inner.connections.get_mut(connection_id) {
+                disconnect_message = format!("connection={connection_id} device={} ip={} cause=peer_close duration_sec={:.1}", connection.device_id, connection.remote_ip, elapsed - connection.connected_at_sec);
+                connection.connected = false; connection.sharing = false; connection.last_seen_at_sec = elapsed;
+            }
             let sender_was_active = inner.stream.as_ref().and_then(|s| s.sender.as_ref()).is_some_and(|s| s.connection_id == connection_id);
             if sender_was_active {
                 finish_locked(&mut inner, "disconnect");
             }
             sender_was_active
         } else { false };
-        self.event("info", "connection", format!("{connection_id} disconnected"));
+        self.event("info", "connection_disconnected", disconnect_message);
         sender_was_active
     }
 
@@ -267,7 +279,7 @@ impl ManagementState {
             if let Some(sender) = sender.as_ref() {
                 if let Some(c) = inner.connections.get_mut(&sender.connection_id) { c.sharing = true; c.last_seen_at_sec = elapsed; }
             }
-            inner.stream = Some(ActiveStream { id, sender, config, started_at: now, frames: 0, bytes: 0, last_seq: None, sequence_gaps: 0, latency_total_ms: 0.0, latency_count: 0, peak_bitrate_mbps: 0.0, recent_bytes: VecDeque::new(), recent_frames: VecDeque::new(), samples: VecDeque::new(), last_sample_at: now, sample_bytes: 0, sample_frames: 0 });
+            inner.stream = Some(ActiveStream { id, sender, config, started_at: now, frames: 0, bytes: 0, last_seq: None, sequence_gaps: 0, latency_total_ms: 0.0, latency_count: 0, peak_bitrate_mbps: 0.0, recent_bytes: VecDeque::new(), recent_frames: VecDeque::new(), samples: VecDeque::new(), last_sample_at: now, sample_bytes: 0, sample_frames: 0, latency_window: VecDeque::new(), latency_samples: Vec::new(), last_latency_evaluation: now, high_latency: false, healthy_latency_windows: 0 });
         }
         self.event("info", "stream_start", "sharing started");
     }
@@ -284,11 +296,15 @@ impl ManagementState {
                     connection.last_seen_at_sec = elapsed;
                 }
             }
+            let mut latency_event = None;
             if let Some(stream) = inner.stream.as_mut() {
                 stream.frames += 1; stream.bytes += bytes as u64; stream.sample_bytes += bytes as u64; stream.sample_frames += 1;
                 if let Some(last) = stream.last_seq { if seq > last + 1 { stream.sequence_gaps += (seq - last - 1) as u64; } }
                 stream.last_seq = Some(seq); stream.latency_total_ms += latency_ms; stream.latency_count += 1;
                 stream.recent_bytes.push_back((now, bytes)); stream.recent_frames.push_back(now);
+                stream.latency_window.push_back((now, latency_ms));
+                while stream.latency_window.front().is_some_and(|(time, _)| now.duration_since(*time) > Duration::from_secs(10)) { stream.latency_window.pop_front(); }
+                if stream.latency_samples.len() < 10_000 { stream.latency_samples.push(latency_ms); }
                 while stream.recent_bytes.front().is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(10)) { stream.recent_bytes.pop_front(); }
                 while stream.recent_frames.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(10)) { stream.recent_frames.pop_front(); }
                 let bucket = now.duration_since(stream.last_sample_at).as_secs_f64();
@@ -300,7 +316,22 @@ impl ManagementState {
                     while stream.samples.len() > MAX_SAMPLES { stream.samples.pop_front(); }
                     stream.sample_bytes = 0; stream.sample_frames = 0; stream.last_sample_at = now;
                 }
+                if now.duration_since(stream.last_latency_evaluation) >= Duration::from_secs(10) && !stream.latency_window.is_empty() {
+                    let mut values = stream.latency_window.iter().map(|(_, value)| *value).collect::<Vec<_>>(); values.sort_by(f64::total_cmp);
+                    let p95 = percentile(&values, 0.95);
+                    let frame_period = if stream.config.fps > 0 { 1000.0 / stream.config.fps as f64 } else { 16.7 };
+                    let threshold = (3.0 * frame_period).max(50.0);
+                    if p95 > threshold {
+                        stream.healthy_latency_windows = 0;
+                        if !stream.high_latency { stream.high_latency = true; latency_event = Some(("warn", format!("receiver ingest p95={p95:.1}ms exceeded adaptive budget={threshold:.1}ms for 10s"))); }
+                    } else if stream.high_latency {
+                        stream.healthy_latency_windows = stream.healthy_latency_windows.saturating_add(1);
+                        if stream.healthy_latency_windows >= 2 { stream.high_latency = false; stream.healthy_latency_windows = 0; latency_event = Some(("info", format!("receiver ingest latency recovered p95={p95:.1}ms budget={threshold:.1}ms"))); }
+                    }
+                    stream.last_latency_evaluation = now;
+                }
             }
+            if let Some((level, message)) = latency_event { inner.events.push_back(EventRecord { elapsed_sec: elapsed, level: level.into(), kind: "latency".into(), message }); while inner.events.len() > MAX_EVENTS { inner.events.pop_front(); } }
         }
         let _ = self.updates.send(());
     }
@@ -345,8 +376,14 @@ fn finish_locked(inner: &mut Inner, reason: &str) {
     let now = Instant::now(); let duration = stream.started_at.elapsed().as_secs_f64();
     let avg = if duration > 0.0 { stream.bytes as f64 * 8.0 / duration / 1_000_000.0 } else { 0.0 };
     if let Some(sender) = stream.sender.as_ref() { if let Some(c) = inner.connections.get_mut(&sender.connection_id) { c.sharing = false; } }
-    inner.history.push_front(SessionRecord { id: stream.id, sender: stream.sender, config: stream.config, started_at_sec: stream.started_at.duration_since(inner.started).as_secs_f64(), ended_at_sec: Some(now.duration_since(inner.started).as_secs_f64()), duration_sec: duration, frames: stream.frames, bytes: stream.bytes, average_bitrate_mbps: avg, peak_bitrate_mbps: stream.peak_bitrate_mbps, sequence_gaps: stream.sequence_gaps, end_reason: Some(reason.into()) });
+    let mut latency = stream.latency_samples; latency.sort_by(f64::total_cmp);
+    inner.history.push_front(SessionRecord { id: stream.id, sender: stream.sender, config: stream.config, started_at_sec: stream.started_at.duration_since(inner.started).as_secs_f64(), ended_at_sec: Some(now.duration_since(inner.started).as_secs_f64()), duration_sec: duration, frames: stream.frames, bytes: stream.bytes, average_bitrate_mbps: avg, peak_bitrate_mbps: stream.peak_bitrate_mbps, sequence_gaps: stream.sequence_gaps, latency_p50_ms: percentile(&latency, 0.50), latency_p95_ms: percentile(&latency, 0.95), latency_max_ms: latency.last().copied().unwrap_or(0.0), end_reason: Some(reason.into()) });
     while inner.history.len() > MAX_HISTORY { inner.history.pop_back(); }
+}
+
+fn percentile(sorted: &[f64], quantile: f64) -> f64 {
+    if sorted.is_empty() { return 0.0; }
+    sorted[((sorted.len() - 1) as f64 * quantile).round() as usize]
 }
 
 impl Default for ManagementState { fn default() -> Self { Self::new() } }

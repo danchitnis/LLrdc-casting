@@ -97,6 +97,29 @@ interface Snapshot {
     cloud_status: string;
   };
   settings: CloudSettingsSnapshot;
+  watchdog: WatchdogSnapshot;
+}
+
+interface WatchdogSnapshot {
+  manager_uptime_sec: number;
+  receiver_state: string;
+  receiver_generation: number;
+  receiver_pid: number | null;
+  receiver_uptime_sec: number | null;
+  restart_count: number;
+  consecutive_failures: number;
+  next_retry_sec: number | null;
+  last_failure: string | null;
+  logging_healthy: boolean;
+  configuration_error: string | null;
+}
+
+interface OperationalEvent {
+  timestamp_unix_ms: number;
+  severity: string;
+  category: string;
+  message: string;
+  receiver_generation: number;
 }
 
 interface CloudSettingsSnapshot {
@@ -132,9 +155,10 @@ let chartSessionId: number | null = null;
 let chartOriginElapsed = 0;
 let lastSnapshot: Snapshot | null = null;
 let serverUptimeSec = 0;
-let pendingRestartValue: boolean | null = null;
+let pendingGeneration: number | null = null;
 let portalDisconnected = false;
 let settingsDirty = false;
+let operationalEvents: OperationalEvent[] = [];
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -150,8 +174,18 @@ const sender = element<HTMLParagraphElement>('sender');
 const connections = element<HTMLTableSectionElement>('connections');
 const historyBody = element<HTMLTableSectionElement>('history');
 const health = element<HTMLDivElement>('health');
-const events = element<HTMLPreElement>('events');
+const events = element<HTMLDivElement>('events');
 const chart = element<HTMLCanvasElement>('chart');
+const watchdog = element<HTMLDivElement>('watchdog');
+const watchdogStatus = element<HTMLParagraphElement>('watchdogStatus');
+const restartReceiver = element<HTMLButtonElement>('restartReceiver');
+const operationalLogs = element<HTMLDivElement>('operationalLogs');
+const logSeverity = element<HTMLSelectElement>('logSeverity');
+const logCategory = element<HTMLSelectElement>('logCategory');
+const logSearch = element<HTMLInputElement>('logSearch');
+const logCount = element<HTMLSpanElement>('logCount');
+const jumpLatest = element<HTMLButtonElement>('jumpLatest');
+const downloadLogs = element<HTMLButtonElement>('downloadLogs');
 const cloudEnabled = element<HTMLInputElement>('cloudEnabled');
 const cloudConfig = element<HTMLParagraphElement>('cloudConfig');
 const saveSettings = element<HTMLButtonElement>('saveSettings');
@@ -160,8 +194,10 @@ const deploymentSettings = element<HTMLDivElement>('deploymentSettings');
 const localPairingRequired = element<HTMLInputElement>('localPairingRequired');
 const pairingSecuritySource = element<HTMLParagraphElement>('pairingSecuritySource');
 const overviewTab = element<HTMLDivElement>('overviewTab');
+const logsTab = element<HTMLDivElement>('logsTab');
 const settingsTab = element<HTMLDivElement>('settingsTab');
 const overviewTabButton = element<HTMLButtonElement>('overviewTabButton');
+const logsTabButton = element<HTMLButtonElement>('logsTabButton');
 const settingsTabButton = element<HTMLButtonElement>('settingsTabButton');
 const settingInputs = {
   port: element<HTMLInputElement>('settingPort'),
@@ -298,6 +334,56 @@ function emptyRow(body: HTMLTableSectionElement, columns: number, message: strin
   node.textContent = message;
 }
 
+function severityClass(severity: string): string {
+  const normalized = severity.toLowerCase();
+  return ['error', 'warn', 'info'].includes(normalized) ? normalized : 'info';
+}
+
+function readableCategory(category: string): string {
+  return category.replaceAll('_', ' ');
+}
+
+function logEntry(timestamp: string, severity: string, category: string, generation: string, message: string): HTMLLIElement {
+  const item = document.createElement('li');
+  item.className = `log-entry log-${severityClass(severity)}`;
+  const metadata = document.createElement('div');
+  metadata.className = 'log-meta';
+  const time = document.createElement('time');
+  time.textContent = timestamp;
+  const severityNode = document.createElement('span');
+  severityNode.className = 'log-severity';
+  severityNode.textContent = severity.toUpperCase();
+  const categoryNode = document.createElement('span');
+  categoryNode.className = 'log-category';
+  categoryNode.textContent = readableCategory(category);
+  const generationNode = document.createElement('span');
+  generationNode.className = 'log-generation';
+  generationNode.textContent = generation;
+  metadata.append(time, severityNode, categoryNode, generationNode);
+  const messageNode = document.createElement('p');
+  messageNode.className = 'log-message';
+  messageNode.textContent = message;
+  item.append(metadata, messageNode);
+  return item;
+}
+
+function replaceLogEntries(container: HTMLDivElement, entries: HTMLLIElement[], emptyMessage: string, preserveScroll = true): void {
+  const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 56;
+  const previousScrollTop = container.scrollTop;
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'log-empty';
+    empty.textContent = emptyMessage;
+    container.replaceChildren(empty);
+    return;
+  }
+  const list = document.createElement('ol');
+  list.className = 'log-list';
+  list.append(...entries);
+  container.replaceChildren(list);
+  requestAnimationFrame(() => { container.scrollTop = !preserveScroll || nearBottom ? container.scrollHeight : previousScrollTop; });
+}
+
 function renderConnections(records: ConnectionRecord[]): void {
   connections.replaceChildren();
   if (!records.length) {
@@ -337,13 +423,13 @@ function render(snapshot: Snapshot): void {
   const active = management.active_stream;
   serverUptimeSec = management.server_uptime_sec;
   const settings = snapshot.settings;
-  if (!settingsDirty && pendingRestartValue === null) cloudEnabled.checked = settings.cloud_discovery_enabled;
-  if (!settingsDirty && pendingRestartValue === null) localPairingRequired.checked = settings.local_pairing_code_required;
-  if (!settingsDirty && pendingRestartValue === null) populateSettings(settings);
-  cloudEnabled.disabled = pendingRestartValue !== null || portalDisconnected;
-  localPairingRequired.disabled = pendingRestartValue !== null || portalDisconnected;
-  Object.values(settingInputs).forEach((input) => { input.disabled = pendingRestartValue !== null || portalDisconnected; });
-  saveSettings.disabled = pendingRestartValue !== null || portalDisconnected || !settingsDirty;
+  if (!settingsDirty && pendingGeneration === null) cloudEnabled.checked = settings.cloud_discovery_enabled;
+  if (!settingsDirty && pendingGeneration === null) localPairingRequired.checked = settings.local_pairing_code_required;
+  if (!settingsDirty && pendingGeneration === null) populateSettings(settings);
+  cloudEnabled.disabled = pendingGeneration !== null || portalDisconnected;
+  localPairingRequired.disabled = pendingGeneration !== null || portalDisconnected;
+  Object.values(settingInputs).forEach((input) => { input.disabled = pendingGeneration !== null || portalDisconnected; });
+  saveSettings.disabled = pendingGeneration !== null || portalDisconnected || !settingsDirty;
   if (settings.cloud_configuration_ready) {
     cloudConfig.textContent = `Cloudflare provisioning is ready (${settings.cloud_state}). Worker: ${settings.pairing_worker_url}; receiver: ${settings.receiver_id || 'not configured'}.`;
   } else {
@@ -355,17 +441,29 @@ function render(snapshot: Snapshot): void {
     metric('Pairing public key', settings.pairing_token_public_key_file),
   );
   pairingSecuritySource.textContent = `Code source: ${settings.pairing_code_source === 'fixed' ? 'fixed deployment code' : 'rotating receiver code'}${settings.local_pairing_code_required ? '.' : '; code enforcement is disabled for direct LAN clients.'}`;
-  if (pendingRestartValue !== null && settings.cloud_discovery_enabled === pendingRestartValue && portalDisconnected) {
-    pendingRestartValue = null;
-    portalDisconnected = false;
+  if (pendingGeneration !== null && snapshot.watchdog.receiver_generation >= pendingGeneration && snapshot.watchdog.receiver_state === 'ready') {
+    pendingGeneration = null;
     settingsDirty = false;
     cloudEnabled.checked = settings.cloud_discovery_enabled;
     cloudEnabled.disabled = false;
     Object.values(settingInputs).forEach((input) => { input.disabled = false; });
     settingsStatus.textContent = 'Receiver restarted; settings are active.';
+    watchdogStatus.textContent = 'Receiver restart completed.';
   }
-  state.textContent = management.state;
-  state.style.color = management.state === 'STREAMING' ? '#35d49a' : '#90a4bd';
+  replaceMetrics(watchdog, [
+    ['Lifecycle', snapshot.watchdog.receiver_state.toUpperCase()],
+    ['Generation', snapshot.watchdog.receiver_generation],
+    ['Receiver uptime', snapshot.watchdog.receiver_uptime_sec === null ? '--' : `${snapshot.watchdog.receiver_uptime_sec}s`],
+    ['Restarts', snapshot.watchdog.restart_count],
+    ['Crash attempts', snapshot.watchdog.consecutive_failures],
+    ['Next retry', snapshot.watchdog.next_retry_sec === null ? '--' : `${snapshot.watchdog.next_retry_sec}s`],
+    ['Logging', snapshot.watchdog.logging_healthy ? 'HEALTHY' : 'DEGRADED'],
+    ['Last failure', snapshot.watchdog.last_failure || '--'],
+  ]);
+  restartReceiver.disabled = pendingGeneration !== null || portalDisconnected;
+  if (snapshot.watchdog.configuration_error) watchdogStatus.textContent = `Receiver blocked by configuration: ${snapshot.watchdog.configuration_error}`;
+  state.textContent = snapshot.watchdog.receiver_state === 'ready' ? management.state : snapshot.watchdog.receiver_state.toUpperCase();
+  state.style.color = management.state === 'STREAMING' && snapshot.watchdog.receiver_state === 'ready' ? '#35d49a' : '#90a4bd';
   stopButton.disabled = !active;
 
   if (active) {
@@ -419,9 +517,9 @@ function render(snapshot: Snapshot): void {
     ['Memory', receiverHealth.memory || '--'],
     ['Temperature', receiverHealth.temperature || '--'],
   ]);
-  events.textContent = management.events.slice(-80)
-    .map((event) => `[${event.elapsed_sec.toFixed(1)}s] ${event.level.toUpperCase()} ${event.kind}: ${event.message}`)
-    .join('\n') || 'No events';
+  replaceLogEntries(events, management.events.slice(-80).map((event) => logEntry(
+    `${event.elapsed_sec.toFixed(1)}s`, event.level, event.kind, `g${snapshot.watchdog.receiver_generation}`, event.message,
+  )), 'No receiver events');
 }
 
 function populateSettings(settings: CloudSettingsSnapshot): void {
@@ -465,8 +563,8 @@ async function saveAllSettings(): Promise<void> {
     }
     const scheduled = Boolean(payload && typeof payload === 'object' && 'restart_scheduled' in payload && payload.restart_scheduled);
     if (scheduled) {
-      pendingRestartValue = Boolean(readEditableSettings().cloud_discovery_enabled);
-      settingsStatus.textContent = 'Receiver restarting; waiting for management portal to reconnect…';
+      pendingGeneration = payload && typeof payload === 'object' && 'target_generation' in payload && typeof payload.target_generation === 'number' ? payload.target_generation : lastSnapshot.watchdog.receiver_generation + 1;
+      settingsStatus.textContent = `Receiver restarting; waiting for generation ${pendingGeneration}…`;
     } else {
       settingsDirty = false; settingsStatus.textContent = 'Settings already active.';
     }
@@ -477,11 +575,23 @@ async function saveAllSettings(): Promise<void> {
   }
 }
 
-function selectTab(name: 'overview' | 'settings'): void {
-  const settingsSelected = name === 'settings';
-  overviewTab.hidden = settingsSelected; settingsTab.hidden = !settingsSelected;
-  overviewTabButton.classList.toggle('active', !settingsSelected); settingsTabButton.classList.toggle('active', settingsSelected);
-  overviewTabButton.setAttribute('aria-selected', String(!settingsSelected)); settingsTabButton.setAttribute('aria-selected', String(settingsSelected));
+function selectTab(name: 'overview' | 'logs' | 'settings'): void {
+  const tabs = [
+    { name: 'overview', panel: overviewTab, button: overviewTabButton },
+    { name: 'logs', panel: logsTab, button: logsTabButton },
+    { name: 'settings', panel: settingsTab, button: settingsTabButton },
+  ] as const;
+  tabs.forEach((tab) => {
+    const selected = tab.name === name;
+    tab.panel.hidden = !selected;
+    tab.button.classList.toggle('active', selected);
+    tab.button.setAttribute('aria-selected', String(selected));
+    tab.button.tabIndex = selected ? 0 : -1;
+  });
+  if (name === 'logs') {
+    void refreshOperationalLogs();
+    requestAnimationFrame(() => { operationalLogs.scrollTop = operationalLogs.scrollHeight; });
+  }
 }
 
 function isSnapshot(value: unknown): value is Snapshot {
@@ -506,13 +616,68 @@ function resetChart(): void {
 
 async function stopSharing(): Promise<void> {
   if (!confirm('Stop the active share?')) return;
-  const response = await fetch('/api/stream/stop', { method: 'POST' });
+  const response = await fetch('/api/stream/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   if (!response.ok) state.textContent = `STOP FAILED (${response.status})`;
+}
+
+async function restartReceiverNow(): Promise<void> {
+  if (!lastSnapshot || !confirm('Restart the receiver? Active sharing will stop, but this portal will remain connected.')) return;
+  restartReceiver.disabled = true;
+  watchdogStatus.textContent = 'Requesting receiver restart…';
+  const response = await fetch('/api/watchdog/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm_restart: true }) });
+  const payload: unknown = await response.json().catch(() => ({}));
+  if (!response.ok || !payload || typeof payload !== 'object' || !('target_generation' in payload) || typeof payload.target_generation !== 'number') {
+    restartReceiver.disabled = false; watchdogStatus.textContent = `Restart failed (${response.status}).`; return;
+  }
+  pendingGeneration = payload.target_generation;
+  watchdogStatus.textContent = `Receiver restarting; waiting for generation ${pendingGeneration}…`;
+}
+
+function renderOperationalLogs(): void {
+  const severity = logSeverity.value;
+  const category = logCategory.value;
+  const query = logSearch.value.trim().toLocaleLowerCase();
+  const filtered = operationalEvents.filter((event) =>
+    (severity === 'all' || event.severity === severity)
+    && (category === 'all' || event.category === category)
+    && (!query || `${event.category} ${event.message}`.toLocaleLowerCase().includes(query))
+  );
+  replaceLogEntries(operationalLogs, filtered.map((event) => logEntry(
+    new Date(event.timestamp_unix_ms).toLocaleString(), event.severity, event.category,
+    `g${event.receiver_generation}`, event.message,
+  )), 'No operational events match these filters');
+  logCount.textContent = `Showing ${filtered.length} of ${operationalEvents.length} retained events`;
+}
+
+async function refreshOperationalLogs(): Promise<void> {
+  const response = await fetch('/api/logs?lines=300');
+  if (!response.ok) return;
+  const payload: unknown = await response.json().catch(() => ({}));
+  if (payload && typeof payload === 'object' && 'events' in payload && Array.isArray(payload.events)) {
+    operationalEvents = payload.events as OperationalEvent[];
+    const selectedCategory = logCategory.value;
+    const categories = [...new Set(operationalEvents.map((event) => event.category))].sort();
+    logCategory.replaceChildren(new Option('All categories', 'all'), ...categories.map((category) => new Option(readableCategory(category), category)));
+    logCategory.value = categories.includes(selectedCategory) ? selectedCategory : 'all';
+    renderOperationalLogs();
+  }
+}
+
+async function downloadDiagnosticZip(): Promise<void> {
+  downloadLogs.disabled = true;
+  try {
+    const response = await fetch('/api/logs/download');
+    if (!response.ok) throw new Error(`download failed (${response.status})`);
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a'); link.href = url; link.download = 'llrdc-diagnostics.zip'; link.click(); URL.revokeObjectURL(url);
+  } catch (error) { watchdogStatus.textContent = error instanceof Error ? error.message : 'Diagnostic download failed.'; }
+  finally { downloadLogs.disabled = false; }
 }
 
 function connect(): void {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
   const socket = new WebSocket(`${protocol}://${location.host}/ws`);
+  socket.addEventListener('open', () => { portalDisconnected = false; });
   socket.addEventListener('message', (event) => {
     if (typeof event.data !== 'string') return;
     try {
@@ -523,8 +688,9 @@ function connect(): void {
     }
   });
   socket.addEventListener('close', () => {
+    document.documentElement.dataset.portalDisconnects = String(Number(document.documentElement.dataset.portalDisconnects || '0') + 1);
     portalDisconnected = true;
-    if (pendingRestartValue !== null) settingsStatus.textContent = 'Receiver restarting; waiting for management portal to reconnect…';
+    if (pendingGeneration !== null) settingsStatus.textContent = 'Management connection interrupted; reconnecting…';
     state.textContent = 'DISCONNECTED';
     window.setTimeout(connect, 1500);
   });
@@ -533,6 +699,12 @@ function connect(): void {
 
 resetChartButton.addEventListener('click', resetChart);
 stopButton.addEventListener('click', () => void stopSharing());
+restartReceiver.addEventListener('click', () => void restartReceiverNow());
+downloadLogs.addEventListener('click', () => void downloadDiagnosticZip());
+logSeverity.addEventListener('change', renderOperationalLogs);
+logCategory.addEventListener('change', renderOperationalLogs);
+logSearch.addEventListener('input', renderOperationalLogs);
+jumpLatest.addEventListener('click', () => { operationalLogs.scrollTo({ top: operationalLogs.scrollHeight, behavior: 'smooth' }); });
 cloudEnabled.addEventListener('change', () => {
   settingsDirty = true;
   saveSettings.disabled = false;
@@ -544,6 +716,17 @@ localPairingRequired.addEventListener('change', () => {
 saveSettings.addEventListener('click', () => void saveAllSettings());
 Object.values(settingInputs).forEach((input) => input.addEventListener('input', () => { settingsDirty = true; saveSettings.disabled = false; }));
 overviewTabButton.addEventListener('click', () => selectTab('overview'));
+logsTabButton.addEventListener('click', () => selectTab('logs'));
 settingsTabButton.addEventListener('click', () => selectTab('settings'));
+[overviewTabButton, logsTabButton, settingsTabButton].forEach((button, index, buttons) => button.addEventListener('keydown', (event) => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+    : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+  buttons[next].click();
+  buttons[next].focus();
+}));
 window.addEventListener('resize', drawChart);
 connect();
+void refreshOperationalLogs();
+window.setInterval(() => void refreshOperationalLogs(), 5000);

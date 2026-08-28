@@ -16,6 +16,14 @@ interface Snapshot {
     cloud_configuration_missing: string[];
     cloud_state: string;
   };
+  watchdog: {
+    receiver_state: string;
+    receiver_generation: number;
+    receiver_pid: number | null;
+    restart_count: number;
+    consecutive_failures: number;
+    last_failure: string | null;
+  };
 }
 
 const editableKeys = [
@@ -49,6 +57,19 @@ function persistedConfig(): string {
     '-o', 'BatchMode=yes', boardIp as string,
     'docker exec llrdc-casting cat /config/config.yaml',
   ], { encoding: 'utf8', timeout: 10_000 });
+}
+
+function boardCommand(command: string): string {
+  return execFileSync('ssh', ['-o', 'BatchMode=yes', boardIp as string, command], { encoding: 'utf8', timeout: 20_000 });
+}
+
+function killManagerFromHost(): void {
+  const hostPid = boardCommand("docker inspect --format '{{.State.Pid}}' llrdc-casting").trim();
+  if (!/^\d+$/.test(hostPid) || Number(hostPid) < 2) throw new Error(`Invalid manager host PID: ${hostPid}`);
+  // A process inside a PID namespace cannot reliably SIGKILL that namespace's
+  // init. Enter the host PID namespace from a disposable privileged container
+  // so Docker observes a genuine unexpected PID 1 exit and applies its policy.
+  boardCommand(`docker run --rm --pid=host --privileged --entrypoint /bin/sh llrdc-casting -c 'kill -KILL ${hostPid}'`);
 }
 
 function yamlValue(value: unknown): string {
@@ -153,6 +174,95 @@ test.describe('receiver management portal', () => {
       assertDiagnosticsClean(diagnostics);
     } finally {
       writeDiagnostics(diagnostics, `${testInfo.project.name}-browser`);
+    }
+  });
+
+  test('keeps operational logs in a dedicated, scrollable, color-coded tab', async ({ page }, testInfo) => {
+    const diagnostics = trackDiagnostics(page);
+    try {
+      await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });
+      await expect(page.locator('#overviewTab')).toBeVisible();
+      await expect(page.locator('#logsTab')).toBeHidden();
+      await expect(page.locator('#settingsTab')).toBeHidden();
+
+      await page.locator('#logsTabButton').click();
+      await expect(page.locator('#logsTab')).toBeVisible();
+      await expect(page.locator('#overviewTab')).toBeHidden();
+      await expect(page.locator('#logsTabButton')).toHaveAttribute('aria-selected', 'true');
+      await expect(page.locator('#operationalLogs .log-entry').first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.locator('#logCount')).toContainText(/Showing \d+ of \d+ retained events/);
+
+      const presentation = await page.locator('#operationalLogs').evaluate((node) => ({
+        overflowY: getComputedStyle(node).overflowY,
+        maxHeight: getComputedStyle(node).maxHeight,
+      }));
+      expect(presentation.overflowY).toBe('auto');
+      expect(presentation.maxHeight).not.toBe('none');
+
+      await page.locator('#logSeverity').selectOption('info');
+      await expect(page.locator('#operationalLogs .log-entry').first()).toHaveClass(/log-info/);
+      const markerColor = await page.locator('#operationalLogs .log-entry').first().evaluate((node) => getComputedStyle(node, '::before').backgroundColor);
+      expect(markerColor).toBe('rgb(53, 212, 154)');
+
+      await page.locator('#logSeverity').selectOption('all');
+      const categoryOption = page.locator('#logCategory option').nth(1);
+      if (await categoryOption.count()) {
+        await page.locator('#logCategory').selectOption(await categoryOption.getAttribute('value') || 'all');
+        await expect(page.locator('#operationalLogs .log-entry').first()).toBeVisible();
+      }
+      await page.locator('#jumpLatest').click();
+      assertDiagnosticsClean(diagnostics);
+    } finally {
+      writeDiagnostics(diagnostics, `${testInfo.project.name}-logs-browser`);
+    }
+  });
+
+  test('watchdog recovers crashes and hangs while the portal stays available', async ({ page }, testInfo) => {
+    const diagnostics = trackDiagnostics(page);
+    try {
+      await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });
+      const initial = await getSnapshot(page);
+      expect(initial.watchdog.receiver_state).toBe('ready');
+      expect(initial.watchdog.receiver_pid).not.toBeNull();
+      const disconnects = Number(await page.locator('html').getAttribute('data-portal-disconnects') || '0');
+
+      boardCommand(`docker exec llrdc-casting kill -KILL ${initial.watchdog.receiver_pid}`);
+      await expect.poll(
+        async () => (await getSnapshot(page)).watchdog.receiver_generation,
+        { timeout: 60_000, intervals: [500, 1_000, 2_000] },
+      ).toBeGreaterThan(initial.watchdog.receiver_generation);
+      await expect.poll(async () => (await getSnapshot(page)).watchdog.receiver_state, { timeout: 60_000 }).toBe('ready');
+      const afterCrash = await getSnapshot(page);
+      expect(afterCrash.watchdog.receiver_generation).toBeGreaterThan(initial.watchdog.receiver_generation);
+      expect(afterCrash.watchdog.last_failure).toMatch(/signal|code/);
+      expect(Number(await page.locator('html').getAttribute('data-portal-disconnects') || '0')).toBe(disconnects);
+
+      expect(afterCrash.watchdog.receiver_pid).not.toBeNull();
+      boardCommand(`docker exec llrdc-casting kill -STOP ${afterCrash.watchdog.receiver_pid}`);
+      await expect.poll(async () => (await getSnapshot(page)).watchdog.receiver_generation, { timeout: 90_000, intervals: [1_000, 2_000] }).toBeGreaterThan(afterCrash.watchdog.receiver_generation);
+      await expect.poll(async () => (await getSnapshot(page)).watchdog.receiver_state, { timeout: 60_000 }).toBe('ready');
+      const afterHang = await getSnapshot(page);
+      expect(afterHang.watchdog.last_failure).toMatch(/signal|heartbeat|code/);
+      expect(Number(await page.locator('html').getAttribute('data-portal-disconnects') || '0')).toBe(disconnects);
+
+      await page.locator('#logsTabButton').click();
+      const downloadPromise = page.waitForEvent('download');
+      await page.locator('#downloadLogs').click();
+      const download = await downloadPromise;
+      expect(download.suggestedFilename()).toBe('llrdc-diagnostics.zip');
+      assertDiagnosticsClean(diagnostics);
+
+      killManagerFromHost();
+      await expect.poll(async () => {
+        try { return (await getSnapshot(page)).watchdog.receiver_state; } catch { return 'unavailable'; }
+      }, { timeout: 90_000, intervals: [1_000, 2_000] }).toBe('ready');
+      await expect(page.locator('#state')).toHaveText(/^(IDLE|STREAMING)$/, { timeout: 30_000 });
+      await expect.poll(
+        async () => Number(await page.locator('html').getAttribute('data-portal-disconnects') || '0'),
+        { timeout: 30_000, intervals: [250, 500, 1_000] },
+      ).toBeGreaterThan(disconnects);
+    } finally {
+      writeDiagnostics(diagnostics, `${testInfo.project.name}-watchdog-browser`);
     }
   });
 

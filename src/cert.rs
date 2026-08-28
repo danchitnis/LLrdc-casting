@@ -106,8 +106,19 @@ pub async fn get_or_create_identity() -> Result<Identity, Box<dyn Error + Send +
         let cert_pem = cert.pem();
         let key_pem = key_pair.serialize_pem();
 
-        fs::write(&cert_path, cert_pem)?;
-        fs::write(&key_path, key_pem)?;
+        let cert_temporary = cert_path.with_extension("pem.new");
+        let key_temporary = key_path.with_extension("pem.new");
+        fs::write(&cert_temporary, cert_pem)?;
+        fs::write(&key_temporary, key_pem)?;
+        fs::File::open(&cert_temporary)?.sync_all()?;
+        fs::File::open(&key_temporary)?.sync_all()?;
+        #[cfg(unix)] {
+            fs::set_permissions(&cert_temporary, std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
+            fs::set_permissions(&key_temporary, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        }
+        fs::rename(&key_temporary, &key_path)?;
+        fs::rename(&cert_temporary, &cert_path)?;
+        fs::File::open(cert_path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
         println!(
             "[CERT] Successfully saved TLS cert to {:?} and {:?}",
             cert_path, key_path

@@ -37,4 +37,5 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     gstreamer1.0-plugins-bad gstreamer1.0-libav ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/llrdc-casting /usr/local/bin/llrdc-casting
-ENTRYPOINT ["/usr/local/bin/llrdc-casting"]
+COPY --from=builder /app/target/release/llrdc-management /usr/local/bin/llrdc-management
+ENTRYPOINT ["/usr/local/bin/llrdc-management"]

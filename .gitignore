@@ -7,6 +7,8 @@ client/test-results/
 client/playwright-report/
 .artefact/
 bin/
+!src/bin/
+!src/bin/llrdc-management.rs
 .DS_Store
 .astro/
 client/.astro/

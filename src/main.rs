@@ -4,24 +4,9 @@
 #![deny(dead_code)]
 #![forbid(unsafe_code)]
 
-mod cert;
-mod admin;
-mod admin_protocol;
-mod cloud_discovery;
-mod config;
-mod control;
-mod dashboard;
-mod drm_kms;
-mod http_server;
-mod net;
-mod local_pairing;
-mod management;
-mod playback;
-mod sys_monitor;
-mod text;
-mod ui_delivery;
-mod v4l2_decoder;
-mod webtransport_server;
+use llrdc_casting::{cloud_discovery, config, control, dashboard, drm_kms, http_server,
+    local_pairing, management, playback, receiver_ipc, sys_monitor, v4l2_decoder,
+    webtransport_server};
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,12 +14,6 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("admin") {
-        let command = args.next();
-        return admin::run_client(command.as_deref(), args.next().is_some()).await;
-    }
-
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     config::initialize().map_err(|error| std::io::Error::other(error.to_string()))?;
     let receiver_settings = config::settings();
@@ -45,20 +24,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<control::ControlCommand>(config::transport::CONTROL_CHANNEL_CAPACITY);
     let control_channel = control::ControlChannel::new(cmd_tx);
     let management = management::ManagementState::new();
-    let (admin_tx, mut admin_rx) = mpsc::channel::<admin_protocol::AdminCommand>(8);
-    let core_control_tx = control_channel.cmd_tx.clone();
-    tokio::spawn(async move {
-        while let Some(command) = admin_rx.recv().await {
-            match command {
-                admin_protocol::AdminCommand::StopSharing => {
-                    let _ = core_control_tx.send(control::ControlCommand::AdminStop).await;
-                }
-                admin_protocol::AdminCommand::RestartReceiver => {
-                    let _ = core_control_tx.send(control::ControlCommand::RestartReceiver).await;
-                }
-            }
-        }
-    });
 
     let identity = webtransport_server::get_or_create_identity()
         .await
@@ -77,12 +42,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cloud_discovery::spawn_registration(pairing_state.clone(), cert_hash_hex.clone());
     }
 
-    let admin_pairing_state = pairing_state.clone();
-    let admin_management = management.clone();
-    let admin_commands = admin_tx.clone();
+    let receiver_ready = Arc::new(AtomicBool::new(false));
+    let ipc_pairing_state = pairing_state.clone();
+    let ipc_management = management.clone();
+    let ipc_commands = control_channel.cmd_tx.clone();
+    let ipc_ready = receiver_ready.clone();
     tokio::spawn(async move {
-        if let Err(error) = admin::run_server(admin_pairing_state, admin_management, admin_commands).await {
-            eprintln!("[ADMIN SOCKET] Server stopped: {error}");
+        if let Err(error) = receiver_ipc::run(ipc_pairing_state, ipc_management, ipc_commands, ipc_ready).await {
+            eprintln!("[RECEIVER IPC] Server stopped: {error}");
         }
     });
 
@@ -171,6 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "[READY] Persistent GStreamer HDMI presenter running; waiting for UDP/WebTransport stream"
     );
+    receiver_ready.store(true, Ordering::Release);
     let mut sent = 0u64;
     let idle_timeout_sec = config::env_or(
         "IDLE_TIMEOUT_SEC",
@@ -251,6 +219,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     control::ControlCommand::RestartReceiver => {
                         println!("[ADMIN] Restart requested for a settings change");
                         management.stop("settings_restart");
+                        return Ok(());
+                    }
+                    control::ControlCommand::Shutdown { reason } => {
+                        println!("[WATCHDOG] Graceful receiver shutdown: {reason}");
+                        management.stop(&reason);
                         return Ok(());
                     }
                     control::ControlCommand::ClientHello { device_id, user_agent, platform, language, page_session_id, connection_id, remote_ip } => {
@@ -497,7 +470,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         media_stall_reported = false;
                         management.record_frame(frame_seq, frame_bytes, latency_ms as f64);
                         if sent == 1 || sent % 30 == 0 {
-                            println!("[PLAYBACK] submitted_{}_access_units={sent} (latency={latency_ms:.1}ms)", frame.codec);
+                            if config::codec_diagnostics_enabled() {
+                                println!("[PLAYBACK] submitted_{}_access_units={sent} (latency={latency_ms:.1}ms)", frame.codec);
+                            }
                             let frame_res = format!("{}x{}", frame.width, frame.height);
                             let cur_fps = active_fps.load(Ordering::Relaxed);
                             let bw = active_bitrate_mbps.lock().map(|l| *l).unwrap_or(config::telemetry::DEFAULT_IDLE_BITRATE_MBPS);

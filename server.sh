@@ -14,6 +14,7 @@ DEPLOY_TMP_DIR=""
 ARTIFACT_CONTAINER_ID=""
 DEVICE_CONFIG_DIR="/var/lib/llrdc-config"
 DEVICE_SECRETS_DIR="/var/lib/llrdc-secrets"
+DEVICE_MANAGEMENT_DIR="/var/lib/llrdc-management"
 
 die() {
   echo "[ERROR] $*" >&2
@@ -207,6 +208,7 @@ write_runtime_env() {
     printf 'RECEIVER_ID=%s\n' "$receiver_id"
     printf 'RECEIVER_REGISTRATION_SECRET=%s\n' "$receiver_registration_secret"
     printf 'PAIRING_TOKEN_PUBLIC_KEY_FILE=%s\n' "$pairing_token_public_key_file"
+    printf 'LLRDC_CODEC_DIAGNOSTICS=%s\n' "$codec_diagnostics"
   } >"$destination"
 }
 
@@ -248,7 +250,9 @@ start_remote_container() {
       -v /var/lib/llrdc-pairing:/pairing:ro \
       -v '$DEVICE_SECRETS_DIR:/secrets:ro' \
       -v '$DEVICE_CONFIG_DIR:/config:rw' \
+      -v '$DEVICE_MANAGEMENT_DIR:/management:rw' \
       -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting:ro \
+      -v /var/tmp/llrdc-bin/llrdc-management:/usr/local/bin/llrdc-management:ro \
       '$runtime_image' >/dev/null
   "
 }
@@ -262,7 +266,7 @@ wait_for_receiver() {
   local attempt
   local healthy_streak=0
   for ((attempt = 1; attempt <= 25; attempt++)); do
-    if remote_ssh "test \"\$(docker inspect -f '{{.State.Running}}' '$IMAGE' 2>/dev/null)\" = true && docker logs '$IMAGE' 2>&1 | grep -q '\[READY\] Persistent GStreamer HDMI presenter running'" >/dev/null 2>&1 \
+    if remote_ssh "test \"\$(docker inspect -f '{{.State.Running}}' '$IMAGE' 2>/dev/null)\" = true" >/dev/null 2>&1 \
       && [[ "$(curl -fsSk --connect-timeout 2 --max-time 3 "$health_url" 2>/dev/null || true)" == "OK" ]]; then
       ((healthy_streak += 1))
       if ((healthy_streak >= 3)); then
@@ -285,8 +289,11 @@ rollback_remote_deployment() {
   if ! remote_ssh "
     set -eu
     test -s /var/tmp/llrdc-bin/llrdc-casting.previous
+    test -s /var/tmp/llrdc-bin/llrdc-management.previous
     cp -p /var/tmp/llrdc-bin/llrdc-casting.previous /var/tmp/llrdc-bin/llrdc-casting.rollback
     mv -f /var/tmp/llrdc-bin/llrdc-casting.rollback /var/tmp/llrdc-bin/llrdc-casting
+    cp -p /var/tmp/llrdc-bin/llrdc-management.previous /var/tmp/llrdc-bin/llrdc-management.rollback
+    mv -f /var/tmp/llrdc-bin/llrdc-management.rollback /var/tmp/llrdc-bin/llrdc-management
     docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_CONFIG_DIR:/config' -v '$DEVICE_SECRETS_DIR:/secrets' '$IMAGE' -c 'set -eu; if [ -s /stage/runtime.env.previous ]; then cp -p /stage/runtime.env.previous /secrets/runtime.env.rollback; mv -f /secrets/runtime.env.rollback /secrets/runtime.env; chown root:root /secrets/runtime.env; chmod 0600 /secrets/runtime.env; fi; if [ -s /stage/config.yaml.previous ]; then cp -p /stage/config.yaml.previous /config/config.yaml.rollback; mv -f /config/config.yaml.rollback /config/config.yaml; chown root:root /config/config.yaml; chmod 0640 /config/config.yaml; fi'
     rm -f /var/tmp/llrdc-bin/runtime.env.new
   "; then
@@ -333,7 +340,7 @@ case "$action" in
     [[ -n "$board_ip" ]] || die "A board address is required; use --board-ip=<address>."
     [[ "$board_ip" != -* && "$board_ip" != *[[:space:]]* ]] || die "Invalid board address."
     require_command ssh
-    pairing_code="$(remote_ssh "docker inspect -f '{{.State.Running}}' '$IMAGE' 2>/dev/null | grep -qx true && docker exec '$IMAGE' /usr/local/bin/llrdc-casting admin pairing-code")" \
+    pairing_code="$(remote_ssh "docker inspect -f '{{.State.Running}}' '$IMAGE' 2>/dev/null | grep -qx true && docker exec '$IMAGE' /usr/local/bin/llrdc-management admin pairing-code")" \
       || die "The receiver container is not running or its pairing-code command failed."
     [[ "$pairing_code" =~ ^[A-Z0-9]{4}$ ]] || die "The receiver returned an invalid pairing code."
     printf '%s\n' "$pairing_code"
@@ -429,6 +436,7 @@ case "$action" in
     receiver_id="${SERVER_RECEIVER_ID:-}"
     receiver_registration_secret="${SERVER_RECEIVER_REGISTRATION_SECRET:-}"
     pairing_token_public_key_file="${SERVER_PAIRING_TOKEN_PUBLIC_KEY_FILE:-/pairing/public.pem}"
+    codec_diagnostics="${LLRDC_CODEC_DIAGNOSTICS:-0}"
 
     if [[ -n "$dashboard_override" ]]; then idle_dashboard="$dashboard_override"; fi
     if [[ -n "$dashboard_mode_override" ]]; then idle_dashboard_mode="$dashboard_mode_override"; fi
@@ -485,6 +493,11 @@ case "$action" in
         exit 2
         ;;
     esac
+    case "$codec_diagnostics" in
+      1|true|TRUE|yes|YES) codec_diagnostics=1 ;;
+      0|false|FALSE|no|NO|"") codec_diagnostics=0 ;;
+      *) die "Codec diagnostics must be configured as true or false." ;;
+    esac
     if [[ "$cloud_discovery_enabled" == 1 && -n "$pairing_code_fixed" ]]; then
       echo "Fixed pairing codes cannot be used with Cloudflare discovery enabled." >&2
       exit 2
@@ -510,12 +523,13 @@ case "$action" in
 
     DEPLOY_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/llrdc-deploy.XXXXXX")"
     local_binary="${DEPLOY_TMP_DIR}/llrdc-casting"
+    local_management_binary="${DEPLOY_TMP_DIR}/llrdc-management"
     local_runtime_env="${DEPLOY_TMP_DIR}/runtime.env"
     local_device_config="${DEPLOY_TMP_DIR}/config.yaml"
     write_runtime_env "$local_runtime_env"
     write_device_config "$local_device_config"
 
-    remote_ssh "mkdir -p /var/tmp/llrdc-bin && rm -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/config.yaml.new"
+    remote_ssh "mkdir -p /var/tmp/llrdc-bin && docker run --rm --entrypoint /bin/sh -v '$DEVICE_MANAGEMENT_DIR:/management' '$IMAGE' -c 'chmod 0700 /management' && rm -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/llrdc-management.new /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/config.yaml.new"
 
     # Hash Dockerfile to detect whether the complete runtime image must be transferred.
     dockerfile_hash="$(shasum -a 256 "${SCRIPT_DIR}/Dockerfile" | awk '{print $1}')"
@@ -535,36 +549,45 @@ case "$action" in
       docker buildx build --build-arg BUILD_DATE="$build_date" --platform linux/arm64 -t "$IMAGE" --load .
       docker save "$IMAGE" | gzip -1 | remote_ssh "bash -o pipefail -c 'gunzip | docker load'"
       artifact_image="$IMAGE"
-      artifact_path="/usr/local/bin/llrdc-casting"
+      artifact_path="/usr/local/bin"
     else
       echo "[DEPLOY] Runtime dependencies unchanged; building the ARM64 binary..."
       docker buildx build --build-arg BUILD_DATE="$build_date" --target builder --platform linux/arm64 -t "${IMAGE}-builder" --load .
       artifact_image="${IMAGE}-builder"
-      artifact_path="/app/target/release/llrdc-casting"
+      artifact_path="/app/target/release"
     fi
 
     artifact_arch="$(docker image inspect --format '{{.Architecture}}' "$artifact_image")"
     [[ "$artifact_arch" == "arm64" ]] || die "Built artifact has architecture '$artifact_arch', expected 'arm64'."
     ARTIFACT_CONTAINER_ID="$(docker create "$artifact_image")"
-    docker cp "${ARTIFACT_CONTAINER_ID}:${artifact_path}" "$local_binary"
+    docker cp "${ARTIFACT_CONTAINER_ID}:${artifact_path}/llrdc-casting" "$local_binary"
+    docker cp "${ARTIFACT_CONTAINER_ID}:${artifact_path}/llrdc-management" "$local_management_binary"
     docker rm "$ARTIFACT_CONTAINER_ID" >/dev/null
     ARTIFACT_CONTAINER_ID=""
     [[ -s "$local_binary" ]] || die "The built receiver binary is empty or missing."
+    [[ -s "$local_management_binary" ]] || die "The built management binary is empty or missing."
 
     local_binary_hash="$(shasum -a 256 "$local_binary" | awk '{print $1}')"
+    local_management_hash="$(shasum -a 256 "$local_management_binary" | awk '{print $1}')"
     binary_size="$(ls -lh "$local_binary" | awk '{print $5}')"
     echo "[TRANSFER] Uploading verified receiver binary (${binary_size})..."
     scp "${SSH_OPTIONS[@]}" "$local_binary" "${board_ip}:/var/tmp/llrdc-bin/llrdc-casting.new"
+    scp "${SSH_OPTIONS[@]}" "$local_management_binary" "${board_ip}:/var/tmp/llrdc-bin/llrdc-management.new"
     scp "${SSH_OPTIONS[@]}" "$local_runtime_env" "${board_ip}:/var/tmp/llrdc-bin/runtime.env.new"
     scp "${SSH_OPTIONS[@]}" "$local_device_config" "${board_ip}:/var/tmp/llrdc-bin/config.yaml.new"
     remote_binary_hash="$(remote_ssh "sha256sum /var/tmp/llrdc-bin/llrdc-casting.new | awk '{print \$1}'")"
     [[ "$remote_binary_hash" == "$local_binary_hash" ]] || die "Transferred binary checksum mismatch. The active receiver was not changed."
+    remote_management_hash="$(remote_ssh "sha256sum /var/tmp/llrdc-bin/llrdc-management.new | awk '{print \$1}'")"
+    [[ "$remote_management_hash" == "$local_management_hash" ]] || die "Transferred management binary checksum mismatch. The active receiver was not changed."
 
     remote_ssh "
       set -eu
       if [ -s /var/tmp/llrdc-bin/llrdc-casting ]; then cp -p /var/tmp/llrdc-bin/llrdc-casting /var/tmp/llrdc-bin/llrdc-casting.previous; fi
+      if [ -s /var/tmp/llrdc-bin/llrdc-management ]; then cp -p /var/tmp/llrdc-bin/llrdc-management /var/tmp/llrdc-bin/llrdc-management.previous; fi
       chmod 0755 /var/tmp/llrdc-bin/llrdc-casting.new
+      chmod 0755 /var/tmp/llrdc-bin/llrdc-management.new
       mv -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/llrdc-casting
+      mv -f /var/tmp/llrdc-bin/llrdc-management.new /var/tmp/llrdc-bin/llrdc-management
       docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_CONFIG_DIR:/config' -v '$DEVICE_SECRETS_DIR:/secrets' '$IMAGE' -c 'set -eu; if [ -s /secrets/runtime.env ]; then cp -p /secrets/runtime.env /stage/runtime.env.previous; elif [ -s /stage/runtime.env ]; then cp -p /stage/runtime.env /stage/runtime.env.previous; fi; if [ -s /config/config.yaml ]; then cp -p /config/config.yaml /stage/config.yaml.previous; fi; chmod 0600 /stage/runtime.env.new; chmod 0640 /stage/config.yaml.new; mv -f /stage/config.yaml.new /config/config.yaml; chown root:root /config/config.yaml; chmod 0640 /config/config.yaml'
     "
 
@@ -574,7 +597,7 @@ case "$action" in
       fi
       die "New receiver container could not start and rollback also failed."
     fi
-    echo "[VERIFY] Waiting for a running container, presenter readiness, and stable HTTPS health..."
+    echo "[VERIFY] Waiting for watchdog readiness and stable HTTPS health..."
     if ! wait_for_receiver; then
       echo "[ERROR] Receiver did not become stably healthy within 25 seconds." >&2
       show_receiver_logs
@@ -589,9 +612,9 @@ case "$action" in
     # Secrets and superseded configuration remain only in the durable,
     # root-owned locations after the new container is healthy.
     remote_ssh "rm -f /var/tmp/llrdc-bin/runtime.env /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/runtime.env.previous /var/tmp/llrdc-bin/config.yaml.previous"
-    remote_ssh "printf '%s\\n' '$dockerfile_hash' > /var/tmp/llrdc-bin/Dockerfile.sha256 && printf '%s\\n' '$local_binary_hash' > /var/tmp/llrdc-bin/llrdc-casting.sha256"
+    remote_ssh "printf '%s\\n' '$dockerfile_hash' > /var/tmp/llrdc-bin/Dockerfile.sha256 && printf '%s\\n' '$local_binary_hash' > /var/tmp/llrdc-bin/llrdc-casting.sha256 && printf '%s\\n' '$local_management_hash' > /var/tmp/llrdc-bin/llrdc-management.sha256"
     remote_ssh "docker logs --tail 30 '$IMAGE' 2>&1"
-    echo "[DEPLOY] Receiver is healthy; binary checksum ${local_binary_hash:0:12}..."
+    echo "[DEPLOY] Manager and receiver are healthy; checksums ${local_management_hash:0:12}.../${local_binary_hash:0:12}..."
     ;;
   --stop)
     board_ip_override=""

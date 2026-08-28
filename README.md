@@ -170,15 +170,20 @@ https://<tailscale-receiver-ip>:9090/
 ```
 
 The casting and management interfaces are strict-TypeScript Astro sources.
-The container build produces each interface as an independent, self-contained
-HTML file before embedding both files in the Rust binary.
+The container contains two Rust executables: `llrdc-management` is PID 1 and
+owns the portal, configuration, certificates, durable journal, and watchdog;
+it supervises `llrdc-casting` as the media receiver child. The container build
+produces each interface as an independent, self-contained HTML file.
 
 The portal shows live measured stream traffic, connected devices, process-life
 sharing history, receiver health, and structured events. **Stop sharing** sends
 an isolated admin command through the application boundary and restores the
 idle dashboard. Its Settings tab edits receiver runtime values, atomically
-persists them on the device, and restarts the receiver; the portal reconnects
-automatically. Cloudflare identity and secrets remain deployment-controlled and
+persists them on the device, and restarts only the receiver; the portal and its
+WebSocket remain available and follow the target receiver generation. The
+Watchdog card reports crashes, heartbeat loss, backoff, and recovery. The
+Operational logs card provides incident filtering and a redacted diagnostic ZIP.
+Cloudflare identity and secrets remain deployment-controlled and
 are never returned by the portal. Each later `server.sh --start` resolves the
 local `config.yaml` and deployment flags again, replacing portal edits. The
 portal has no separate password because access is limited to the configured
@@ -186,7 +191,17 @@ Tailscale interface.
 
 The resolved receiver document is stored on the board at
 `/var/lib/llrdc-config/config.yaml`; Cloudflare registration secrets are stored
-separately with root-only permissions.
+separately with root-only permissions. The root-only operational journal is
+stored under `/var/lib/llrdc-management`, rotates at four 8 MiB segments, and
+records lifecycle, connection, security, cloud, stream-summary, latency, and
+failure causes. Normal production logs intentionally exclude packet data,
+SPS/PPS/VPS/NAL summaries, and per-frame messages; the hardware codec harness
+enables those diagnostics only for its test artifacts.
+
+Manager liveness is available at `GET /health/manager`; `GET /health` succeeds
+only when both manager and receiver are ready. A confirmed receiver restart is
+available at `POST /api/watchdog/restart`, and diagnostic events/ZIPs are
+available through the same-origin `/api/logs` endpoints.
 
 To use an address without editing `config.yaml`:
 
