@@ -8,6 +8,8 @@ use tokio::sync::broadcast;
 const MAX_EVENTS: usize = 2_000;
 const MAX_HISTORY: usize = 10_000;
 const MAX_SAMPLES: usize = 300;
+const ESTIMATED_LATENCY_MAX_AGE: Duration = Duration::from_secs(3);
+const ESTIMATED_LATENCY_MAX_MS: f64 = 5_000.0;
 
 #[derive(Clone)]
 pub struct ManagementState {
@@ -71,6 +73,15 @@ pub struct MetricSample {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LatencyMetricSample {
+    pub elapsed_sec: f64,
+    pub total_ms: f64,
+    pub encode_ms: f64,
+    pub transport_queue_ms: f64,
+    pub decode_display_ms: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: u64,
     pub sender: Option<ClientMetadata>,
@@ -106,13 +117,16 @@ pub struct HealthSnapshot {
     pub edid_type: String,
     pub pairing_status: String,
     pub cloud_status: String,
-    pub decoder_state: String,
-    pub queue_depth: usize,
-    pub dropped_frames: u64,
-    pub rejected_frames: u64,
-    pub load_average: String,
-    pub memory: String,
-    pub temperature: String,
+    pub playback_state: String,
+    pub reassembly_in_flight: usize,
+    pub dropped_access_units: u64,
+    pub ignored_media_packets: u64,
+    pub load_1m: Option<f64>,
+    pub load_5m: Option<f64>,
+    pub load_15m: Option<f64>,
+    pub memory_available_mib: Option<u64>,
+    pub memory_total_mib: Option<u64>,
+    pub soc_temperature_c: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,7 +144,18 @@ pub struct ActiveStreamSnapshot {
     pub peak_bitrate_mbps: f64,
     pub sequence_gaps: u64,
     pub server_latency_ms: f64,
+    pub estimated_latency: Option<EstimatedLatencySnapshot>,
     pub samples: Vec<MetricSample>,
+    pub latency_samples: Vec<LatencyMetricSample>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EstimatedLatencySnapshot {
+    pub seq: u32,
+    pub total_ms: f64,
+    pub encode_ms: f64,
+    pub transport_queue_ms: f64,
+    pub decode_display_ms: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -167,6 +192,8 @@ struct ActiveStream {
     last_latency_evaluation: Instant,
     high_latency: bool,
     healthy_latency_windows: u8,
+    estimated_latency: Option<(Instant, EstimatedLatencySnapshot)>,
+    estimated_latency_samples: VecDeque<LatencyMetricSample>,
 }
 
 impl ManagementState {
@@ -180,7 +207,7 @@ impl ManagementState {
                 history: VecDeque::new(),
                 events: VecDeque::new(),
                 connections: HashMap::new(),
-                health: HealthSnapshot { decoder_state: "idle".into(), ..HealthSnapshot::default() },
+                health: HealthSnapshot { playback_state: "idle_dashboard".into(), ..HealthSnapshot::default() },
             })),
             updates,
         }
@@ -279,9 +306,52 @@ impl ManagementState {
             if let Some(sender) = sender.as_ref() {
                 if let Some(c) = inner.connections.get_mut(&sender.connection_id) { c.sharing = true; c.last_seen_at_sec = elapsed; }
             }
-            inner.stream = Some(ActiveStream { id, sender, config, started_at: now, frames: 0, bytes: 0, last_seq: None, sequence_gaps: 0, latency_total_ms: 0.0, latency_count: 0, peak_bitrate_mbps: 0.0, recent_bytes: VecDeque::new(), recent_frames: VecDeque::new(), samples: VecDeque::new(), last_sample_at: now, sample_bytes: 0, sample_frames: 0, latency_window: VecDeque::new(), latency_samples: Vec::new(), last_latency_evaluation: now, high_latency: false, healthy_latency_windows: 0 });
+            inner.stream = Some(ActiveStream { id, sender, config, started_at: now, frames: 0, bytes: 0, last_seq: None, sequence_gaps: 0, latency_total_ms: 0.0, latency_count: 0, peak_bitrate_mbps: 0.0, recent_bytes: VecDeque::new(), recent_frames: VecDeque::new(), samples: VecDeque::new(), last_sample_at: now, sample_bytes: 0, sample_frames: 0, latency_window: VecDeque::new(), latency_samples: Vec::new(), last_latency_evaluation: now, high_latency: false, healthy_latency_windows: 0, estimated_latency: None, estimated_latency_samples: VecDeque::new() });
         }
         self.event("info", "stream_start", "sharing started");
+    }
+
+    /// Record a sender-computed end-to-end estimate only when it belongs to
+    /// the authenticated owner of the active stream and is internally
+    /// consistent. Returns false for stale, spoofed, or implausible reports.
+    pub fn record_estimated_latency(
+        &self,
+        connection_id: &str,
+        sample: EstimatedLatencySnapshot,
+    ) -> bool {
+        let components_total = sample.encode_ms + sample.transport_queue_ms + sample.decode_display_ms;
+        let values = [sample.total_ms, sample.encode_ms, sample.transport_queue_ms, sample.decode_display_ms];
+        let valid_values = values.into_iter().all(|value| value.is_finite() && (0.0..=ESTIMATED_LATENCY_MAX_MS).contains(&value));
+        if sample.seq == 0 || !valid_values || (sample.total_ms - components_total).abs() > 2.0 {
+            return false;
+        }
+
+        let accepted = if let Ok(mut inner) = self.inner.lock() {
+            let Some(stream) = inner.stream.as_mut() else { return false; };
+            let owned = stream.sender.as_ref().is_some_and(|sender| sender.connection_id == connection_id);
+            let newer = stream.estimated_latency.as_ref().map_or(true, |(_, previous)| sample.seq > previous.seq);
+            let submitted = stream.last_seq.is_some_and(|last_seq| sample.seq <= last_seq);
+            if owned && newer && submitted {
+                stream.estimated_latency_samples.push_back(LatencyMetricSample {
+                    elapsed_sec: stream.started_at.elapsed().as_secs_f64(),
+                    total_ms: sample.total_ms,
+                    encode_ms: sample.encode_ms,
+                    transport_queue_ms: sample.transport_queue_ms,
+                    decode_display_ms: sample.decode_display_ms,
+                });
+                while stream.estimated_latency_samples.len() > MAX_SAMPLES {
+                    stream.estimated_latency_samples.pop_front();
+                }
+                stream.estimated_latency = Some((Instant::now(), sample));
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if accepted { let _ = self.updates.send(()); }
+        accepted
     }
 
     pub fn record_frame(&self, seq: u32, bytes: usize, latency_ms: f64) {
@@ -298,10 +368,17 @@ impl ManagementState {
             }
             let mut latency_event = None;
             if let Some(stream) = inner.stream.as_mut() {
+                let stream_elapsed = stream.started_at.elapsed().as_secs_f64();
                 stream.frames += 1; stream.bytes += bytes as u64; stream.sample_bytes += bytes as u64; stream.sample_frames += 1;
                 if let Some(last) = stream.last_seq { if seq > last + 1 { stream.sequence_gaps += (seq - last - 1) as u64; } }
                 stream.last_seq = Some(seq); stream.latency_total_ms += latency_ms; stream.latency_count += 1;
                 stream.recent_bytes.push_back((now, bytes)); stream.recent_frames.push_back(now);
+                let rolling_bytes: usize = stream.recent_bytes.iter()
+                    .filter(|(time, _)| now.duration_since(*time) <= Duration::from_secs(1))
+                    .map(|(_, size)| *size)
+                    .sum();
+                stream.peak_bitrate_mbps = stream.peak_bitrate_mbps
+                    .max(rolling_bytes as f64 * 8.0 / 1_000_000.0);
                 stream.latency_window.push_back((now, latency_ms));
                 while stream.latency_window.front().is_some_and(|(time, _)| now.duration_since(*time) > Duration::from_secs(10)) { stream.latency_window.pop_front(); }
                 if stream.latency_samples.len() < 10_000 { stream.latency_samples.push(latency_ms); }
@@ -312,7 +389,7 @@ impl ManagementState {
                     let mbps = stream.sample_bytes as f64 * 8.0 / bucket / 1_000_000.0;
                     let fps = stream.sample_frames as f64 / bucket;
                     stream.peak_bitrate_mbps = stream.peak_bitrate_mbps.max(mbps);
-                    stream.samples.push_back(MetricSample { elapsed_sec: elapsed, bitrate_mbps: mbps, fps });
+                    stream.samples.push_back(MetricSample { elapsed_sec: stream_elapsed, bitrate_mbps: mbps, fps });
                     while stream.samples.len() > MAX_SAMPLES { stream.samples.pop_front(); }
                     stream.sample_bytes = 0; stream.sample_frames = 0; stream.last_sample_at = now;
                 }
@@ -344,16 +421,31 @@ impl ManagementState {
 
     pub fn set_health(&self, health: HealthSnapshot) { if let Ok(mut inner) = self.inner.lock() { inner.health = health; } let _ = self.updates.send(()); }
 
+    pub fn refresh_pipeline_health(
+        &self,
+        playback_state: &str,
+        stats: crate::v4l2_decoder::ReassemblyStats,
+    ) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.health.playback_state = playback_state.into();
+            inner.health.reassembly_in_flight = stats.in_flight;
+            inner.health.dropped_access_units = stats.dropped_access_units;
+            inner.health.ignored_media_packets = stats.ignored_packets;
+        }
+        let _ = self.updates.send(());
+    }
+
     pub fn refresh_system_health(&self) {
         if let Ok(mut inner) = self.inner.lock() {
-            if let Ok(load) = std::fs::read_to_string("/proc/loadavg") { inner.health.load_average = load.split_whitespace().take(3).collect::<Vec<_>>().join(" "); }
-            if let Ok(memory) = std::fs::read_to_string("/proc/meminfo") {
-                let mut total = 0u64; let mut available = 0u64;
-                for line in memory.lines() { if let Some(value) = line.strip_prefix("MemTotal:") { total = value.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0); } if let Some(value) = line.strip_prefix("MemAvailable:") { available = value.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0); } }
-                if total > 0 { inner.health.memory = format!("{} / {} MiB available", available / 1024, total / 1024); }
-            }
-            if let Ok(temp) = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp") { if let Ok(millidegrees) = temp.trim().parse::<f64>() { inner.health.temperature = format!("{:.1} °C", millidegrees / 1000.0); } }
+            let load = std::fs::read_to_string("/proc/loadavg").ok().and_then(|value| parse_load_average(&value));
+            (inner.health.load_1m, inner.health.load_5m, inner.health.load_15m) = load
+                .map_or((None, None, None), |(one, five, fifteen)| (Some(one), Some(five), Some(fifteen)));
+            let memory = std::fs::read_to_string("/proc/meminfo").ok().and_then(|value| parse_memory_info(&value));
+            (inner.health.memory_available_mib, inner.health.memory_total_mib) = memory
+                .map_or((None, None), |(available, total)| (Some(available), Some(total)));
+            inner.health.soc_temperature_c = read_soc_temperature();
         }
+        let _ = self.updates.send(());
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -363,12 +455,52 @@ impl ManagementState {
             let window_start = now - Duration::from_secs(1);
             let bytes_1s: usize = stream.recent_bytes.iter().filter(|(t, _)| *t >= window_start).map(|(_, b)| *b).sum();
             let frames_1s = stream.recent_frames.iter().filter(|t| **t >= window_start).count();
-            let ten_bytes: usize = stream.recent_bytes.iter().map(|(_, b)| *b).sum();
             let avg = if stream.started_at.elapsed().as_secs_f64() > 0.0 { stream.bytes as f64 * 8.0 / stream.started_at.elapsed().as_secs_f64() / 1_000_000.0 } else { 0.0 };
-            ActiveStreamSnapshot { id: stream.id, sender: stream.sender.clone(), config: stream.config.clone(), started_at_sec: stream.started_at.duration_since(inner.started).as_secs_f64(), duration_sec: stream.started_at.elapsed().as_secs_f64(), frames: stream.frames, bytes: stream.bytes, measured_bitrate_mbps: bytes_1s as f64 * 8.0 / 1_000_000.0, measured_fps: frames_1s as f64, average_bitrate_mbps: avg.max(if stream.started_at.elapsed().as_secs_f64() > 0.0 { ten_bytes as f64 * 8.0 / stream.started_at.elapsed().as_secs_f64() / 1_000_000.0 } else { 0.0 }), peak_bitrate_mbps: stream.peak_bitrate_mbps, sequence_gaps: stream.sequence_gaps, server_latency_ms: if stream.latency_count > 0 { stream.latency_total_ms / stream.latency_count as f64 } else { 0.0 }, samples: stream.samples.iter().cloned().collect() }
+            let estimated_latency = stream.estimated_latency.as_ref()
+                .filter(|(received_at, _)| now.duration_since(*received_at) <= ESTIMATED_LATENCY_MAX_AGE)
+                .map(|(_, sample)| sample.clone());
+            ActiveStreamSnapshot { id: stream.id, sender: stream.sender.clone(), config: stream.config.clone(), started_at_sec: stream.started_at.duration_since(inner.started).as_secs_f64(), duration_sec: stream.started_at.elapsed().as_secs_f64(), frames: stream.frames, bytes: stream.bytes, measured_bitrate_mbps: bytes_1s as f64 * 8.0 / 1_000_000.0, measured_fps: frames_1s as f64, average_bitrate_mbps: avg, peak_bitrate_mbps: stream.peak_bitrate_mbps, sequence_gaps: stream.sequence_gaps, server_latency_ms: if stream.latency_count > 0 { stream.latency_total_ms / stream.latency_count as f64 } else { 0.0 }, estimated_latency, samples: stream.samples.iter().cloned().collect(), latency_samples: stream.estimated_latency_samples.iter().cloned().collect() }
         });
         Snapshot { server_uptime_sec: inner.started.elapsed().as_secs_f64(), state: if active_stream.is_some() { "STREAMING".into() } else { "IDLE".into() }, active_stream, connections: inner.connections.values().cloned().collect(), history: inner.history.iter().cloned().collect(), events: inner.events.iter().cloned().collect(), health: inner.health.clone() }
     }
+}
+
+fn parse_load_average(value: &str) -> Option<(f64, f64, f64)> {
+    let mut fields = value.split_whitespace();
+    Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+}
+
+fn parse_memory_info(value: &str) -> Option<(u64, u64)> {
+    let mut total_kib: Option<u64> = None;
+    let mut available_kib: Option<u64> = None;
+    for line in value.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(key) = fields.next() else { continue; };
+        match key {
+            "MemTotal:" => total_kib = fields.next().and_then(|field| field.parse().ok()),
+            "MemAvailable:" => available_kib = fields.next().and_then(|field| field.parse().ok()),
+            _ => {}
+        }
+    }
+    Some((available_kib? / 1024, total_kib? / 1024))
+}
+
+fn read_soc_temperature() -> Option<f64> {
+    let zones = std::fs::read_dir("/sys/class/thermal").ok()?;
+    let mut fallback = None;
+    for zone in zones.flatten() {
+        let path = zone.path();
+        if !zone.file_name().to_string_lossy().starts_with("thermal_zone") { continue; }
+        let temperature = std::fs::read_to_string(path.join("temp")).ok()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .map(|millidegrees| millidegrees / 1000.0)
+            .filter(|value| value.is_finite() && (-40.0..=150.0).contains(value));
+        let Some(temperature) = temperature else { continue; };
+        let kind = std::fs::read_to_string(path.join("type")).unwrap_or_default().to_ascii_lowercase();
+        if kind.contains("cpu") || kind.contains("soc") || kind.contains("package") { return Some(temperature); }
+        fallback.get_or_insert(temperature);
+    }
+    fallback
 }
 
 fn finish_locked(inner: &mut Inner, reason: &str) {
@@ -410,12 +542,15 @@ mod tests {
         state.start(config(), None);
         state.record_frame(1, 1_000, 2.0);
         state.record_frame(3, 2_000, 4.0);
-        assert_eq!(state.snapshot().active_stream.as_ref().map(|s| s.sequence_gaps), Some(1));
+        let active = state.snapshot().active_stream.expect("active stream");
+        assert_eq!(active.sequence_gaps, 1);
+        assert!(active.peak_bitrate_mbps > 0.0);
         assert!(state.stop("admin_stop"));
         let snapshot = state.snapshot();
         assert!(snapshot.active_stream.is_none());
         assert_eq!(snapshot.history[0].end_reason.as_deref(), Some("admin_stop"));
         assert_eq!(snapshot.history[0].bytes, 3_000);
+        assert!(snapshot.history[0].peak_bitrate_mbps > 0.0);
     }
 
     #[test]
@@ -446,5 +581,72 @@ mod tests {
         assert!(state.active_sender_heartbeat_fresh(Duration::from_secs(1)));
         state.connection_closed("sender");
         assert!(!state.active_sender_heartbeat_fresh(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn estimated_latency_is_validated_and_scoped_to_stream_owner() {
+        let state = ManagementState::new();
+        state.hello(client("sender"));
+        state.hello(client("other"));
+        state.start(config(), Some(client("sender")));
+        state.record_frame(7, 1_000, 2.0);
+        let sample = EstimatedLatencySnapshot {
+            seq: 7, total_ms: 29.5, encode_ms: 7.0,
+            transport_queue_ms: 5.8, decode_display_ms: 16.7,
+        };
+        assert!(!state.record_estimated_latency("other", sample.clone()));
+        assert!(state.record_estimated_latency("sender", sample.clone()));
+        let active = state.snapshot().active_stream.unwrap();
+        assert_eq!(active.estimated_latency.unwrap().seq, 7);
+        assert_eq!(active.latency_samples.len(), 1);
+        assert_eq!(active.latency_samples[0].total_ms, 29.5);
+        assert!(!state.record_estimated_latency("sender", sample));
+    }
+
+    #[test]
+    fn estimated_latency_rejects_unsubmitted_and_inconsistent_samples() {
+        let state = ManagementState::new();
+        state.hello(client("sender"));
+        state.start(config(), Some(client("sender")));
+        let unsubmitted = EstimatedLatencySnapshot {
+            seq: 1, total_ms: 29.5, encode_ms: 7.0,
+            transport_queue_ms: 5.8, decode_display_ms: 16.7,
+        };
+        assert!(!state.record_estimated_latency("sender", unsubmitted));
+        state.record_frame(1, 1_000, 2.0);
+        let inconsistent = EstimatedLatencySnapshot {
+            seq: 1, total_ms: 200.0, encode_ms: 7.0,
+            transport_queue_ms: 5.8, decode_display_ms: 16.7,
+        };
+        assert!(!state.record_estimated_latency("sender", inconsistent));
+        let active = state.snapshot().active_stream.unwrap();
+        assert!(active.estimated_latency.is_none());
+        assert!(active.latency_samples.is_empty());
+    }
+
+    #[test]
+    fn parses_typed_system_health_values() {
+        assert_eq!(parse_load_average("0.12 1.34 2.56 1/100 42"), Some((0.12, 1.34, 2.56)));
+        assert_eq!(parse_load_average("unavailable"), None);
+        assert_eq!(
+            parse_memory_info("MemTotal:       4096000 kB\n\nMemAvailable:   2048000 kB\n"),
+            Some((2000, 4000)),
+        );
+        assert_eq!(parse_memory_info("MemTotal: 4096000 kB\n"), None);
+    }
+
+    #[test]
+    fn pipeline_health_uses_explicit_reassembly_boundaries() {
+        let state = ManagementState::new();
+        state.refresh_pipeline_health("h265", crate::v4l2_decoder::ReassemblyStats {
+            in_flight: 2,
+            dropped_access_units: 3,
+            ignored_packets: 4,
+        });
+        let health = state.snapshot().health;
+        assert_eq!(health.playback_state, "h265");
+        assert_eq!(health.reassembly_in_flight, 2);
+        assert_eq!(health.dropped_access_units, 3);
+        assert_eq!(health.ignored_media_packets, 4);
     }
 }

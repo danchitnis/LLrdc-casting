@@ -271,6 +271,34 @@ mod tests {
         assert!(event.message.starts_with("client=wt-7: "));
         assert_eq!(event.message.chars().count(), "client=wt-7: ".chars().count() + 4096);
     }
+
+    #[tokio::test]
+    async fn latency_reports_are_attributed_to_authenticated_stream_owner() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(4);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+        let management = ManagementState::new();
+        let sender = ClientMetadata {
+            device_id: "sender".into(), user_agent: "test".into(), platform: "test".into(),
+            language: "en".into(), page_session_id: "page".into(),
+            remote_ip: "127.0.0.1".into(), connection_id: "wt-7".into(),
+        };
+        management.hello(sender.clone());
+        management.start(crate::management::StreamConfigSnapshot {
+            codec: "H265".into(), resolution: "1920x1088".into(), fps: 30,
+            bitrate_mbps: 6.0, latency_mode: "ULL".into(), aspect_mode: "preserve".into(),
+            capture_resolution: "1920x1080".into(), encoded_resolution: "1920x1088".into(),
+        }, Some(sender));
+        management.record_frame(3, 1_000, 2.0);
+
+        route_control_payload(
+            br#"{"type":"latency_report","seq":3,"total_ms":29.5,"encode_ms":7.0,"transport_queue_ms":5.8,"decode_display_ms":16.7}"#,
+            &cmd_tx, &outbound_tx, "wt-7", "127.0.0.1", &management,
+        ).await;
+
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(outbound_rx.try_recv().is_err());
+        assert_eq!(management.snapshot().active_stream.unwrap().estimated_latency.unwrap().seq, 3);
+    }
 }
 
 async fn handle_connection(
@@ -386,6 +414,8 @@ async fn handle_connection(
         codec: "stop".to_string(),
         access_unit: Vec::new(),
         first_packet_at: std::time::Instant::now(),
+        capture_time_ms: None,
+        encode_duration_ms: None,
     };
     let _ = frame_tx.send(stop_frame).await;
     management.connection_closed(&connection_id);
@@ -540,6 +570,15 @@ async fn route_control_payload(
                     format!("client={connection_id}: {bounded_message}"),
                 );
             }
+        }
+        crate::control::ControlCommand::LatencyReport { seq, total_ms, encode_ms, transport_queue_ms, decode_display_ms } => {
+            management.touch_connection(connection_id);
+            management.record_estimated_latency(
+                connection_id,
+                crate::management::EstimatedLatencySnapshot {
+                    seq, total_ms, encode_ms, transport_queue_ms, decode_display_ms,
+                },
+            );
         }
         command => {
             let _ = cmd_tx.send(command).await;

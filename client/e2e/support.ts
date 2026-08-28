@@ -259,7 +259,7 @@ export function assertReceiverDelta(delta: string, wireCodec: WireCodec): void {
   if (!new RegExp(`\\[BITSTREAM VALIDATOR\\] seq=1 \\(.*${wireCodec === 'hevc' ? 'VPS' : 'SPS'}`).test(delta)) {
     throw new Error(`Receiver did not validate a ${wireCodec} keyframe`);
   }
-  if (!delta.includes(`[PLAYBACK] submitted_${wireCodec}_access_units=1`)) {
-    throw new Error(`Receiver did not submit the first ${wireCodec} access unit`);
+  if (!new RegExp(`\\[PLAYBACK\\] submitted_${wireCodec}_access_units=[1-9]\\d*`).test(delta)) {
+    throw new Error(`Receiver did not submit a ${wireCodec} access unit`);
   }
 }

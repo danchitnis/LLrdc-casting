@@ -59,6 +59,16 @@ import ManagementCard from '../components/ManagementCard.astro';
       th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
       th { color: var(--muted); font-size: .7rem; text-transform: uppercase; }
       canvas { width: 100%; height: 180px; background: #0b1729; border-radius: 8px; }
+      .chart-stack { display: grid; gap: 14px; margin-top: 14px; }
+      .chart-panel { display: grid; gap: 7px; }
+      .chart-panel h3 { margin: 0; color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; }
+      .chart-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 14px; }
+      .chart-heading h3 { margin: 0; }
+      .series-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+      .series-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid #355477; background: #0b1729; color: var(--muted); font-size: .72rem; }
+      .series-toggle[aria-pressed="true"] { border-color: var(--series-color); color: var(--text); box-shadow: inset 0 0 0 1px var(--series-color); }
+      .series-toggle:disabled { opacity: 1; cursor: default; }
+      .series-swatch { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: var(--series-color); }
       .muted { color: var(--muted); }
       .table-scroll { overflow: auto; }
       #metrics { margin-top: 12px; }
@@ -112,7 +122,24 @@ import ManagementCard from '../components/ManagementCard.astro';
           <button id="stop" class="danger" type="button" disabled>Stop sharing</button>
         </div>
         <div id="metrics" class="grid"></div>
-        <canvas id="chart" width="1000" height="300" aria-label="Measured encoded bitrate over time"></canvas>
+        <div class="chart-stack">
+          <section class="chart-panel" aria-labelledby="bandwidthChartTitle">
+            <h3 id="bandwidthChartTitle">Encoded payload throughput</h3>
+            <canvas id="chart" width="1000" height="300" aria-label="Measured encoded bitrate over time"></canvas>
+          </section>
+          <section class="chart-panel" aria-labelledby="latencyChartTitle">
+            <div class="chart-heading">
+              <h3 id="latencyChartTitle">Estimated stream latency</h3>
+              <div id="latencySeriesControls" class="series-controls" role="group" aria-label="Latency graph series">
+                <button class="series-toggle" type="button" data-latency-series="total" aria-pressed="true" style="--series-color: #ffc857"><span class="series-swatch" aria-hidden="true"></span>Total</button>
+                <button class="series-toggle" type="button" data-latency-series="encode" aria-pressed="false" style="--series-color: #45c2ff"><span class="series-swatch" aria-hidden="true"></span>Encoding</button>
+                <button class="series-toggle" type="button" data-latency-series="transport" aria-pressed="false" style="--series-color: #35d49a"><span class="series-swatch" aria-hidden="true"></span>Transport/queue</button>
+                <button class="series-toggle" type="button" data-latency-series="decode" aria-pressed="false" style="--series-color: #ff7eb6"><span class="series-swatch" aria-hidden="true"></span>Decode/display</button>
+              </div>
+            </div>
+            <canvas id="latencyChart" width="1000" height="300" aria-label="Estimated stream latency over time"></canvas>
+          </section>
+        </div>
         <p id="sender" class="muted">No active sender</p>
       </ManagementCard>
 
@@ -128,7 +155,7 @@ import ManagementCard from '../components/ManagementCard.astro';
       <ManagementCard title="Sharing history">
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Session</th><th>Sender</th><th>Stream</th><th>Duration</th><th>Bytes</th><th>End reason</th></tr></thead>
+            <thead><tr><th>Session</th><th>Sender</th><th>Stream</th><th>Duration</th><th>Payload bytes</th><th>End reason</th></tr></thead>
             <tbody id="history"></tbody>
           </table>
         </div>

@@ -9,6 +9,7 @@
     "serve": "node server.mjs",
     "test:compositor": "node --experimental-strip-types src/lib/compositor.test.ts",
     "test:guardrails": "node --experimental-strip-types src/lib/guardrails.test.ts",
+    "test:latency": "node --experimental-strip-types src/lib/latency.test.ts",
     "test:synthetic": "node --experimental-strip-types src/lib/synthetic.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:admin": "playwright test e2e/admin.spec.ts --project=management-admin",

@@ -82,6 +82,16 @@ pub enum ControlCommand {
         level: String,
         message: String,
     },
+    /// Sender-computed encoder-input-to-display estimate. The transport
+    /// boundary attributes this to the authenticated connection before it is
+    /// exposed by the management portal.
+    LatencyReport {
+        seq: u32,
+        total_ms: f64,
+        encode_ms: f64,
+        transport_queue_ms: f64,
+        decode_display_ms: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,14 +101,15 @@ pub enum TelemetryMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<u64>,
     },
+    LatencySample {
+        seq: u32,
+        capture_time_ms: f64,
+        encode_duration_ms: f32,
+    },
     Status {
         state: String,
         resolution: String,
         fps: u32,
-        delivery_rate: f32,
-        frames_submitted: u64,
-        #[serde(default)]
-        latency_ms: f32,
         #[serde(default)]
         display_resolution: String,
         #[serde(default)]
@@ -156,5 +167,36 @@ impl ControlChannel {
 
     pub fn send_telemetry(&self, msg: TelemetryMessage) {
         let _ = self.telemetry_tx.send(msg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ControlCommand, TelemetryMessage};
+
+    #[test]
+    fn latency_sample_uses_snake_case_wire_fields() {
+        let json = serde_json::to_value(TelemetryMessage::LatencySample {
+            seq: 30,
+            capture_time_ms: 1_725_000_000_123.5,
+            encode_duration_ms: 7.25,
+        }).unwrap();
+        assert_eq!(json["type"], "latency_sample");
+        assert_eq!(json["seq"], 30);
+        assert_eq!(json["capture_time_ms"], 1_725_000_000_123.5);
+        assert_eq!(json["encode_duration_ms"], 7.25);
+    }
+
+    #[test]
+    fn latency_report_uses_snake_case_wire_fields() {
+        let command: ControlCommand = serde_json::from_value(serde_json::json!({
+            "type": "latency_report",
+            "seq": 31,
+            "total_ms": 29.5,
+            "encode_ms": 7.0,
+            "transport_queue_ms": 5.8,
+            "decode_display_ms": 16.7
+        })).unwrap();
+        assert!(matches!(command, ControlCommand::LatencyReport { seq: 31, .. }));
     }
 }

@@ -16,6 +16,13 @@ import {
   updateDisplayFpsGuardrails,
 } from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
+import {
+  calculateLatencyComponents,
+  EncoderTimingTracker,
+  LatencySmoother,
+  monotonicEpochMs,
+  type EncoderTiming,
+} from './latency';
 import StreamWorker from './stream-worker.ts?worker&inline';
 import type { StreamWorkerOutboundMessage } from './stream-worker-protocol';
 import {
@@ -89,13 +96,15 @@ export interface ServerStatusMessage {
   fps?: number;
   bitrate_mbps?: number;
   latency_mode?: string;
-  frames_submitted?: number;
   edid_name?: string;
   edid_type?: string;
   edid_max_res?: string;
   edid_max_fps?: number;
   display_max_fps?: number;
   id?: number;
+  seq?: number;
+  capture_time_ms?: number;
+  encode_duration_ms?: number;
 }
 
 declare global {
@@ -129,6 +138,9 @@ let nalCache: NalCache = createNalCache();
 let pingTimer: number | null = null;
 let pingSequence = 0;
 let pendingPing: { id: number; sentAt: number } | null = null;
+let currentRttMs: number | null = null;
+let currentDisplayFps: number = STREAM_DEFAULTS.fps;
+const latencySmoother = new LatencySmoother();
 let pingVisibilityHandlerInstalled = false;
 type DiagnosticLevel = 'info' | 'warn' | 'error';
 
@@ -159,9 +171,42 @@ function getDeviceId(): string {
   }
 }
 
-function updateDevicePing(value: number | null): void {
+function updateLatencyDisplay(value: number | null, detail = 'Available while streaming'): void {
   const stat = document.getElementById('statDevicePing');
-  if (stat) stat.textContent = value === null ? '--' : `${Math.round(value)} ms`;
+  const statDetail = document.getElementById('statLatencyDetail');
+  if (stat) stat.textContent = value === null ? '--' : `~${Math.round(value)} ms`;
+  if (statDetail) statDetail.textContent = detail;
+}
+
+function resetLatencyMetric(measuring = false): void {
+  latencySmoother.reset();
+  updateLatencyDisplay(null, measuring ? 'Measuring…' : 'Available while streaming');
+}
+
+function handleLatencySample(message: ServerStatusMessage): void {
+  if (!isStreaming || document.visibilityState !== 'visible' || currentRttMs === null) return;
+  if (message.seq === undefined || message.capture_time_ms === undefined || message.encode_duration_ms === undefined) return;
+  const sample = calculateLatencyComponents(
+    message.capture_time_ms,
+    message.encode_duration_ms,
+    monotonicEpochMs(),
+    currentRttMs,
+    currentDisplayFps,
+  );
+  if (!sample) return;
+  const smoothed = latencySmoother.update(sample);
+  updateLatencyDisplay(
+    smoothed.totalMs,
+    `Encode ${Math.round(smoothed.encodeMs)} · Transport/queue ${Math.round(smoothed.transportQueueMs)} · Decode/display ~${Math.round(smoothed.decodeDisplayMs)} ms`,
+  );
+  void sendControlMessage({
+    type: 'latency_report',
+    seq: message.seq,
+    total_ms: smoothed.totalMs,
+    encode_ms: smoothed.encodeMs,
+    transport_queue_ms: smoothed.transportQueueMs,
+    decode_display_ms: smoothed.decodeDisplayMs,
+  }).catch(() => {});
 }
 
 function friendlyDiagnostic(message: string): string {
@@ -230,7 +275,7 @@ function stopPingSampling(resetMetric = true): void {
     pingTimer = null;
   }
   pendingPing = null;
-  if (resetMetric) updateDevicePing(null);
+  if (resetMetric) currentRttMs = null;
 }
 
 async function sendPing(): Promise<void> {
@@ -250,7 +295,7 @@ async function sendPing(): Promise<void> {
   if (pendingPing) {
     if (performance.now() - pendingPing.sentAt <= TRANSPORT_CONFIG.PING_RESPONSE_TIMEOUT_MS) return;
     pendingPing = null;
-    updateDevicePing(null);
+    currentRttMs = null;
   }
   const id = pingSequence++;
   pendingPing = { id, sentAt: performance.now() };
@@ -274,11 +319,12 @@ function handlePong(id: number | undefined): void {
   if (!pendingPing || (id !== undefined && id !== pendingPing.id)) return;
   const elapsed = performance.now() - pendingPing.sentAt;
   pendingPing = null;
-  updateDevicePing(elapsed);
+  currentRttMs = elapsed;
 }
 
 function markControlDisconnected(): void {
   stopPingSampling();
+  resetLatencyMetric();
   controlWriter = null;
   updateStatus('disconnected', 'DISCONNECTED');
   showUserNotice('Connection to the receiver was lost. Reconnect and try again.', true);
@@ -362,8 +408,10 @@ export function parseCertHash(input: string | null): Uint8Array | null {
   return null;
 }
 
-async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number, height: number, codec: string): Promise<void> {
-  const tag = codec === 'H265' ? TRANSPORT_CONFIG.CODEC_TAGS.H265 : TRANSPORT_CONFIG.CODEC_TAGS.H264;
+async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number, height: number, codec: string, timing: EncoderTiming | null): Promise<void> {
+  const timedTag = codec === 'H265' ? TRANSPORT_CONFIG.CODEC_TAGS.H265 : TRANSPORT_CONFIG.CODEC_TAGS.H264;
+  const legacyTag = codec === 'H265' ? TRANSPORT_CONFIG.LEGACY_CODEC_TAGS.H265 : TRANSPORT_CONFIG.LEGACY_CODEC_TAGS.H264;
+  const tag = timing ? timedTag : legacyTag;
 
   if (!uniStreamWriter && transport) {
     const uniStream = await transport.createUnidirectionalStream();
@@ -371,7 +419,8 @@ async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number
   }
   if (!uniStreamWriter) return;
 
-  const packetLen = TRANSPORT_CONFIG.PACKET_HEADER_BYTES + accessUnit.length;
+  const headerBytes = timing ? TRANSPORT_CONFIG.PACKET_HEADER_BYTES : TRANSPORT_CONFIG.LEGACY_PACKET_HEADER_BYTES;
+  const packetLen = headerBytes + accessUnit.length;
   const totalPayloadBytes = TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + packetLen;
   const combinedBuf = new Uint8Array(totalPayloadBytes);
   const view = new DataView(combinedBuf.buffer);
@@ -387,8 +436,12 @@ async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number
   view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.CHUNK_COUNT, TRANSPORT_CONFIG.SINGLE_PACKET_CHUNK_COUNT, false);
   view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.WIDTH, width, false);
   view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.HEIGHT, height, false);
+  if (timing) {
+    view.setFloat64(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.CAPTURE_TIME, timing.captureTimeMs, false);
+    view.setFloat32(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.ENCODE_DURATION, timing.encodeDurationMs, false);
+  }
 
-  combinedBuf.set(accessUnit, TRANSPORT_CONFIG.PACKET_FRAME_PREFIX_BYTES);
+  combinedBuf.set(accessUnit, TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + headerBytes);
 
   await uniStreamWriter.write(combinedBuf);
 }
@@ -428,6 +481,7 @@ async function readControlMessages(reader: ReadableStreamDefaultReader<Uint8Arra
         const message = JSON.parse(new TextDecoder().decode(payload)) as ServerStatusMessage;
         if (message.type === 'status') handleServerStatusUpdate(message);
         if (message.type === 'pong') handlePong(message.id);
+        if (message.type === 'latency_sample') handleLatencySample(message);
       }
     }
   } catch (error) {
@@ -563,7 +617,7 @@ export function initPairing(): void {
         // Keep the interval alive while hidden so the receiver can distinguish
         // a background-tab media pause from a disconnected sender.
         pendingPing = null;
-        updateDevicePing(null);
+        resetLatencyMetric(isStreaming);
         if (controlIsConnected() && pingTimer === null) startPingSampling();
       }
     });
@@ -610,6 +664,7 @@ export async function stopStreaming(): Promise<void> {
     return;
   }
   isStreaming = false;
+  resetLatencyMetric();
   seqNum = 0;
   const frameStat = document.getElementById('statFrameCount');
   if (frameStat) frameStat.textContent = '0';
@@ -720,6 +775,7 @@ export async function toggleCasting(): Promise<void> {
   isStreaming = true;
   seqNum = 0;
   nalCache = createNalCache();
+  resetLatencyMetric(true);
 
   setSettingsDisabled(true);
 
@@ -848,7 +904,7 @@ export async function toggleCasting(): Promise<void> {
     const statEncoderMode = document.getElementById('statEncoderMode');
     if (statRes) statRes.textContent = `${encodedResolution} @ ${targetFps} FPS`;
     if (statScale) statScale.textContent = resSelect.value;
-    if (statCodec) statCodec.textContent = wireCodec === 'H265' ? 'HEVC / H.265' : (isSWRequested ? 'H.264 (Software)' : 'H.264');
+    if (statCodec) statCodec.textContent = wireCodec === 'H265' ? 'HEVC / H.265' : (isSWRequested ? 'H.264 (Software Preferred)' : 'H.264');
     if (statBitrate) statBitrate.textContent = `${targetMbps} Mbps (${bitrateSetting === 'auto' ? 'Auto' : 'Custom'})`;
     if (statEncoderMode) statEncoderMode.textContent = encoderModeLabel;
 
@@ -960,14 +1016,14 @@ export async function toggleCasting(): Promise<void> {
     const statEncoderHW = document.getElementById('statEncoderHW');
     if (statEncoderHW) {
       if (isSWRequested) {
-        statEncoderHW.textContent = 'SW Emulated (CPU)';
+        statEncoderHW.textContent = 'Software Preferred (Browser API)';
         statEncoderHW.style.color = '#f59e0b';
       } else if (hardwarePreferenceSupported) {
         statEncoderHW.textContent = 'HW Preferred (Browser API)';
         statEncoderHW.style.color = '#10b981';
       } else {
-        statEncoderHW.textContent = 'SW Emulated (CPU)';
-        statEncoderHW.style.color = '#f59e0b';
+        statEncoderHW.textContent = 'Browser Default (Backend Unknown)';
+        statEncoderHW.style.color = '#94a3b8';
       }
     }
 
@@ -975,6 +1031,7 @@ export async function toggleCasting(): Promise<void> {
 
     const TrackProcessorClass = window.MediaStreamTrackProcessor;
     let forceNextKeyframe = false;
+    const encoderTiming = new EncoderTimingTracker();
 
     // Chromium/Edge can keep the capture processor, encoder, compositor, and
     // WebTransport writer active in a dedicated worker while this page is
@@ -1062,13 +1119,14 @@ export async function toggleCasting(): Promise<void> {
     videoEncoder = new VideoEncoder({
       output: async (chunk, metadata) => {
         seqNum++;
+        const timing = encoderTiming.resolve(chunk.timestamp);
         const accessUnit = convertToAnnexB(chunk, metadata, wireCodec, nalCache, seqNum, log);
         if (accessUnit.length > DECODER_LIMITS.MAX_ACCESS_UNIT_BYTES) {
           log(`[GUARDRAIL] Encoded access unit exceeds the ${DECODER_LIMITS.MAX_ACCESS_UNIT_BYTES} byte decoder limit`, true);
           await stopStreaming();
           return;
         }
-        await sendAccessUnit(accessUnit, seqNum, activeWidth, activeHeight, wireCodec);
+        await sendAccessUnit(accessUnit, seqNum, activeWidth, activeHeight, wireCodec, timing);
 
         const frameStat = document.getElementById('statFrameCount');
         if (frameStat) frameStat.textContent = seqNum.toString();
@@ -1167,6 +1225,7 @@ export async function toggleCasting(): Promise<void> {
               || syntheticFrameCount % keyframeInterval === 0 || forceNextKeyframe);
             if (forceNextKeyframe) forceNextKeyframe = false;
             if (videoEncoder && videoEncoder.encodeQueueSize <= ENCODER_GUARDRAILS.MAX_ENCODER_QUEUE) {
+              encoderTiming.mark(rawFrame.timestamp);
               const composedFrame = frameCompositor?.compose(rawFrame);
               if (!composedFrame) throw new Error('Video compositor is not initialized');
               videoEncoder.encode(composedFrame, { keyFrame: needKeyFrame });
@@ -1219,6 +1278,7 @@ export async function toggleCasting(): Promise<void> {
             const visibleRect = rawFrame.visibleRect;
             log(`[FRAME GEOMETRY] VideoFrame coded=${rawFrame.codedWidth}x${rawFrame.codedHeight}, display=${rawFrame.displayWidth}x${rawFrame.displayHeight}, visible=${visibleRect ? `${visibleRect.width}x${visibleRect.height}@${visibleRect.x},${visibleRect.y}` : 'none'}, draw=<${frameLayout.contentX},${frameLayout.contentY},${frameLayout.contentWidth},${frameLayout.contentHeight}>`);
           }
+          encoderTiming.mark(rawFrame.timestamp);
           const composedFrame = frameCompositor?.compose(rawFrame);
           if (!composedFrame) {
             rawFrame.close();
@@ -1258,6 +1318,8 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
   // is reported separately for diagnostics but does not mean that mode is
   // currently usable by the monitor.
   updateDisplayFpsGuardrails(msg.display_fps ?? msg.display_max_fps ?? msg.edid_max_fps);
+  const reportedDisplayFps = msg.display_fps ?? msg.display_max_fps ?? msg.edid_max_fps;
+  if (reportedDisplayFps && reportedDisplayFps > 0) currentDisplayFps = reportedDisplayFps;
 
   const signalResolution = parseResolution(msg.signal_resolution || msg.display_resolution);
   const panelResolution = parseResolution(msg.panel_resolution || msg.edid_max_res);
@@ -1347,6 +1409,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
       }
     } else {
       isRemoteStreaming = true;
+      resetLatencyMetric();
       clearUserNotice();
       updateStatus('active', 'IN USE');
       setSettingsDisabled(true);
@@ -1369,6 +1432,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
     }
   } else if (msg.state === 'IDLE') {
     isRemoteStreaming = false;
+    resetLatencyMetric();
     if (!isStreaming) {
       if (controlIsConnected()) {
         updateStatus('connected', 'CONNECTED');

@@ -34,6 +34,22 @@ interface MetricSample {
   fps: number;
 }
 
+interface LatencyMetricSample {
+  elapsed_sec: number;
+  total_ms: number;
+  encode_ms: number;
+  transport_queue_ms: number;
+  decode_display_ms: number;
+}
+
+type LatencySeriesKey = 'total' | 'encode' | 'transport' | 'decode';
+
+interface ChartSeries<T> {
+  key: string;
+  color: string;
+  valueFor: (point: T) => number;
+}
+
 interface SessionRecord {
   id: number;
   sender: ClientMetadata | null;
@@ -55,13 +71,16 @@ interface HealthSnapshot {
   display_fps: number;
   panel_resolution: string;
   edid_name: string;
-  decoder_state: string;
-  queue_depth: number;
-  dropped_frames: number;
-  rejected_frames: number;
-  load_average: string;
-  memory: string;
-  temperature: string;
+  playback_state: string;
+  reassembly_in_flight: number;
+  dropped_access_units: number;
+  ignored_media_packets: number;
+  load_1m: number | null;
+  load_5m: number | null;
+  load_15m: number | null;
+  memory_available_mib: number | null;
+  memory_total_mib: number | null;
+  soc_temperature_c: number | null;
 }
 
 interface ActiveStream {
@@ -77,7 +96,15 @@ interface ActiveStream {
   peak_bitrate_mbps: number;
   sequence_gaps: number;
   server_latency_ms: number;
+  estimated_latency: {
+    seq: number;
+    total_ms: number;
+    encode_ms: number;
+    transport_queue_ms: number;
+    decode_display_ms: number;
+  } | null;
   samples: MetricSample[];
+  latency_samples: LatencyMetricSample[];
 }
 
 interface ManagementSnapshot {
@@ -151,6 +178,7 @@ interface CloudSettingsSnapshot {
 const CHART_WINDOW_SEC = 60;
 const CHART_HEIGHT = 300;
 let points: MetricSample[] = [];
+let latencyPoints: LatencyMetricSample[] = [];
 let chartSessionId: number | null = null;
 let chartOriginElapsed = 0;
 let lastSnapshot: Snapshot | null = null;
@@ -159,6 +187,14 @@ let pendingGeneration: number | null = null;
 let portalDisconnected = false;
 let settingsDirty = false;
 let operationalEvents: OperationalEvent[] = [];
+const selectedLatencySeries = new Set<LatencySeriesKey>(['total']);
+
+const latencySeries: ReadonlyArray<ChartSeries<LatencyMetricSample> & { key: LatencySeriesKey }> = [
+  { key: 'total', color: '#ffc857', valueFor: (point) => point.total_ms },
+  { key: 'encode', color: '#45c2ff', valueFor: (point) => point.encode_ms },
+  { key: 'transport', color: '#35d49a', valueFor: (point) => point.transport_queue_ms },
+  { key: 'decode', color: '#ff7eb6', valueFor: (point) => point.decode_display_ms },
+];
 
 function element<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -176,6 +212,8 @@ const historyBody = element<HTMLTableSectionElement>('history');
 const health = element<HTMLDivElement>('health');
 const events = element<HTMLDivElement>('events');
 const chart = element<HTMLCanvasElement>('chart');
+const latencyChart = element<HTMLCanvasElement>('latencyChart');
+const latencySeriesControls = element<HTMLDivElement>('latencySeriesControls');
 const watchdog = element<HTMLDivElement>('watchdog');
 const watchdogStatus = element<HTMLParagraphElement>('watchdogStatus');
 const restartReceiver = element<HTMLButtonElement>('restartReceiver');
@@ -230,6 +268,23 @@ function formatTime(elapsedSec: number | null): string {
   return new Date(Date.now() - (serverUptimeSec - elapsedSec) * 1000).toLocaleTimeString();
 }
 
+function formatLoad(health: HealthSnapshot): string {
+  const values = [health.load_1m, health.load_5m, health.load_15m];
+  return values.every((value) => typeof value === 'number' && Number.isFinite(value))
+    ? `${values.map((value) => (value as number).toFixed(2)).join(' / ')} (1/5/15m)`
+    : '--';
+}
+
+function formatMemory(health: HealthSnapshot): string {
+  return typeof health.memory_available_mib === 'number' && typeof health.memory_total_mib === 'number'
+    ? `${health.memory_available_mib} / ${health.memory_total_mib} MiB`
+    : '--';
+}
+
+function formatPlaybackState(value: string): string {
+  return value ? value.replaceAll('_', ' ').toUpperCase() : '--';
+}
+
 function metric(label: string, value: string | number): HTMLDivElement {
   const wrapper = document.createElement('div');
   wrapper.className = 'metric';
@@ -253,18 +308,26 @@ function chartScale(value: number): number {
   return Math.ceil(value / magnitude) * magnitude;
 }
 
-function drawChart(): void {
-  const context = chart.getContext('2d');
+function drawSeriesChart<T extends { elapsed_sec: number }>(
+  target: HTMLCanvasElement,
+  pointsToDraw: T[],
+  series: ReadonlyArray<ChartSeries<T>>,
+  yAxisLabel: string,
+): void {
+  const context = target.getContext('2d');
   if (!context) return;
-  const width = chart.clientWidth * 2 || 1000;
-  chart.width = width;
-  chart.height = CHART_HEIGHT;
+  const width = target.clientWidth * 2 || 1000;
+  target.width = width;
+  target.height = CHART_HEIGHT;
   context.clearRect(0, 0, width, CHART_HEIGHT);
 
   const padding = { left: 66, right: 24, top: 20, bottom: 48 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = CHART_HEIGHT - padding.top - padding.bottom;
-  const dataMax = Math.max(0, ...points.map((point) => Number.isFinite(point.bitrate_mbps) ? point.bitrate_mbps : 0));
+  const dataMax = Math.max(0, ...series.flatMap(({ valueFor }) => pointsToDraw.map((point) => {
+    const value = valueFor(point);
+    return Number.isFinite(value) ? value : 0;
+  })));
   const max = chartScale(dataMax * 1.1);
   const tickCount = 4;
   const decimals = max < 1 ? 2 : max < 10 ? 1 : 0;
@@ -285,32 +348,53 @@ function drawChart(): void {
   }
 
   context.textAlign = 'center';
-  const xTickCount = points.length ? Math.min(3, points.length) : 1;
+  const xTickCount = pointsToDraw.length ? Math.min(3, pointsToDraw.length) : 1;
   for (let index = 0; index < xTickCount; index += 1) {
     const ratio = xTickCount === 1 ? 0 : index / (xTickCount - 1);
-    const pointIndex = points.length > 1 ? Math.round(ratio * (points.length - 1)) : 0;
+    const pointIndex = pointsToDraw.length > 1 ? Math.round(ratio * (pointsToDraw.length - 1)) : 0;
     const x = padding.left + ratio * plotWidth;
-    context.fillText(points[pointIndex] ? `${points[pointIndex].elapsed_sec.toFixed(0)}s` : '0s', x, CHART_HEIGHT - 24);
+    context.fillText(pointsToDraw[pointIndex] ? `${pointsToDraw[pointIndex].elapsed_sec.toFixed(0)}s` : '0s', x, CHART_HEIGHT - 24);
   }
   context.fillStyle = '#b9c8dc';
   context.fillText('Time (rolling 60 seconds)', padding.left + plotWidth / 2, CHART_HEIGHT - 5);
   context.save();
   context.translate(17, padding.top + plotHeight / 2);
   context.rotate(-Math.PI / 2);
-  context.fillText('Encoded bitrate (Mbps)', 0, 0);
+  context.fillText(yAxisLabel, 0, 0);
   context.restore();
 
-  if (points.length < 2) return;
-  context.strokeStyle = '#45c2ff';
-  context.lineWidth = 4;
-  context.beginPath();
-  points.forEach((point, index) => {
-    const x = padding.left + index * plotWidth / (points.length - 1);
-    const y = padding.top + plotHeight - (point.bitrate_mbps / max) * plotHeight;
-    if (index) context.lineTo(x, y);
-    else context.moveTo(x, y);
+  if (pointsToDraw.length < 2) return;
+  series.forEach(({ color, valueFor }) => {
+    context.strokeStyle = color;
+    context.lineWidth = 4;
+    context.beginPath();
+    pointsToDraw.forEach((point, index) => {
+      const x = padding.left + index * plotWidth / (pointsToDraw.length - 1);
+      const y = padding.top + plotHeight - (valueFor(point) / max) * plotHeight;
+      if (index) context.lineTo(x, y);
+      else context.moveTo(x, y);
+    });
+    context.stroke();
   });
-  context.stroke();
+}
+
+function drawCharts(): void {
+  drawSeriesChart(chart, points, [{ key: 'bitrate', color: '#45c2ff', valueFor: (point) => point.bitrate_mbps }], 'Encoded payload (Mbps)');
+  drawSeriesChart(latencyChart, latencyPoints, latencySeries.filter(({ key }) => selectedLatencySeries.has(key)), 'Estimated latency (ms)');
+}
+
+function isLatencySeriesKey(value: string | undefined): value is LatencySeriesKey {
+  return latencySeries.some(({ key }) => key === value);
+}
+
+function updateLatencySeriesControls(): void {
+  latencySeriesControls.querySelectorAll<HTMLButtonElement>('[data-latency-series]').forEach((button) => {
+    const key = button.dataset.latencySeries;
+    if (!isLatencySeriesKey(key)) return;
+    const selected = selectedLatencySeries.has(key);
+    button.setAttribute('aria-pressed', String(selected));
+    button.disabled = selected && selectedLatencySeries.size === 1;
+  });
 }
 
 function cell(row: HTMLTableRowElement, primary: string, secondary?: string): void {
@@ -455,7 +539,7 @@ function render(snapshot: Snapshot): void {
     ['Generation', snapshot.watchdog.receiver_generation],
     ['Receiver uptime', snapshot.watchdog.receiver_uptime_sec === null ? '--' : `${snapshot.watchdog.receiver_uptime_sec}s`],
     ['Restarts', snapshot.watchdog.restart_count],
-    ['Crash attempts', snapshot.watchdog.consecutive_failures],
+    ['Consecutive failures', snapshot.watchdog.consecutive_failures],
     ['Next retry', snapshot.watchdog.next_retry_sec === null ? '--' : `${snapshot.watchdog.next_retry_sec}s`],
     ['Logging', snapshot.watchdog.logging_healthy ? 'HEALTHY' : 'DEGRADED'],
     ['Last failure', snapshot.watchdog.last_failure || '--'],
@@ -467,38 +551,56 @@ function render(snapshot: Snapshot): void {
   stopButton.disabled = !active;
 
   if (active) {
+    const estimatedLatency = active.estimated_latency;
     replaceMetrics(metrics, [
       ['Codec', active.config.codec],
       ['Resolution', active.config.encoded_resolution || active.config.resolution],
-      ['FPS', `${active.measured_fps.toFixed(1)} / ${active.config.fps} target`],
-      ['Measured bitrate', `${active.measured_bitrate_mbps.toFixed(2)} Mbps`],
-      ['Average bitrate', `${active.average_bitrate_mbps.toFixed(2)} Mbps`],
-      ['Peak bitrate', `${active.peak_bitrate_mbps.toFixed(2)} Mbps`],
-      ['Frames', active.frames.toLocaleString()],
-      ['Bytes', formatBytes(active.bytes)],
-      ['Latency', `${active.server_latency_ms.toFixed(1)} ms`],
-      ['Sequence gaps', active.sequence_gaps],
+      ['Receiver access units/s (1s)', `${active.measured_fps.toFixed(1)} / ${active.config.fps} target`],
+      ['Current payload throughput (1s)', `${active.measured_bitrate_mbps.toFixed(2)} Mbps`],
+      ['Session avg payload throughput', `${active.average_bitrate_mbps.toFixed(2)} Mbps`],
+      ['Peak payload throughput (~1s)', `${active.peak_bitrate_mbps.toFixed(2)} Mbps`],
+      ['Access units submitted', active.frames.toLocaleString()],
+      ['Encoded payload submitted', formatBytes(active.bytes)],
+      ['Estimated total latency', estimatedLatency ? `~${Math.round(estimatedLatency.total_ms)} ms` : 'Measuring…'],
+      ['Encoding latency', estimatedLatency ? `${Math.round(estimatedLatency.encode_ms)} ms` : 'Measuring…'],
+      ['Transport/receiver queue', estimatedLatency ? `${Math.round(estimatedLatency.transport_queue_ms)} ms` : 'Measuring…'],
+      ['Decode/display estimate', estimatedLatency ? `~${Math.round(estimatedLatency.decode_display_ms)} ms` : 'Measuring…'],
+      ['Avg first packet → playback queue', `${active.server_latency_ms.toFixed(1)} ms`],
+      ['Missing sequence IDs', active.sequence_gaps],
     ]);
     const activeSender = active.sender;
     sender.textContent = activeSender
       ? `Active sender: ${activeSender.device_id} · ${activeSender.remote_ip} · ${activeSender.platform} · ${activeSender.user_agent}`
       : 'Active sender metadata pending';
     const samples = active.samples || [];
-    const latestElapsed = samples.at(-1)?.elapsed_sec ?? active.duration_sec;
+    const latencySamples = active.latency_samples || [];
+    const latestElapsed = Math.max(
+      active.duration_sec,
+      samples.at(-1)?.elapsed_sec ?? 0,
+      latencySamples.at(-1)?.elapsed_sec ?? 0,
+    );
     if (chartSessionId !== active.id || latestElapsed < chartOriginElapsed) {
       chartSessionId = active.id;
       chartOriginElapsed = Math.max(0, latestElapsed - CHART_WINDOW_SEC);
     }
     const windowStart = Math.max(chartOriginElapsed, latestElapsed - CHART_WINDOW_SEC);
     points = samples.filter((sample) => sample.elapsed_sec >= windowStart && sample.elapsed_sec <= latestElapsed).slice(-90);
+    latencyPoints = latencySamples.filter((sample) => sample.elapsed_sec >= windowStart && sample.elapsed_sec <= latestElapsed).slice(-90);
   } else {
-    replaceMetrics(metrics, [['Stream', 'Idle']]);
+    replaceMetrics(metrics, [
+      ['Stream', 'Idle'],
+      ['Estimated total latency', '--'],
+      ['Encoding latency', '--'],
+      ['Transport/receiver queue', '--'],
+      ['Decode/display estimate', '--'],
+    ]);
     sender.textContent = 'No active sender';
     points = [];
+    latencyPoints = [];
     chartSessionId = null;
     chartOriginElapsed = 0;
   }
-  drawChart();
+  drawCharts();
   renderConnections(management.connections);
   renderHistory(management.history);
 
@@ -509,13 +611,13 @@ function render(snapshot: Snapshot): void {
     ['EDID', receiverHealth.edid_name || '--'],
     ['Pairing', snapshot.pairing.local_status],
     ['Cloud', snapshot.pairing.cloud_status],
-    ['Decoder', receiverHealth.decoder_state],
-    ['Queue', receiverHealth.queue_depth],
-    ['Dropped', receiverHealth.dropped_frames],
-    ['Rejected', receiverHealth.rejected_frames],
-    ['Load', receiverHealth.load_average || '--'],
-    ['Memory', receiverHealth.memory || '--'],
-    ['Temperature', receiverHealth.temperature || '--'],
+    ['Playback pipeline', formatPlaybackState(receiverHealth.playback_state)],
+    ['Reassembly in flight', receiverHealth.reassembly_in_flight ?? '--'],
+    ['Dropped access units (receiver uptime)', receiverHealth.dropped_access_units ?? '--'],
+    ['Ignored media packets (receiver uptime)', receiverHealth.ignored_media_packets ?? '--'],
+    ['System load', formatLoad(receiverHealth)],
+    ['Memory available', formatMemory(receiverHealth)],
+    ['SoC temperature', typeof receiverHealth.soc_temperature_c === 'number' ? `${receiverHealth.soc_temperature_c.toFixed(1)} °C` : '--'],
   ]);
   replaceLogEntries(events, management.events.slice(-80).map((event) => logEntry(
     `${event.elapsed_sec.toFixed(1)}s`, event.level, event.kind, `g${snapshot.watchdog.receiver_generation}`, event.message,
@@ -603,7 +705,11 @@ function isSnapshot(value: unknown): value is Snapshot {
 function resetChart(): void {
   const active = lastSnapshot?.management.active_stream;
   if (active) {
-    const latestElapsed = active.samples.at(-1)?.elapsed_sec ?? active.duration_sec;
+    const latestElapsed = Math.max(
+      active.duration_sec,
+      active.samples.at(-1)?.elapsed_sec ?? 0,
+      active.latency_samples.at(-1)?.elapsed_sec ?? 0,
+    );
     chartSessionId = active.id;
     chartOriginElapsed = latestElapsed;
   } else {
@@ -611,7 +717,8 @@ function resetChart(): void {
     chartOriginElapsed = 0;
   }
   points = [];
-  drawChart();
+  latencyPoints = [];
+  drawCharts();
 }
 
 async function stopSharing(): Promise<void> {
@@ -698,6 +805,19 @@ function connect(): void {
 }
 
 resetChartButton.addEventListener('click', resetChart);
+latencySeriesControls.addEventListener('click', (event) => {
+  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-latency-series]') : null;
+  const key = button?.dataset.latencySeries;
+  if (!isLatencySeriesKey(key)) return;
+  if (selectedLatencySeries.has(key)) {
+    if (selectedLatencySeries.size === 1) return;
+    selectedLatencySeries.delete(key);
+  } else {
+    selectedLatencySeries.add(key);
+  }
+  updateLatencySeriesControls();
+  drawCharts();
+});
 stopButton.addEventListener('click', () => void stopSharing());
 restartReceiver.addEventListener('click', () => void restartReceiverNow());
 downloadLogs.addEventListener('click', () => void downloadDiagnosticZip());
@@ -726,7 +846,8 @@ settingsTabButton.addEventListener('click', () => selectTab('settings'));
   buttons[next].click();
   buttons[next].focus();
 }));
-window.addEventListener('resize', drawChart);
+window.addEventListener('resize', drawCharts);
+updateLatencySeriesControls();
 connect();
 void refreshOperationalLogs();
 window.setInterval(() => void refreshOperationalLogs(), 5000);

@@ -1,6 +1,7 @@
 import { convertToAnnexB, createNalCache } from './annexb';
 import { DECODER_LIMITS, ENCODER_GUARDRAILS, TRANSPORT_CONFIG } from './config';
 import { VideoFrameCompositor } from './compositor';
+import { EncoderTimingTracker, type EncoderTiming } from './latency';
 import type {
   StreamWorkerMessage,
   StreamWorkerOutboundMessage,
@@ -37,9 +38,13 @@ function makePacket(
   width: number,
   height: number,
   wireCodec: 'H264' | 'H265',
+  timing: EncoderTiming | null,
 ): Uint8Array {
-  const tag = wireCodec === 'H265' ? TRANSPORT_CONFIG.CODEC_TAGS.H265 : TRANSPORT_CONFIG.CODEC_TAGS.H264;
-  const packetLen = TRANSPORT_CONFIG.PACKET_HEADER_BYTES + accessUnit.length;
+  const timedTag = wireCodec === 'H265' ? TRANSPORT_CONFIG.CODEC_TAGS.H265 : TRANSPORT_CONFIG.CODEC_TAGS.H264;
+  const legacyTag = wireCodec === 'H265' ? TRANSPORT_CONFIG.LEGACY_CODEC_TAGS.H265 : TRANSPORT_CONFIG.LEGACY_CODEC_TAGS.H264;
+  const tag = timing ? timedTag : legacyTag;
+  const headerBytes = timing ? TRANSPORT_CONFIG.PACKET_HEADER_BYTES : TRANSPORT_CONFIG.LEGACY_PACKET_HEADER_BYTES;
+  const packetLen = headerBytes + accessUnit.length;
   const totalPayloadBytes = TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + packetLen;
   const packet = new Uint8Array(totalPayloadBytes);
   const view = new DataView(packet.buffer);
@@ -54,7 +59,11 @@ function makePacket(
   view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.CHUNK_COUNT, TRANSPORT_CONFIG.SINGLE_PACKET_CHUNK_COUNT, false);
   view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.WIDTH, width, false);
   view.setUint16(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.HEIGHT, height, false);
-  packet.set(accessUnit, TRANSPORT_CONFIG.PACKET_FRAME_PREFIX_BYTES);
+  if (timing) {
+    view.setFloat64(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.CAPTURE_TIME, timing.captureTimeMs, false);
+    view.setFloat32(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.ENCODE_DURATION, timing.encodeDurationMs, false);
+  }
+  packet.set(accessUnit, TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + headerBytes);
   return packet;
 }
 
@@ -100,11 +109,12 @@ async function startStreaming(message: StreamWorkerStartMessage): Promise<void> 
   let lastFrameTime = 0;
   const minFrameIntervalMs = 1000 / message.framerate - ENCODER_GUARDRAILS.FRAME_TIMING_SLACK_MS;
   let writeTail = Promise.resolve();
+  const encoderTiming = new EncoderTimingTracker();
 
-  const writeAccessUnit = (accessUnit: Uint8Array, seq: number): void => {
+  const writeAccessUnit = (accessUnit: Uint8Array, seq: number, timing: EncoderTiming | null): void => {
     writeTail = writeTail.then(async () => {
       if (!activeWriter || stopRequested) return;
-      await activeWriter.write(makePacket(accessUnit, seq, message.width, message.height, message.wireCodec));
+      await activeWriter.write(makePacket(accessUnit, seq, message.width, message.height, message.wireCodec, timing));
       workerScope.postMessage({ type: 'progress', sequence: seq, accessUnitBytes: accessUnit.length });
       if (seq % message.framerate === 0) {
         notifyLog(`[STREAMING ${message.wireCodec}] Frame #${seq}: ${message.width}x${message.height} (${Math.round(accessUnit.length / 1024)} KB) via QUIC stream`);
@@ -122,6 +132,7 @@ async function startStreaming(message: StreamWorkerStartMessage): Promise<void> 
     activeEncoder = new VideoEncoder({
       output: (chunk, metadata) => {
         sequence++;
+        const timing = encoderTiming.resolve(chunk.timestamp);
         const accessUnit = convertToAnnexB(chunk, metadata, message.wireCodec, nalCache, sequence, notifyLog);
         if (accessUnit.length > DECODER_LIMITS.MAX_ACCESS_UNIT_BYTES) {
           notifyError(new Error(`Encoded access unit exceeds the ${DECODER_LIMITS.MAX_ACCESS_UNIT_BYTES} byte decoder limit`));
@@ -129,7 +140,7 @@ async function startStreaming(message: StreamWorkerStartMessage): Promise<void> 
           void activeReader?.cancel();
           return;
         }
-        writeAccessUnit(accessUnit, sequence);
+        writeAccessUnit(accessUnit, sequence, timing);
       },
       error: (error) => notifyError(error),
     });
@@ -154,6 +165,7 @@ async function startStreaming(message: StreamWorkerStartMessage): Promise<void> 
         const needKeyFrame = frameCount <= ENCODER_GUARDRAILS.INITIAL_KEYFRAME_COUNT
           || frameCount % message.keyframeInterval === 0;
         if (activeEncoder.encodeQueueSize > ENCODER_GUARDRAILS.MAX_ENCODER_QUEUE) continue;
+        encoderTiming.mark(rawFrame.timestamp);
         const composedFrame = compositor.compose(rawFrame);
         activeEncoder.encode(composedFrame, { keyFrame: needKeyFrame });
         if (composedFrame !== rawFrame) composedFrame.close();
@@ -168,6 +180,7 @@ async function startStreaming(message: StreamWorkerStartMessage): Promise<void> 
   } finally {
     try { activeEncoder?.close(); } catch (error) { notifyLog(`[WORKER] Encoder close failed: ${String(error)}`, true); }
     activeEncoder = null;
+    encoderTiming.reset();
     try {
       if (activeWriter) {
         if (stopRequested) await activeWriter.write(makeStopPacket());

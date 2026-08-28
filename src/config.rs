@@ -345,10 +345,18 @@ pub mod packet {
     pub const CHUNK_COUNT_OFFSET: usize = CHUNK_INDEX_OFFSET + CHUNK_INDEX_BYTES;
     pub const WIDTH_OFFSET: usize = CHUNK_COUNT_OFFSET + CHUNK_COUNT_BYTES;
     pub const HEIGHT_OFFSET: usize = WIDTH_OFFSET + DIMENSION_BYTES;
-    /// Codec tag, sequence, chunk index/count, width, and height.
-    pub const PACKET_HEADER_BYTES: usize = HEIGHT_OFFSET + DIMENSION_BYTES;
+    pub const CAPTURE_TIME_BYTES: usize = 8;
+    pub const ENCODE_DURATION_BYTES: usize = 4;
+    pub const CAPTURE_TIME_OFFSET: usize = HEIGHT_OFFSET + DIMENSION_BYTES;
+    pub const ENCODE_DURATION_OFFSET: usize = CAPTURE_TIME_OFFSET + CAPTURE_TIME_BYTES;
+    /// Legacy codec tag, sequence, chunk index/count, width, and height.
+    pub const LEGACY_PACKET_HEADER_BYTES: usize = HEIGHT_OFFSET + DIMENSION_BYTES;
+    /// Timed packets append encoder-input wall time and encode duration.
+    pub const PACKET_HEADER_BYTES: usize = ENCODE_DURATION_OFFSET + ENCODE_DURATION_BYTES;
     pub const H264_TAG: &[u8; CODEC_TAG_BYTES] = b"H264";
     pub const H265_TAG: &[u8; CODEC_TAG_BYTES] = b"H265";
+    pub const TIMED_H264_TAG: &[u8; CODEC_TAG_BYTES] = b"H24T";
+    pub const TIMED_H265_TAG: &[u8; CODEC_TAG_BYTES] = b"H26T";
     pub const LEGACY_H264_TAG: &[u8; CODEC_TAG_BYTES] = b"VIDC";
     pub const LEGACY_H265_TAG: &[u8; CODEC_TAG_BYTES] = b"HEVC";
     pub const STOP_TAG: &[u8; CODEC_TAG_BYTES] = b"STOP";
@@ -419,8 +427,6 @@ pub mod telemetry {
     pub const DEFAULT_IDLE_RESOLUTION: &str = "0x0";
     pub const DEFAULT_IDLE_FPS: u32 = 0;
     pub const DEFAULT_IDLE_BITRATE_MBPS: f32 = 0.0;
-    pub const DEFAULT_IDLE_LATENCY_MS: f32 = 0.0;
-    pub const DEFAULT_DELIVERY_RATE_PERCENT: f32 = 100.0;
     pub const PERCENT_SCALE: f64 = 100.0;
     pub const DEFAULT_TELEMETRY_CHANNEL_CAPACITY: usize = 100;
 }

@@ -72,7 +72,7 @@ impl RawDashboardFeeder {
         let frame = raw_bytes.to_vec();
 
         if let Ok(writer) = self.writer_tx.lock() {
-            match writer.try_send(frame) {
+            match writer.try_send(frame.into()) {
                 Ok(()) => {}
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
                     eprintln!(
@@ -150,7 +150,7 @@ impl PersistentDashboardEncoder {
                     break;
                 }
                 if let Ok(writer) = writer_tx.lock() {
-                    let _ = writer.send(buf[..n].to_vec());
+                    let _ = writer.send(buf[..n].to_vec().into());
                 }
             }
         });

@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         display_resolution: format!("{}x{}", screen_w, screen_h), display_fps: vrefresh,
         panel_resolution: edid_info.panel_res.clone(), edid_name: edid_info.name.clone(),
         edid_type: edid_info.conn_type.clone(), pairing_status: "READY".into(),
-        cloud_status: "UNKNOWN".into(), decoder_state: "idle".into(), ..Default::default()
+        cloud_status: "UNKNOWN".into(), playback_state: "idle_dashboard".into(), ..Default::default()
     });
     let signal_resolution = format!("{}x{}", screen_w, screen_h);
     let panel_resolution = edid_info.panel_res.clone();
@@ -102,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 2. Start single persistent GStreamer pipeline
+    let (playback_submission_tx, mut playback_submission_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut playback_engine = playback::start_persistent_playback(
         &idle_dashboard_codec,
         &connector_id,
@@ -109,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "dashboard",
         idle_width,
         idle_height,
+        playback_submission_tx,
     )?;
 
     let streaming_active = Arc::new(AtomicBool::new(false));
@@ -151,9 +153,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let sender_liveness_timeout = std::time::Duration::from_secs(sender_liveness_timeout_sec);
     let mut media_stall_reported = false;
+    let mut health_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+    health_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
+            _ = health_interval.tick() => {
+                let playback_state = match playback_engine.child.try_wait() {
+                    Ok(Some(_)) => "error",
+                    _ => match playback_engine.current_codec.as_str() {
+                        "h264" => "h264",
+                        "h265" => "h265",
+                        _ => "idle_dashboard",
+                    },
+                };
+                management.refresh_pipeline_health(playback_state, v4l2_decoder::reassembly_stats());
+                management.refresh_system_health();
+            }
+            Some(submission) = playback_submission_rx.recv() => {
+                if streaming_active.load(Ordering::Relaxed) {
+                    let sample_interval = active_fps.load(Ordering::Relaxed).max(1);
+                    if submission.seq == 1 || submission.seq % sample_interval == 0 {
+                        control_channel.send_telemetry(control::TelemetryMessage::LatencySample {
+                            seq: submission.seq,
+                            capture_time_ms: submission.capture_time_ms,
+                            encode_duration_ms: submission.encode_duration_ms,
+                        });
+                    }
+                }
+            }
             // High priority: Control socket JSON commands
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
@@ -175,9 +203,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state: "IDLE".to_string(),
                             resolution: config::telemetry::DEFAULT_IDLE_RESOLUTION.to_string(),
                             fps: config::telemetry::DEFAULT_IDLE_FPS,
-                            delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
-                            frames_submitted: sent,
-                            latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                             display_resolution: format!("{}x{}", screen_w, screen_h),
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
@@ -209,7 +234,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         while rx.try_recv().is_ok() {}
                         control_channel.send_telemetry(control::TelemetryMessage::Status {
                             state: "IDLE".into(), resolution: config::telemetry::DEFAULT_IDLE_RESOLUTION.into(), fps: 0,
-                            delivery_rate: 0.0, frames_submitted: sent, latency_ms: 0.0,
                             display_resolution: format!("{}x{}", screen_w, screen_h), display_fps: vrefresh,
                             bitrate_mbps: 0.0, latency_mode: String::new(), edid_name: edid_info.name.clone(), edid_type: edid_info.conn_type.clone(),
                             edid_max_res: edid_info.max_res.clone(), edid_max_fps: edid_info.max_fps, display_max_fps: edid_info.max_fps,
@@ -273,9 +297,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state: "STREAMING".to_string(),
                             resolution: res_str,
                             fps: stream_fps,
-                            delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
-                            frames_submitted: sent,
-                            latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                             display_resolution: format!("{}x{}", screen_w, screen_h),
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
@@ -311,6 +332,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             management.event(normalized_level, "client_diagnostic", format!("client=legacy: {bounded_message}"));
                         }
                     }
+                    control::ControlCommand::LatencyReport { .. } => {
+                        // Direct WebTransport reports are consumed at the
+                        // authenticated connection boundary. Ignore any report
+                        // reaching this legacy shared command path.
+                    }
                     control::ControlCommand::GetStatus => {
                         let is_act = streaming_active.load(Ordering::Relaxed);
                         let state = if is_act { "STREAMING" } else { "IDLE" };
@@ -330,9 +356,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state: state.to_string(),
                             resolution: cur_res,
                             fps: cur_fps,
-                            delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
-                            frames_submitted: sent,
-                            latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                             display_resolution: format!("{}x{}", screen_w, screen_h),
                             display_fps: vrefresh,
                             bitrate_mbps: bw,
@@ -374,9 +397,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 state: "IDLE".to_string(),
                                 resolution: config::telemetry::DEFAULT_IDLE_RESOLUTION.to_string(),
                                 fps: 0,
-                                delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
-                                frames_submitted: sent,
-                                latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                                 display_resolution: format!("{}x{}", screen_w, screen_h),
                                 display_fps: vrefresh,
                                 bitrate_mbps: bw,
@@ -431,9 +451,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     state: "STREAMING".to_string(),
                                     resolution: frame_res,
                                     fps: cur_fps,
-                                    delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
-                                    frames_submitted: sent,
-                                    latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                                     display_resolution: format!("{}x{}", screen_w, screen_h),
                                     display_fps: vrefresh,
                                     bitrate_mbps: bw,
@@ -460,7 +477,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let frame_seq = frame.seq;
                         let frame_bytes = frame.access_unit.len();
-                        if playback_engine.writer_tx.send(frame.access_unit).is_err() {
+                        let timing = match (frame.capture_time_ms, frame.encode_duration_ms) {
+                            (Some(capture_time_ms), Some(encode_duration_ms)) => Some(playback::PlaybackTiming {
+                                seq: frame_seq,
+                                capture_time_ms,
+                                encode_duration_ms,
+                            }),
+                            _ => None,
+                        };
+                        if playback_engine.writer_tx.send(playback::PlaybackBuffer { bytes: frame.access_unit, timing }).is_err() {
                             eprintln!("[PLAYBACK ERROR] seq={} pipe write failed", frame.seq);
                             continue;
                         }
@@ -481,9 +506,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     state: "STREAMING".to_string(),
                                     resolution: frame_res,
                                     fps: cur_fps,
-                                    delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
-                                    frames_submitted: sent,
-                                    latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                                     display_resolution: format!("{}x{}", screen_w, screen_h),
                                     display_fps: vrefresh,
                                     bitrate_mbps: bw,
@@ -534,9 +556,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 state: "IDLE".to_string(),
                                 resolution: config::telemetry::DEFAULT_IDLE_RESOLUTION.to_string(),
                                 fps: 0,
-                                delivery_rate: config::telemetry::DEFAULT_DELIVERY_RATE_PERCENT,
-                                frames_submitted: sent,
-                                latency_ms: config::telemetry::DEFAULT_IDLE_LATENCY_MS,
                                 display_resolution: format!("{}x{}", screen_w, screen_h),
                                 display_fps: vrefresh,
                                 bitrate_mbps: bw,

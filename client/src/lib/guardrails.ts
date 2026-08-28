@@ -89,7 +89,7 @@ export function updateEncoderHWStatus(caps?: CodecCapabilityStatus | null): void
   const val = codecSelect.value;
 
   if (val === 'H264_SW') {
-    statEncoderHW.textContent = 'SW Emulated (CPU)';
+    statEncoderHW.textContent = 'Software Preferred (Browser API)';
     statEncoderHW.style.color = '#f59e0b';
   } else if (val === 'H265') {
     const isSupported = status ? status.h265Supported : true;
@@ -106,8 +106,8 @@ export function updateEncoderHWStatus(caps?: CodecCapabilityStatus | null): void
       statEncoderHW.textContent = 'HW Preferred (Browser API)';
       statEncoderHW.style.color = '#10b981';
     } else {
-      statEncoderHW.textContent = 'SW Emulated (CPU)';
-      statEncoderHW.style.color = '#f59e0b';
+      statEncoderHW.textContent = 'Browser Default (Backend Unknown)';
+      statEncoderHW.style.color = '#94a3b8';
     }
   }
 }

@@ -9,7 +9,32 @@ use std::sync::{Arc, Mutex};
 
 use crate::config;
 
-pub type SharedWriter = Arc<Mutex<std::sync::mpsc::SyncSender<Vec<u8>>>>;
+#[derive(Debug)]
+pub struct PlaybackTiming {
+    pub seq: u32,
+    pub capture_time_ms: f64,
+    pub encode_duration_ms: f32,
+}
+
+pub struct PlaybackBuffer {
+    pub bytes: Vec<u8>,
+    pub timing: Option<PlaybackTiming>,
+}
+
+impl From<Vec<u8>> for PlaybackBuffer {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self { bytes, timing: None }
+    }
+}
+
+#[derive(Debug)]
+pub struct PlaybackSubmission {
+    pub seq: u32,
+    pub capture_time_ms: f64,
+    pub encode_duration_ms: f32,
+}
+
+pub type SharedWriter = Arc<Mutex<std::sync::mpsc::SyncSender<PlaybackBuffer>>>;
 
 // The RK3399 HDMI bridge advertises a 120x70 mm 4K mode. kmssink turns that
 // device aspect ratio into a 15/16 pixel aspect ratio. Apply that correction
@@ -19,13 +44,14 @@ pub type SharedWriter = Arc<Mutex<std::sync::mpsc::SyncSender<Vec<u8>>>>;
 // memory:DMABuf feature and forces a slow system-memory presentation path.
 pub struct PlaybackEngine {
     pub child: Child,
-    pub writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    pub writer_tx: std::sync::mpsc::SyncSender<PlaybackBuffer>,
     pub current_codec: String,
     pub width: u32,
     pub height: u32,
     pub render_rect: Option<String>,
     pub aspect_mode: String,
     pub dashboard_writer: SharedWriter,
+    submission_tx: tokio::sync::mpsc::UnboundedSender<PlaybackSubmission>,
 }
 
 impl PlaybackEngine {
@@ -54,7 +80,15 @@ impl PlaybackEngine {
         );
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let mut new_engine = start_persistent_playback(norm, connector, render_rect, aspect_mode, self.width, self.height)?;
+        let mut new_engine = start_persistent_playback(
+            norm,
+            connector,
+            render_rect,
+            aspect_mode,
+            self.width,
+            self.height,
+            self.submission_tx.clone(),
+        )?;
         if let Ok(mut writer) = self.dashboard_writer.lock() {
             *writer = new_engine.writer_tx.clone();
         }
@@ -109,6 +143,7 @@ pub fn start_persistent_playback(
     aspect_mode: &str,
     width: u32,
     height: u32,
+    submission_tx: tokio::sync::mpsc::UnboundedSender<PlaybackSubmission>,
 ) -> Result<PlaybackEngine, Box<dyn std::error::Error>> {
     let t_start = std::time::Instant::now();
     let plane = config::env_string_or("DRM_PLANE_ID", config::server::DEFAULT_DRM_PLANE_ID);
@@ -180,12 +215,20 @@ pub fn start_persistent_playback(
     } else {
         config::playback::ENCODED_QUEUE_CAPACITY
     };
-    let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(queue_capacity);
+    let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<PlaybackBuffer>(queue_capacity);
+    let writer_submission_tx = submission_tx.clone();
     std::thread::spawn(move || {
-        while let Ok(access_unit) = writer_rx.recv() {
-            if stdin.write_all(&access_unit).and_then(|_| stdin.flush()).is_err() {
+        while let Ok(buffer) = writer_rx.recv() {
+            if stdin.write_all(&buffer.bytes).and_then(|_| stdin.flush()).is_err() {
                 eprintln!("[PLAYBACK] GStreamer stdin write failed");
                 break;
+            }
+            if let Some(timing) = buffer.timing {
+                let _ = writer_submission_tx.send(PlaybackSubmission {
+                    seq: timing.seq,
+                    capture_time_ms: timing.capture_time_ms,
+                    encode_duration_ms: timing.encode_duration_ms,
+                });
             }
         }
     });
@@ -201,5 +244,6 @@ pub fn start_persistent_playback(
         render_rect: render_rect.map(str::to_owned),
         aspect_mode: aspect_mode.to_string(),
         dashboard_writer,
+        submission_tx,
     })
 }

@@ -25,6 +25,37 @@ const cases: readonly CodecCase[] = [
   { name: 'hevc-4k-boundary', senderCodec: 'H265', wireCodec: 'hevc', resolution: '3840x2160', cycles: 1 },
 ];
 
+interface EstimatedLatencySnapshot {
+  total_ms: number;
+  encode_ms: number;
+  transport_queue_ms: number;
+  decode_display_ms: number;
+}
+
+interface ManagementLatencySnapshot {
+  management: {
+    active_stream: null | {
+      frames: number;
+      bytes: number;
+      measured_bitrate_mbps: number;
+      measured_fps: number;
+      average_bitrate_mbps: number;
+      peak_bitrate_mbps: number;
+      estimated_latency: EstimatedLatencySnapshot | null;
+      latency_samples: Array<EstimatedLatencySnapshot & { elapsed_sec: number }>;
+    };
+    health: {
+      playback_state: string;
+      reassembly_in_flight: number;
+      dropped_access_units: number;
+      ignored_media_packets: number;
+      load_1m: number | null;
+      memory_available_mib: number | null;
+      memory_total_mib: number | null;
+    };
+  };
+}
+
 function receiverDelta(before: string, after: string): string {
   return after.startsWith(before) ? after.slice(before.length) : after;
 }
@@ -39,19 +70,67 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
   await expect(page.locator('#statusBadge')).toHaveText('STREAMING', { timeout: 30_000 });
   await expect(page.locator('#settingsLockNotice')).toBeVisible();
   await expect(page.locator('#toggleText')).toHaveText('Stop Casting');
+  await expect(page.locator('.stat-label', { hasText: 'Target output' })).toHaveCount(1);
+  await expect(page.locator('.stat-label', { hasText: 'Frames written to transport' })).toHaveCount(1);
   await expect(page.locator('#statCodec')).toHaveText(
-    testCase.senderCodec === 'H265' ? 'HEVC / H.265' : (testCase.senderCodec === 'H264_SW' ? 'H.264 (Software)' : 'H.264'),
+    testCase.senderCodec === 'H265' ? 'HEVC / H.265' : (testCase.senderCodec === 'H264_SW' ? 'H.264 (Software Preferred)' : 'H.264'),
   );
-  await expect(page.locator('#statEncoderHW')).toContainText(testCase.senderCodec === 'H264_SW' ? 'SW Emulated' : 'HW Preferred');
+  await expect(page.locator('#statEncoderHW')).toContainText(testCase.senderCodec === 'H264_SW' ? 'Software Preferred' : 'HW Preferred');
   await waitFor(
     () => page.locator('#statFrameCount').textContent(),
     value => Number.parseInt(value || '0', 10) >= initialFrameCount + 30,
     `${testCase.name} cycle ${cycle} to increase the frame counter by 30`,
     45_000,
   );
+  await expect.poll(async () => page.locator('#statDevicePing').textContent(), { timeout: 10_000 }).toMatch(/^~\d+ ms$/);
+  const estimatedLatency = Number.parseInt((await page.locator('#statDevicePing').textContent())?.replace(/\D/g, '') || '0', 10);
+  expect(estimatedLatency).toBeGreaterThan(0);
+  expect(estimatedLatency).toBeLessThan(5_000);
+  await expect(page.locator('#statLatencyDetail')).toHaveText(/^Encode \d+ · Transport\/queue \d+ · Decode\/display ~\d+ ms$/);
+  await expect.poll(async () => {
+    const response = await page.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
+    if (!response.ok()) return null;
+    const snapshot = await response.json() as ManagementLatencySnapshot;
+    return snapshot.management.active_stream?.estimated_latency?.total_ms ?? null;
+  }, { timeout: 10_000 }).not.toBeNull();
+  const managementResponse = await page.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
+  expect(managementResponse.ok()).toBe(true);
+  const managementSnapshot = await managementResponse.json() as ManagementLatencySnapshot;
+  const activeStream = managementSnapshot.management.active_stream;
+  if (!activeStream) throw new Error('Management active stream disappeared before metric validation');
+  expect(activeStream.frames).toBeGreaterThan(0);
+  expect(activeStream.bytes).toBeGreaterThan(0);
+  expect(activeStream.measured_bitrate_mbps).toBeGreaterThan(0);
+  expect(activeStream.measured_fps).toBeGreaterThan(0);
+  expect(activeStream.average_bitrate_mbps).toBeGreaterThan(0);
+  expect(activeStream.peak_bitrate_mbps).toBeGreaterThan(0);
+  const managementLatency = managementSnapshot.management.active_stream?.estimated_latency;
+  const managementLatencySamples = managementSnapshot.management.active_stream?.latency_samples ?? [];
+  expect(managementLatency).not.toBeNull();
+  if (!managementLatency) throw new Error('Management latency estimate disappeared before validation');
+  expect(managementLatency.total_ms).toBeGreaterThan(0);
+  expect(managementLatency.total_ms).toBeLessThan(5_000);
+  expect(managementLatency.total_ms).toBeCloseTo(
+    managementLatency.encode_ms + managementLatency.transport_queue_ms + managementLatency.decode_display_ms,
+    5,
+  );
+  expect(managementLatencySamples.length).toBeGreaterThan(0);
+  const graphedLatency = managementLatencySamples.at(-1);
+  expect(graphedLatency?.total_ms).toBeGreaterThan(0);
+  expect(graphedLatency?.total_ms).toBeLessThan(5_000);
+  await expect.poll(async () => {
+    const response = await page.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
+    if (!response.ok()) return null;
+    const snapshot = await response.json() as ManagementLatencySnapshot;
+    return snapshot.management.health.playback_state;
+  }, { timeout: 10_000 }).toBe(testCase.wireCodec === 'hevc' ? 'h265' : 'h264');
+  const health = managementSnapshot.management.health;
+  expect(health.reassembly_in_flight).toBeGreaterThanOrEqual(0);
+  expect(health.dropped_access_units).toBeGreaterThanOrEqual(0);
+  expect(health.ignored_media_packets).toBeGreaterThanOrEqual(0);
 
   const afterFrames = await receiver.waitFor(
-    log => receiverDelta(before, log).includes(`[PLAYBACK] submitted_${testCase.wireCodec}_access_units=1`),
+    log => new RegExp(`\\[PLAYBACK\\] submitted_${testCase.wireCodec}_access_units=[1-9]\\d*`).test(receiverDelta(before, log)),
     `${testCase.name} cycle ${cycle} receiver playback`,
     45_000,
   );
@@ -62,6 +141,8 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
   await expect(page.locator('#toggleText')).toHaveText('Start Casting');
   await expect(page.locator('#settingsLockNotice')).toBeHidden();
   await expect(page.locator('#userNotice')).toBeHidden();
+  await expect(page.locator('#statDevicePing')).toHaveText('--');
+  await expect(page.locator('#statLatencyDetail')).toHaveText('Available while streaming');
   console.log(`[E2E] Completed ${testCase.name} cycle ${cycle}/${testCase.cycles}.`);
 }
 
@@ -104,7 +185,10 @@ test.describe('local codec matrix', () => {
     expect(pairedLogs).not.toContain('[CLOUD DISCOVERY]');
     await expect(page.locator('#statusBadge')).toHaveText('CONNECTED');
     await expect.poll(async () => page.locator('#statSignal').textContent()).not.toBe('--');
-    await expect.poll(async () => page.locator('#statDevicePing').textContent()).toMatch(/^\d+ ms$/);
+    await expect(page.locator('#statDevicePing')).toHaveText('--');
+    await expect(page.locator('#statLatencyDetail')).toHaveText('Available while streaming');
+    await expect(page.locator('.stat-label', { hasText: 'Target output' })).toHaveCount(1);
+    await expect(page.locator('.stat-label', { hasText: 'Frames written to transport' })).toHaveCount(1);
     await expect(page.locator('#userNotice')).toBeHidden();
 
     await assertCodecSupport(page, 'H265', '1920x1080');
