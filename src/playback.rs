@@ -6,6 +6,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::config;
 
@@ -34,14 +35,34 @@ pub struct PlaybackSubmission {
     pub encode_duration_ms: f32,
 }
 
+pub struct LatencyAckCadence {
+    last_sent_at: Option<Instant>,
+    interval: Duration,
+}
+
+impl Default for LatencyAckCadence {
+    fn default() -> Self {
+        Self { last_sent_at: None, interval: Duration::from_secs(1) }
+    }
+}
+
+impl LatencyAckCadence {
+    pub fn should_emit(&mut self, now: Instant) -> bool {
+        if self.last_sent_at.is_none_or(|last| now.duration_since(last) >= self.interval) {
+            self.last_sent_at = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.last_sent_at = None;
+    }
+}
+
 pub type SharedWriter = Arc<Mutex<std::sync::mpsc::SyncSender<PlaybackBuffer>>>;
 
-// The RK3399 HDMI bridge advertises a 120x70 mm 4K mode. kmssink turns that
-// device aspect ratio into a 15/16 pixel aspect ratio. Apply that correction
-// to the parsed bitstream caps before the V4L2 decoder: the decoder then
-// propagates it onto its native DMA-BUF output, keeping the decoder -> KMS
-// path zero-copy. Applying it after decode with capssetter drops the
-// memory:DMABuf feature and forces a slow system-memory presentation path.
 pub struct PlaybackEngine {
     pub child: Child,
     pub writer_tx: std::sync::mpsc::SyncSender<PlaybackBuffer>,
@@ -52,6 +73,40 @@ pub struct PlaybackEngine {
     pub aspect_mode: String,
     pub dashboard_writer: SharedWriter,
     submission_tx: tokio::sync::mpsc::UnboundedSender<PlaybackSubmission>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_kms_sink_args, encoded_pipeline_args, LatencyAckCadence};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn latency_acknowledgements_follow_elapsed_time_at_irregular_fps() {
+        let start = Instant::now();
+        let mut cadence = LatencyAckCadence::default();
+        assert!(cadence.should_emit(start));
+        assert!(!cadence.should_emit(start + Duration::from_millis(40)));
+        assert!(!cadence.should_emit(start + Duration::from_millis(950)));
+        assert!(cadence.should_emit(start + Duration::from_millis(1_250)));
+        assert!(!cadence.should_emit(start + Duration::from_millis(2_100)));
+        assert!(cadence.should_emit(start + Duration::from_millis(2_251)));
+        cadence.reset();
+        assert!(cadence.should_emit(start + Duration::from_millis(2_252)));
+    }
+
+    #[test]
+    fn encoded_pipeline_has_no_pixel_aspect_override() {
+        let args = encoded_pipeline_args("h265");
+        assert!(!args.iter().any(|arg| arg == "capssetter" || arg.contains("pixel-aspect-ratio")));
+        assert!(args.iter().any(|arg| arg == "v4l2slh265dec"));
+    }
+
+    #[test]
+    fn kms_sink_uses_the_complete_active_signal_rectangle() {
+        let mut args = Vec::new();
+        append_kms_sink_args(&mut args, "54", "33", Some("<0,0,3840,2160>"));
+        assert!(args.iter().any(|arg| arg == "render-rectangle=<0,0,3840,2160>"));
+    }
 }
 
 impl PlaybackEngine {
@@ -109,6 +164,30 @@ fn normalize_codec(codec: &str) -> &str {
     }
 }
 
+fn encoded_pipeline_args(norm_codec: &str) -> Vec<String> {
+    let (parser, decoder) = if norm_codec == "h264" {
+        ("h264parse", "v4l2slh264dec")
+    } else {
+        ("h265parse", "v4l2slh265dec")
+    };
+    vec![
+        "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(),
+        format!("blocksize={}", config::playback::RAW_PIPELINE_BLOCK_SIZE), "!".to_string(),
+        parser.to_string(), format!("config-interval={}", config::playback::ENCODED_CONFIG_INTERVAL), "!".to_string(),
+        decoder.to_string(), "!".to_string(),
+    ]
+}
+
+fn append_kms_sink_args(gst_args: &mut Vec<String>, connector: &str, plane: &str, render_rect: Option<&str>) {
+    gst_args.extend([
+        "kmssink".to_string(), "driver-name=rockchip".to_string(),
+        format!("connector-id={connector}"), format!("plane-id={plane}"),
+    ]);
+    if let Some(rect) = render_rect {
+        gst_args.push(format!("render-rectangle={rect}"));
+    }
+}
+
 pub fn autodetect_display_info() -> (u32, u32, u32, String, Option<String>, crate::drm_kms::EdidInfo) {
     if let Ok(card) = crate::drm_kms::open_display_card() {
         if let Ok((screen_w, screen_h, mode, conn_handle, _, edid_info)) = crate::drm_kms::autodetect_display_mode(&card) {
@@ -156,28 +235,10 @@ pub fn start_persistent_playback(
             "rawvideoparse".to_string(), "format=bgra".to_string(), format!("width={width}"), format!("height={height}"), format!("framerate={}", config::playback::RAW_PIPELINE_FRAMERATE), "!".to_string(),
         ]);
     } else {
-        let (parser, bitstream_caps, decoder) = if norm_codec == "h264" {
-            ("h264parse", "video/x-h264", "v4l2slh264dec")
-        } else {
-            ("h265parse", "video/x-h265", "v4l2slh265dec")
-        };
-        println!("[PLAYBACK STARTUP] Initializing persistent GStreamer pipeline for {norm_codec} ({parser} -> {decoder}) at t=0ms");
-        gst_args.extend([
-            "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(), format!("blocksize={}", config::playback::RAW_PIPELINE_BLOCK_SIZE), "!".to_string(),
-            parser.to_string(), format!("config-interval={}", config::playback::ENCODED_CONFIG_INTERVAL), "!".to_string(),
-            "capssetter".to_string(),
-            format!("caps={bitstream_caps},pixel-aspect-ratio=(fraction){}", config::playback::KMS_DEVICE_PIXEL_ASPECT_RATIO),
-            "replace=false".to_string(), "!".to_string(),
-            decoder.to_string(), "!".to_string(),
-        ]);
+        println!("[PLAYBACK STARTUP] Initializing persistent GStreamer pipeline for {norm_codec} at t=0ms");
+        gst_args.extend(encoded_pipeline_args(norm_codec));
     }
-    gst_args.extend([
-        "kmssink".to_string(), "driver-name=rockchip".to_string(),
-        format!("connector-id={connector}"), format!("plane-id={plane}"),
-    ]);
-    if let Some(rect) = render_rect {
-        gst_args.push(format!("render-rectangle={rect}"));
-    }
+    append_kms_sink_args(&mut gst_args, connector, &plane, render_rect);
     gst_args.extend([
         "force-modesetting=false".to_string(), "can-scale=true".to_string(),
         "sync=false".to_string(), "async=false".to_string(), "skip-vsync=true".to_string(), "max-lateness=0".to_string(),

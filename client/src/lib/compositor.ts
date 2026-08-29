@@ -75,14 +75,16 @@ export function calculateCompositorLayout(
   const panelContentX = Math.floor((display.panelWidth - panelContentWidth) / 2);
   const panelContentY = Math.floor((display.panelHeight - panelContentHeight) / 2);
 
-  const signalContentX = Math.round(panelContentX * display.signalWidth / display.panelWidth);
-  const signalContentY = Math.round(panelContentY * display.signalHeight / display.panelHeight);
   const signalContentWidth = Math.max(1, Math.round(panelContentWidth * display.signalWidth / display.panelWidth));
   const signalContentHeight = Math.max(1, Math.round(panelContentHeight * display.signalHeight / display.panelHeight));
-  const contentX = Math.round(signalContentX * safeTargetWidth / display.signalWidth);
-  const contentY = Math.round(signalContentY * safeTargetHeight / display.signalHeight);
   const contentWidth = Math.max(1, Math.round(signalContentWidth * safeTargetWidth / display.signalWidth));
   const contentHeight = Math.max(1, Math.round(signalContentHeight * safeTargetHeight / display.signalHeight));
+  // Centre after every projection. Deriving the offset independently can put
+  // the rounded content rectangle one pixel outside the canvas.
+  const signalContentX = Math.floor((display.signalWidth - signalContentWidth) / 2);
+  const signalContentY = Math.floor((display.signalHeight - signalContentHeight) / 2);
+  const contentX = Math.floor((safeTargetWidth - contentWidth) / 2);
+  const contentY = Math.floor((safeTargetHeight - contentHeight) / 2);
 
   return {
     sourceWidth: safeSourceWidth,
@@ -117,12 +119,14 @@ export function formatPanelContentRect(layout: CompositorLayout): string {
 }
 
 export function canPassThroughFrame(
-  sourceWidth: number,
-  sourceHeight: number,
-  targetWidth: number,
-  targetHeight: number,
+  layout: CompositorLayout,
 ): boolean {
-  return sourceWidth === targetWidth && sourceHeight === targetHeight;
+  return layout.sourceWidth === layout.targetWidth
+    && layout.sourceHeight === layout.targetHeight
+    && layout.contentX === 0
+    && layout.contentY === 0
+    && layout.contentWidth === layout.targetWidth
+    && layout.contentHeight === layout.targetHeight;
 }
 
 export class VideoFrameCompositor {
@@ -161,14 +165,10 @@ export class VideoFrameCompositor {
   }
 
   compose(frame: VideoFrame): VideoFrame {
-    // A frame already at the configured encoder dimensions needs no scaling,
-    // letterboxing, or pixel copy. Returning it preserves the zero-copy path
-    // for native monitor capture and for codec-aligned synthetic frames.
-    if (canPassThroughFrame(frame.displayWidth, frame.displayHeight, this.targetWidth, this.targetHeight)) {
-      return frame;
-    }
-
     const layout = this.layoutFor(frame.displayWidth, frame.displayHeight);
+    // Matching dimensions are insufficient in Preserve mode: panel
+    // compensation can still require bars inside the encoded canvas.
+    if (canPassThroughFrame(layout)) return frame;
 
     if (this.aspectMode === 'preserve') {
       this.context.fillStyle = '#000000';

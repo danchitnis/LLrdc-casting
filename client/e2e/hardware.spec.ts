@@ -42,6 +42,7 @@ interface ManagementLatencySnapshot {
       average_bitrate_mbps: number;
       peak_bitrate_mbps: number;
       estimated_latency: EstimatedLatencySnapshot | null;
+      estimated_latency_age_ms: number | null;
       latency_samples: Array<EstimatedLatencySnapshot & { elapsed_sec: number }>;
     };
     health: {
@@ -115,9 +116,45 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
     5,
   );
   expect(managementLatencySamples.length).toBeGreaterThan(0);
+  expect(activeStream.estimated_latency_age_ms).not.toBeNull();
+  expect(activeStream.estimated_latency_age_ms ?? Number.POSITIVE_INFINITY).toBeLessThan(3_000);
   const graphedLatency = managementLatencySamples.at(-1);
   expect(graphedLatency?.total_ms).toBeGreaterThan(0);
   expect(graphedLatency?.total_ms).toBeLessThan(5_000);
+  if (testCase.name === 'hevc-1080p' && cycle === 1) {
+    const initialLatencySampleCount = managementLatencySamples.length;
+    const portal = await page.context().newPage();
+    await portal.goto(`https://${process.env.E2E_BOARD_IP}:9090/`, { waitUntil: 'domcontentloaded' });
+    await portal.bringToFront();
+    // Playwright disables normal background-page lifecycle behavior, so both
+    // tabs otherwise report `visible`. Drive the same visibility transition a
+    // real Chrome tab switch emits and assert the sender remains measurable.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await expect.poll(() => page.evaluate(() => document.visibilityState), { timeout: 5_000 }).toBe('hidden');
+    await expect.poll(() => portal.evaluate(() => document.visibilityState), { timeout: 5_000 }).toBe('visible');
+    await expect(portal.locator('#metrics')).not.toContainText('Measuring…');
+    await portal.waitForTimeout(35_000);
+    const sustainedResponse = await portal.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
+    expect(sustainedResponse.ok()).toBe(true);
+    const sustainedSnapshot = await sustainedResponse.json() as ManagementLatencySnapshot;
+    const sustainedStream = sustainedSnapshot.management.active_stream;
+    if (!sustainedStream) throw new Error('Active stream disappeared during sustained latency sampling');
+    expect(sustainedStream.latency_samples.length).toBeGreaterThanOrEqual(initialLatencySampleCount + 20);
+    expect(sustainedStream.estimated_latency_age_ms).not.toBeNull();
+    expect(sustainedStream.estimated_latency_age_ms ?? Number.POSITIVE_INFINITY).toBeLessThan(3_000);
+    await expect(portal.locator('#metrics')).not.toContainText('Measuring…');
+    await expect(portal.locator('#latencyFreshness')).toHaveText('Latency samples are current');
+    await portal.close();
+    await page.bringToFront();
+    await page.evaluate(() => {
+      Reflect.deleteProperty(document, 'visibilityState');
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await expect.poll(() => page.evaluate(() => document.visibilityState), { timeout: 5_000 }).toBe('visible');
+  }
   await expect.poll(async () => {
     const response = await page.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
     if (!response.ok()) return null;

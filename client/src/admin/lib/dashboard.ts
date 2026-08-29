@@ -103,6 +103,7 @@ interface ActiveStream {
     transport_queue_ms: number;
     decode_display_ms: number;
   } | null;
+  estimated_latency_age_ms: number | null;
   samples: MetricSample[];
   latency_samples: LatencyMetricSample[];
 }
@@ -207,6 +208,7 @@ const stopButton = element<HTMLButtonElement>('stop');
 const resetChartButton = element<HTMLButtonElement>('resetChart');
 const metrics = element<HTMLDivElement>('metrics');
 const sender = element<HTMLParagraphElement>('sender');
+const latencyFreshness = element<HTMLParagraphElement>('latencyFreshness');
 const connections = element<HTMLTableSectionElement>('connections');
 const historyBody = element<HTMLTableSectionElement>('history');
 const health = element<HTMLDivElement>('health');
@@ -552,6 +554,14 @@ function render(snapshot: Snapshot): void {
 
   if (active) {
     const estimatedLatency = active.estimated_latency;
+    const latencyAgeMs = active.estimated_latency_age_ms;
+    const latencyIsStale = estimatedLatency !== null && latencyAgeMs !== null && latencyAgeMs > 3_000;
+    const latencyValue = estimatedLatency
+      ? `~${Math.round(estimatedLatency.total_ms)} ms${latencyIsStale ? ` (last sample ${Math.max(3, Math.floor(latencyAgeMs / 1_000))}s ago)` : ''}`
+      : 'Measuring…';
+    latencyFreshness.textContent = latencyIsStale
+      ? `Sampling interrupted · last actual latency sample ${Math.max(3, Math.floor(latencyAgeMs / 1_000))}s ago`
+      : (estimatedLatency ? 'Latency samples are current' : 'Waiting for the first latency sample');
     replaceMetrics(metrics, [
       ['Codec', active.config.codec],
       ['Resolution', active.config.encoded_resolution || active.config.resolution],
@@ -561,7 +571,7 @@ function render(snapshot: Snapshot): void {
       ['Peak payload throughput (~1s)', `${active.peak_bitrate_mbps.toFixed(2)} Mbps`],
       ['Access units submitted', active.frames.toLocaleString()],
       ['Encoded payload submitted', formatBytes(active.bytes)],
-      ['Estimated total latency', estimatedLatency ? `~${Math.round(estimatedLatency.total_ms)} ms` : 'Measuring…'],
+      ['Estimated total latency', latencyValue],
       ['Encoding latency', estimatedLatency ? `${Math.round(estimatedLatency.encode_ms)} ms` : 'Measuring…'],
       ['Transport/receiver queue', estimatedLatency ? `${Math.round(estimatedLatency.transport_queue_ms)} ms` : 'Measuring…'],
       ['Decode/display estimate', estimatedLatency ? `~${Math.round(estimatedLatency.decode_display_ms)} ms` : 'Measuring…'],
@@ -595,6 +605,7 @@ function render(snapshot: Snapshot): void {
       ['Decode/display estimate', '--'],
     ]);
     sender.textContent = 'No active sender';
+    latencyFreshness.textContent = 'Latency is available while streaming';
     points = [];
     latencyPoints = [];
     chartSessionId = null;

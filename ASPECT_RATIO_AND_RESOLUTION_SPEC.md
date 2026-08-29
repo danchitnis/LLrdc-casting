@@ -304,10 +304,10 @@ The source is now correctly fitted against the physical panel.
 The physical-panel rectangle is mapped to the negotiated HDMI signal:
 
 ```text
-signal_content_x      = round(panel_content_x * Wg / Wp)
-signal_content_y      = round(panel_content_y * Hg / Hp)
 signal_content_width  = round(panel_content_width * Wg / Wp)
 signal_content_height = round(panel_content_height * Hg / Hp)
+signal_content_x      = floor((Wg - signal_content_width) / 2)
+signal_content_y      = floor((Hg - signal_content_height) / 2)
 ```
 
 This models the monitor's conversion from the HDMI signal to the physical
@@ -316,10 +316,10 @@ panel.
 ### Step 4: Project the Signal Layout to the Encoded Frame
 
 ```text
-encoded_content_x      = round(signal_content_x * We / Wg)
-encoded_content_y      = round(signal_content_y * He / Hg)
 encoded_content_width  = round(signal_content_width * We / Wg)
 encoded_content_height = round(signal_content_height * He / Hg)
+encoded_content_x      = floor((We - encoded_content_width) / 2)
+encoded_content_y      = floor((He - encoded_content_height) / 2)
 ```
 
 The source is drawn into this encoded rectangle. The encoded rectangle may be
@@ -342,9 +342,9 @@ Mode:                preserve
 The compositor calculates approximately:
 
 ```text
-Physical panel content: approximately <249,0,3713,2400>
-HDMI signal content:    approximately <249,0,3713,2160>
-Encoded content:        approximately <112,0,1671,1080>
+Physical panel content: approximately <63,0,3713,2400>
+HDMI signal content:    approximately <63,0,3713,2160>
+Encoded content:        approximately <31,0,1857,1080>
 ```
 
 The one-pixel difference between implementations or telemetry displays is
@@ -465,7 +465,7 @@ For a real monitor capture, the log should report values similar to:
 ```text
 [SOURCE] Capture dimensions: 3456x2234 (monitor)
 [DISPLAY] HDMI signal=3840x2160, panel=3840x2400
-[COMPOSITOR] preserve: ... encoded=<32,0,1857,1080>, signal=<63,0,3713,2160>, panel=<63,0,3713,2400>
+[COMPOSITOR] preserve: ... encoded=<31,0,1857,1080>, signal=<63,0,3713,2160>, panel=<63,0,3713,2400>
 ```
 
 Stretch mode should report full rectangles:

@@ -8,7 +8,6 @@ use tokio::sync::broadcast;
 const MAX_EVENTS: usize = 2_000;
 const MAX_HISTORY: usize = 10_000;
 const MAX_SAMPLES: usize = 300;
-const ESTIMATED_LATENCY_MAX_AGE: Duration = Duration::from_secs(3);
 const ESTIMATED_LATENCY_MAX_MS: f64 = 5_000.0;
 
 #[derive(Clone)]
@@ -145,6 +144,7 @@ pub struct ActiveStreamSnapshot {
     pub sequence_gaps: u64,
     pub server_latency_ms: f64,
     pub estimated_latency: Option<EstimatedLatencySnapshot>,
+    pub estimated_latency_age_ms: Option<f64>,
     pub samples: Vec<MetricSample>,
     pub latency_samples: Vec<LatencyMetricSample>,
 }
@@ -456,10 +456,10 @@ impl ManagementState {
             let bytes_1s: usize = stream.recent_bytes.iter().filter(|(t, _)| *t >= window_start).map(|(_, b)| *b).sum();
             let frames_1s = stream.recent_frames.iter().filter(|t| **t >= window_start).count();
             let avg = if stream.started_at.elapsed().as_secs_f64() > 0.0 { stream.bytes as f64 * 8.0 / stream.started_at.elapsed().as_secs_f64() / 1_000_000.0 } else { 0.0 };
-            let estimated_latency = stream.estimated_latency.as_ref()
-                .filter(|(received_at, _)| now.duration_since(*received_at) <= ESTIMATED_LATENCY_MAX_AGE)
-                .map(|(_, sample)| sample.clone());
-            ActiveStreamSnapshot { id: stream.id, sender: stream.sender.clone(), config: stream.config.clone(), started_at_sec: stream.started_at.duration_since(inner.started).as_secs_f64(), duration_sec: stream.started_at.elapsed().as_secs_f64(), frames: stream.frames, bytes: stream.bytes, measured_bitrate_mbps: bytes_1s as f64 * 8.0 / 1_000_000.0, measured_fps: frames_1s as f64, average_bitrate_mbps: avg, peak_bitrate_mbps: stream.peak_bitrate_mbps, sequence_gaps: stream.sequence_gaps, server_latency_ms: if stream.latency_count > 0 { stream.latency_total_ms / stream.latency_count as f64 } else { 0.0 }, estimated_latency, samples: stream.samples.iter().cloned().collect(), latency_samples: stream.estimated_latency_samples.iter().cloned().collect() }
+            let estimated_latency = stream.estimated_latency.as_ref().map(|(_, sample)| sample.clone());
+            let estimated_latency_age_ms = stream.estimated_latency.as_ref()
+                .map(|(received_at, _)| now.duration_since(*received_at).as_secs_f64() * 1_000.0);
+            ActiveStreamSnapshot { id: stream.id, sender: stream.sender.clone(), config: stream.config.clone(), started_at_sec: stream.started_at.duration_since(inner.started).as_secs_f64(), duration_sec: stream.started_at.elapsed().as_secs_f64(), frames: stream.frames, bytes: stream.bytes, measured_bitrate_mbps: bytes_1s as f64 * 8.0 / 1_000_000.0, measured_fps: frames_1s as f64, average_bitrate_mbps: avg, peak_bitrate_mbps: stream.peak_bitrate_mbps, sequence_gaps: stream.sequence_gaps, server_latency_ms: if stream.latency_count > 0 { stream.latency_total_ms / stream.latency_count as f64 } else { 0.0 }, estimated_latency, estimated_latency_age_ms, samples: stream.samples.iter().cloned().collect(), latency_samples: stream.estimated_latency_samples.iter().cloned().collect() }
         });
         Snapshot { server_uptime_sec: inner.started.elapsed().as_secs_f64(), state: if active_stream.is_some() { "STREAMING".into() } else { "IDLE".into() }, active_stream, connections: inner.connections.values().cloned().collect(), history: inner.history.iter().cloned().collect(), events: inner.events.iter().cloned().collect(), health: inner.health.clone() }
     }
@@ -597,6 +597,7 @@ mod tests {
         assert!(!state.record_estimated_latency("other", sample.clone()));
         assert!(state.record_estimated_latency("sender", sample.clone()));
         let active = state.snapshot().active_stream.unwrap();
+        assert!(active.estimated_latency_age_ms.is_some());
         assert_eq!(active.estimated_latency.unwrap().seq, 7);
         assert_eq!(active.latency_samples.len(), 1);
         assert_eq!(active.latency_samples[0].total_ms, 29.5);
@@ -622,6 +623,26 @@ mod tests {
         let active = state.snapshot().active_stream.unwrap();
         assert!(active.estimated_latency.is_none());
         assert!(active.latency_samples.is_empty());
+    }
+
+    #[test]
+    fn estimated_latency_is_retained_and_aged_after_three_seconds() {
+        let state = ManagementState::new();
+        state.hello(client("sender"));
+        state.start(config(), Some(client("sender")));
+        state.record_frame(1, 1_000, 2.0);
+        assert!(state.record_estimated_latency("sender", EstimatedLatencySnapshot {
+            seq: 1, total_ms: 29.5, encode_ms: 7.0,
+            transport_queue_ms: 5.8, decode_display_ms: 16.7,
+        }));
+        if let Ok(mut inner) = state.inner.lock() {
+            if let Some((received_at, _)) = inner.stream.as_mut().and_then(|stream| stream.estimated_latency.as_mut()) {
+                *received_at = Instant::now() - Duration::from_secs(4);
+            }
+        }
+        let active = state.snapshot().active_stream.unwrap();
+        assert!(active.estimated_latency.is_some());
+        assert!(active.estimated_latency_age_ms.is_some_and(|age| age >= 4_000.0));
     }
 
     #[test]

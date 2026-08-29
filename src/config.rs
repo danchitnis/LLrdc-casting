@@ -384,7 +384,6 @@ pub mod transport {
 }
 
 pub mod playback {
-    pub const KMS_DEVICE_PIXEL_ASPECT_RATIO: &str = "15/16";
     pub const DEFAULT_DISPLAY_CONNECTOR_ID: &str = "54";
     pub const RAW_PIPELINE_BLOCK_SIZE: usize = 64 * 1024;
     pub const RAW_PIPELINE_FRAMERATE: &str = "1/1";

@@ -153,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let sender_liveness_timeout = std::time::Duration::from_secs(sender_liveness_timeout_sec);
     let mut media_stall_reported = false;
+    let mut latency_ack_cadence = playback::LatencyAckCadence::default();
     let mut health_interval = tokio::time::interval(std::time::Duration::from_secs(2));
     health_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -172,8 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Some(submission) = playback_submission_rx.recv() => {
                 if streaming_active.load(Ordering::Relaxed) {
-                    let sample_interval = active_fps.load(Ordering::Relaxed).max(1);
-                    if submission.seq == 1 || submission.seq % sample_interval == 0 {
+                    if latency_ack_cadence.should_emit(std::time::Instant::now()) {
                         control_channel.send_telemetry(control::TelemetryMessage::LatencySample {
                             seq: submission.seq,
                             capture_time_ms: submission.capture_time_ms,
@@ -190,6 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         management.stop("user_stop");
                         media_stall_reported = false;
                         streaming_active.store(false, Ordering::Relaxed);
+                        latency_ack_cadence.reset();
                         if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                         if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
                         if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
@@ -225,6 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         management.stop("admin_stop");
                         media_stall_reported = false;
                         streaming_active.store(false, Ordering::Relaxed);
+                        latency_ack_cadence.reset();
                         if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                         if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
                         if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
@@ -263,6 +265,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         println!("[CONTROL WS] Received START command: codec={:?}, res={:?}, fps={:?}, bitrate={:?}, latency_mode={:?}, aspect_mode={:?}", req_codec, resolution, fps, bitrate_mbps, latency_mode, aspect_mode);
                         streaming_active.store(true, Ordering::Relaxed);
+                        latency_ack_cadence.reset();
                         media_stall_reported = false;
                         let res_str = resolution.unwrap_or_else(|| config::telemetry::DEFAULT_ACTIVE_RESOLUTION.to_string());
                         let stream_fps = fps.unwrap_or(config::telemetry::DEFAULT_ACTIVE_FPS);
@@ -384,6 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("[PLAYBACK] Received stop signal; restoring HDMI IP dashboard...");
                             management.stop("user_stop");
                             streaming_active.store(false, Ordering::Relaxed);
+                            latency_ack_cadence.reset();
                             if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_aspect_mode.lock() { l.clear(); }
@@ -427,6 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // otherwise a dashboard frame can block the stream handoff.
                         if frame.seq <= 1 {
                             streaming_active.store(true, Ordering::Relaxed);
+                            latency_ack_cadence.reset();
                         }
 
                         // The client has already composed the encoded frame, including any
@@ -543,6 +548,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("[PLAYBACK] Stream idle timeout; restoring HDMI IP dashboard...");
                             management.stop("idle_timeout");
                             streaming_active.store(false, Ordering::Relaxed);
+                            latency_ack_cadence.reset();
                             media_stall_reported = false;
                             if let Ok(mut l) = active_capture_resolution.lock() { l.clear(); }
                             if let Ok(mut l) = active_encoded_resolution.lock() { l.clear(); }

@@ -11,8 +11,9 @@ export interface LatencyComponents {
 }
 
 const MAX_TRACKED_FRAMES = 64;
-const MAX_SAMPLE_AGE_MS = 5_000;
+const MAX_SAMPLE_AGE_MS = 30_000;
 const MAX_ENCODE_DURATION_MS = 2_000;
+const MIN_REPORT_INTERVAL_MS = 1_000;
 const MIN_DISPLAY_FPS = 1;
 const MAX_DISPLAY_FPS = 240;
 
@@ -106,5 +107,62 @@ export class LatencySmoother {
 
   reset(): void {
     this.value = null;
+  }
+}
+
+export interface PendingLatencySample {
+  seq: number;
+  captureTimeMs: number;
+  encodeDurationMs: number;
+  receivedAtMs: number;
+}
+
+export interface PreparedLatencySample {
+  seq: number;
+  components: LatencyComponents;
+  rttAgeMs: number;
+}
+
+/** Coordinates asynchronous playback acknowledgements and RTT pongs. */
+export class LatencySampleCoordinator {
+  private pending: PendingLatencySample | null = null;
+  private rtt: { valueMs: number; sampledAtMs: number } | null = null;
+  private lastReportAtMs: number | null = null;
+
+  acknowledge(sample: PendingLatencySample): void {
+    if (sample.seq > 0 && [sample.captureTimeMs, sample.encodeDurationMs, sample.receivedAtMs].every(Number.isFinite)) {
+      this.pending = sample;
+    }
+  }
+
+  recordRtt(valueMs: number, sampledAtMs: number): void {
+    if (Number.isFinite(valueMs) && valueMs >= 0 && Number.isFinite(sampledAtMs)) {
+      this.rtt = { valueMs, sampledAtMs };
+    }
+  }
+
+  prepare(nowMs: number, displayFps: number): PreparedLatencySample | null {
+    if (!this.pending || !this.rtt || !Number.isFinite(nowMs)) return null;
+    const rttAgeMs = nowMs - this.rtt.sampledAtMs;
+    if (rttAgeMs < 0) return null;
+    if (this.lastReportAtMs !== null && nowMs - this.lastReportAtMs < MIN_REPORT_INTERVAL_MS) return null;
+    const pending = this.pending;
+    const components = calculateLatencyComponents(
+      pending.captureTimeMs,
+      pending.encodeDurationMs,
+      pending.receivedAtMs,
+      this.rtt.valueMs,
+      displayFps,
+    );
+    this.pending = null;
+    if (!components) return null;
+    this.lastReportAtMs = nowMs;
+    return { seq: pending.seq, components, rttAgeMs };
+  }
+
+  reset(): void {
+    this.pending = null;
+    this.rtt = null;
+    this.lastReportAtMs = null;
   }
 }

@@ -17,8 +17,8 @@ import {
 } from './guardrails';
 import { createSyntheticScreenStream } from './synthetic';
 import {
-  calculateLatencyComponents,
   EncoderTimingTracker,
+  LatencySampleCoordinator,
   LatencySmoother,
   monotonicEpochMs,
   type EncoderTiming,
@@ -138,9 +138,9 @@ let nalCache: NalCache = createNalCache();
 let pingTimer: number | null = null;
 let pingSequence = 0;
 let pendingPing: { id: number; sentAt: number } | null = null;
-let currentRttMs: number | null = null;
 let currentDisplayFps: number = STREAM_DEFAULTS.fps;
 const latencySmoother = new LatencySmoother();
+const latencyCoordinator = new LatencySampleCoordinator();
 let pingVisibilityHandlerInstalled = false;
 type DiagnosticLevel = 'info' | 'warn' | 'error';
 
@@ -180,33 +180,39 @@ function updateLatencyDisplay(value: number | null, detail = 'Available while st
 
 function resetLatencyMetric(measuring = false): void {
   latencySmoother.reset();
+  latencyCoordinator.reset();
   updateLatencyDisplay(null, measuring ? 'Measuring…' : 'Available while streaming');
 }
 
-function handleLatencySample(message: ServerStatusMessage): void {
-  if (!isStreaming || document.visibilityState !== 'visible' || currentRttMs === null) return;
-  if (message.seq === undefined || message.capture_time_ms === undefined || message.encode_duration_ms === undefined) return;
-  const sample = calculateLatencyComponents(
-    message.capture_time_ms,
-    message.encode_duration_ms,
-    monotonicEpochMs(),
-    currentRttMs,
-    currentDisplayFps,
-  );
-  if (!sample) return;
-  const smoothed = latencySmoother.update(sample);
+function reportPendingLatencySample(): void {
+  if (!isStreaming || !controlIsConnected()) return;
+  const prepared = latencyCoordinator.prepare(monotonicEpochMs(), currentDisplayFps);
+  if (!prepared) return;
+  const smoothed = latencySmoother.update(prepared.components);
   updateLatencyDisplay(
     smoothed.totalMs,
     `Encode ${Math.round(smoothed.encodeMs)} · Transport/queue ${Math.round(smoothed.transportQueueMs)} · Decode/display ~${Math.round(smoothed.decodeDisplayMs)} ms`,
   );
   void sendControlMessage({
     type: 'latency_report',
-    seq: message.seq,
+    seq: prepared.seq,
     total_ms: smoothed.totalMs,
     encode_ms: smoothed.encodeMs,
     transport_queue_ms: smoothed.transportQueueMs,
     decode_display_ms: smoothed.decodeDisplayMs,
   }).catch(() => {});
+}
+
+function handleLatencySample(message: ServerStatusMessage): void {
+  if (!isStreaming || !controlIsConnected()) return;
+  if (message.seq === undefined || message.capture_time_ms === undefined || message.encode_duration_ms === undefined) return;
+  latencyCoordinator.acknowledge({
+    seq: message.seq,
+    captureTimeMs: message.capture_time_ms,
+    encodeDurationMs: message.encode_duration_ms,
+    receivedAtMs: monotonicEpochMs(),
+  });
+  reportPendingLatencySample();
 }
 
 function friendlyDiagnostic(message: string): string {
@@ -275,7 +281,7 @@ function stopPingSampling(resetMetric = true): void {
     pingTimer = null;
   }
   pendingPing = null;
-  if (resetMetric) currentRttMs = null;
+  if (resetMetric) latencyCoordinator.reset();
 }
 
 async function sendPing(): Promise<void> {
@@ -295,7 +301,6 @@ async function sendPing(): Promise<void> {
   if (pendingPing) {
     if (performance.now() - pendingPing.sentAt <= TRANSPORT_CONFIG.PING_RESPONSE_TIMEOUT_MS) return;
     pendingPing = null;
-    currentRttMs = null;
   }
   const id = pingSequence++;
   pendingPing = { id, sentAt: performance.now() };
@@ -319,7 +324,8 @@ function handlePong(id: number | undefined): void {
   if (!pendingPing || (id !== undefined && id !== pendingPing.id)) return;
   const elapsed = performance.now() - pendingPing.sentAt;
   pendingPing = null;
-  currentRttMs = elapsed;
+  latencyCoordinator.recordRtt(elapsed, monotonicEpochMs());
+  reportPendingLatencySample();
 }
 
 function markControlDisconnected(): void {
@@ -615,9 +621,10 @@ export function initPairing(): void {
         startPingSampling();
       } else {
         // Keep the interval alive while hidden so the receiver can distinguish
-        // a background-tab media pause from a disconnected sender.
+        // a background-tab media pause from a disconnected sender. Preserve
+        // the last foreground RTT so playback acknowledgements can continue
+        // producing portal samples while the user views the management tab.
         pendingPing = null;
-        resetLatencyMetric(isStreaming);
         if (controlIsConnected() && pingTimer === null) startPingSampling();
       }
     });
