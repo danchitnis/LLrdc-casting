@@ -38,11 +38,13 @@ interface LatencyMetricSample {
   elapsed_sec: number;
   total_ms: number;
   encode_ms: number;
-  transport_queue_ms: number;
+  sender_queue_ms: number;
+  delivery_ms: number;
+  receiver_queue_ms: number;
   decode_display_ms: number;
 }
 
-type LatencySeriesKey = 'total' | 'encode' | 'transport' | 'decode';
+type LatencySeriesKey = 'total' | 'encode' | 'sender' | 'delivery' | 'receiver' | 'decode';
 
 interface ChartSeries<T> {
   key: string;
@@ -100,8 +102,19 @@ interface ActiveStream {
     seq: number;
     total_ms: number;
     encode_ms: number;
+    sender_queue_ms: number;
+    delivery_ms: number;
+    receiver_queue_ms: number;
     transport_queue_ms: number;
     decode_display_ms: number;
+    access_unit_bytes: number;
+    media_write_blocked_ms: number;
+    clock_uncertainty_ms: number;
+    clock_sync_age_ms: number;
+    configured_bitrate_mbps: number;
+    adaptive_bitrate_mbps: number;
+    dropped_input_frames: number;
+    effective_fps: number;
   } | null;
   estimated_latency_age_ms: number | null;
   samples: MetricSample[];
@@ -193,7 +206,9 @@ const selectedLatencySeries = new Set<LatencySeriesKey>(['total']);
 const latencySeries: ReadonlyArray<ChartSeries<LatencyMetricSample> & { key: LatencySeriesKey }> = [
   { key: 'total', color: '#ffc857', valueFor: (point) => point.total_ms },
   { key: 'encode', color: '#45c2ff', valueFor: (point) => point.encode_ms },
-  { key: 'transport', color: '#35d49a', valueFor: (point) => point.transport_queue_ms },
+  { key: 'sender', color: '#35d49a', valueFor: (point) => point.sender_queue_ms },
+  { key: 'delivery', color: '#a78bfa', valueFor: (point) => point.delivery_ms },
+  { key: 'receiver', color: '#fb923c', valueFor: (point) => point.receiver_queue_ms },
   { key: 'decode', color: '#ff7eb6', valueFor: (point) => point.decode_display_ms },
 ];
 
@@ -207,6 +222,9 @@ const state = element<HTMLSpanElement>('state');
 const stopButton = element<HTMLButtonElement>('stop');
 const resetChartButton = element<HTMLButtonElement>('resetChart');
 const metrics = element<HTMLDivElement>('metrics');
+const latencyMetrics = element<HTMLDivElement>('latencyMetrics');
+const congestionMetrics = element<HTMLDivElement>('congestionMetrics');
+const measurementMetrics = element<HTMLDivElement>('measurementMetrics');
 const sender = element<HTMLParagraphElement>('sender');
 const latencyFreshness = element<HTMLParagraphElement>('latencyFreshness');
 const connections = element<HTMLTableSectionElement>('connections');
@@ -239,6 +257,7 @@ const settingsTab = element<HTMLDivElement>('settingsTab');
 const overviewTabButton = element<HTMLButtonElement>('overviewTabButton');
 const logsTabButton = element<HTMLButtonElement>('logsTabButton');
 const settingsTabButton = element<HTMLButtonElement>('settingsTabButton');
+const metricTooltip = element<HTMLDivElement>('metricTooltip');
 const settingInputs = {
   port: element<HTMLInputElement>('settingPort'),
   webtransport_port: element<HTMLInputElement>('settingWebtransportPort'),
@@ -296,13 +315,79 @@ function metric(label: string, value: string | number): HTMLDivElement {
   const valueNode = document.createElement('span');
   valueNode.className = 'value';
   valueNode.textContent = String(value);
+  valueNode.dataset.fullValue = String(value);
   wrapper.append(labelNode, valueNode);
   return wrapper;
 }
 
 function replaceMetrics(container: HTMLElement, values: ReadonlyArray<readonly [string, string | number]>): void {
-  container.replaceChildren(...values.map(([label, value]) => metric(label, value)));
+  const existing = [...container.querySelectorAll<HTMLElement>(':scope > .metric')];
+  const canUpdate = existing.length === values.length && existing.every((item, index) =>
+    item.querySelector('.label')?.textContent === values[index][0]
+  );
+  if (!canUpdate) {
+    if (tooltipTarget && container.contains(tooltipTarget)) hideMetricTooltip();
+    container.replaceChildren(...values.map(([label, value]) => metric(label, value)));
+    return;
+  }
+  existing.forEach((item, index) => {
+    const valueNode = item.querySelector<HTMLElement>('.value');
+    if (!valueNode) return;
+    const nextValue = String(values[index][1]);
+    valueNode.textContent = nextValue;
+    valueNode.dataset.fullValue = nextValue;
+    if (tooltipTarget === valueNode) metricTooltip.textContent = nextValue;
+  });
 }
+
+let tooltipTarget: HTMLElement | null = null;
+let tooltipDismissTimer: number | null = null;
+
+function hideMetricTooltip(): void {
+  if (tooltipDismissTimer !== null) window.clearTimeout(tooltipDismissTimer);
+  tooltipDismissTimer = null;
+  tooltipTarget?.removeAttribute('aria-describedby');
+  tooltipTarget?.removeAttribute('data-overflowing');
+  tooltipTarget = null;
+  metricTooltip.hidden = true;
+}
+
+function showMetricTooltip(target: HTMLElement, dismissAfterMs?: number): void {
+  const overflowing = target.scrollWidth > target.clientWidth + 1;
+  target.dataset.overflowing = String(overflowing);
+  if (!overflowing) {
+    if (tooltipTarget === target) hideMetricTooltip();
+    return;
+  }
+  if (tooltipDismissTimer !== null) window.clearTimeout(tooltipDismissTimer);
+  tooltipTarget?.removeAttribute('aria-describedby');
+  tooltipTarget = target;
+  target.setAttribute('aria-describedby', 'metricTooltip');
+  metricTooltip.textContent = target.dataset.fullValue || target.textContent || '';
+  metricTooltip.hidden = false;
+  const targetRect = target.getBoundingClientRect();
+  const tooltipRect = metricTooltip.getBoundingClientRect();
+  const left = Math.min(window.innerWidth - tooltipRect.width - 12, Math.max(12, targetRect.left));
+  const above = targetRect.top - tooltipRect.height - 8;
+  const top = above >= 8 ? above : Math.max(8, Math.min(window.innerHeight - tooltipRect.height - 8, targetRect.bottom + 8));
+  metricTooltip.style.left = `${left}px`;
+  metricTooltip.style.top = `${top}px`;
+  if (dismissAfterMs !== undefined) tooltipDismissTimer = window.setTimeout(hideMetricTooltip, dismissAfterMs);
+}
+
+document.addEventListener('pointerover', (event) => {
+  const target = event.target instanceof Element ? event.target.closest<HTMLElement>('.value') : null;
+  if (target) showMetricTooltip(target);
+});
+document.addEventListener('pointerout', (event) => {
+  if (tooltipTarget && event.target === tooltipTarget) hideMetricTooltip();
+});
+document.addEventListener('click', (event) => {
+  const target = event.target instanceof Element ? event.target.closest<HTMLElement>('.value') : null;
+  if (target) showMetricTooltip(target, 3_000);
+});
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') hideMetricTooltip(); });
+window.addEventListener('resize', hideMetricTooltip);
 
 function chartScale(value: number): number {
   if (value <= 0) return 1;
@@ -571,12 +656,26 @@ function render(snapshot: Snapshot): void {
       ['Peak payload throughput (~1s)', `${active.peak_bitrate_mbps.toFixed(2)} Mbps`],
       ['Access units submitted', active.frames.toLocaleString()],
       ['Encoded payload submitted', formatBytes(active.bytes)],
+    ]);
+    replaceMetrics(latencyMetrics, [
       ['Estimated total latency', latencyValue],
       ['Encoding latency', estimatedLatency ? `${Math.round(estimatedLatency.encode_ms)} ms` : 'Measuring…'],
-      ['Transport/receiver queue', estimatedLatency ? `${Math.round(estimatedLatency.transport_queue_ms)} ms` : 'Measuring…'],
+      ['Sender queue', estimatedLatency ? `${Math.round(estimatedLatency.sender_queue_ms)} ms` : 'Measuring…'],
+      ['Network delivery', estimatedLatency ? `${Math.round(estimatedLatency.delivery_ms)} ms` : 'Measuring…'],
+      ['Receiver queue/input', estimatedLatency ? `${Math.round(estimatedLatency.receiver_queue_ms)} ms` : 'Measuring…'],
       ['Decode/display estimate', estimatedLatency ? `~${Math.round(estimatedLatency.decode_display_ms)} ms` : 'Measuring…'],
+    ]);
+    replaceMetrics(congestionMetrics, [
+      ['Media write backpressure', estimatedLatency ? `${estimatedLatency.media_write_blocked_ms.toFixed(1)} ms` : 'Measuring…'],
+      ['Adaptive bitrate', estimatedLatency ? `${estimatedLatency.adaptive_bitrate_mbps.toFixed(1)} / ${estimatedLatency.configured_bitrate_mbps.toFixed(1)} Mbps ceiling` : 'Measuring…'],
+      ['Dropped raw input frames', estimatedLatency ? estimatedLatency.dropped_input_frames.toLocaleString() : 'Measuring…'],
+      ['Effective sender FPS', estimatedLatency ? estimatedLatency.effective_fps.toFixed(1) : 'Measuring…'],
+    ]);
+    replaceMetrics(measurementMetrics, [
+      ['Access-unit size', estimatedLatency ? formatBytes(estimatedLatency.access_unit_bytes) : 'Measuring…'],
       ['Avg first packet → playback queue', `${active.server_latency_ms.toFixed(1)} ms`],
       ['Missing sequence IDs', active.sequence_gaps],
+      ['Clock confidence', estimatedLatency ? `±${estimatedLatency.clock_uncertainty_ms.toFixed(1)} ms · sync ${Math.round(estimatedLatency.clock_sync_age_ms)} ms ago` : 'Measuring…'],
     ]);
     const activeSender = active.sender;
     sender.textContent = activeSender
@@ -599,10 +698,26 @@ function render(snapshot: Snapshot): void {
   } else {
     replaceMetrics(metrics, [
       ['Stream', 'Idle'],
+    ]);
+    replaceMetrics(latencyMetrics, [
       ['Estimated total latency', '--'],
       ['Encoding latency', '--'],
-      ['Transport/receiver queue', '--'],
+      ['Sender queue', '--'],
+      ['Network delivery', '--'],
+      ['Receiver queue/input', '--'],
       ['Decode/display estimate', '--'],
+    ]);
+    replaceMetrics(congestionMetrics, [
+      ['Media write backpressure', '--'],
+      ['Adaptive bitrate', '--'],
+      ['Dropped raw input frames', '--'],
+      ['Effective sender FPS', '--'],
+    ]);
+    replaceMetrics(measurementMetrics, [
+      ['Access-unit size', '--'],
+      ['Avg first packet → playback queue', '--'],
+      ['Missing sequence IDs', '--'],
+      ['Clock confidence', '--'],
     ]);
     sender.textContent = 'No active sender';
     latencyFreshness.textContent = 'Latency is available while streaming';

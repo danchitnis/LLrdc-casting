@@ -202,7 +202,7 @@ mod tests {
         });
 
         route_control_payload(
-            br#"{"type":"ping","id":42}"#,
+            br#"{"type":"ping","id":42,"client_send_ms":1725000000000.0}"#,
             &cmd_tx,
             &outbound_tx,
             "test",
@@ -215,7 +215,7 @@ mod tests {
         assert!(management.touch_connection("test"));
         let payload = outbound_rx.recv().await.expect("targeted pong");
         let pong: TelemetryMessage = serde_json::from_slice(&payload).expect("valid pong");
-        assert!(matches!(pong, TelemetryMessage::Pong { id: Some(42) }));
+        assert!(matches!(pong, TelemetryMessage::Pong { id: Some(42), server_receive_ms: Some(_), server_send_ms: Some(_) }));
     }
 
     #[tokio::test]
@@ -229,7 +229,7 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
         let payload = outbound_rx.recv().await.expect("legacy pong");
         let pong: TelemetryMessage = serde_json::from_slice(&payload).expect("valid pong");
-        assert!(matches!(pong, TelemetryMessage::Pong { id: None }));
+        assert!(matches!(pong, TelemetryMessage::Pong { id: None, .. }));
     }
 
     #[tokio::test]
@@ -291,7 +291,7 @@ mod tests {
         management.record_frame(3, 1_000, 2.0);
 
         route_control_payload(
-            br#"{"type":"latency_report","seq":3,"total_ms":29.5,"encode_ms":7.0,"transport_queue_ms":5.8,"decode_display_ms":16.7}"#,
+            br#"{"type":"latency_report","seq":3,"total_ms":29.5,"encode_ms":7.0,"sender_queue_ms":1.0,"delivery_ms":2.0,"receiver_queue_ms":2.8,"transport_queue_ms":5.8,"decode_display_ms":16.7,"access_unit_bytes":1000,"media_write_blocked_ms":1.0,"clock_uncertainty_ms":0.5,"clock_sync_age_ms":100.0,"configured_bitrate_mbps":8.0,"adaptive_bitrate_mbps":6.4,"dropped_input_frames":2,"effective_fps":29.0}"#,
             &cmd_tx, &outbound_tx, "wt-7", "127.0.0.1", &management,
         ).await;
 
@@ -416,6 +416,8 @@ async fn handle_connection(
         first_packet_at: std::time::Instant::now(),
         capture_time_ms: None,
         encode_duration_ms: None,
+        send_start_time_ms: None,
+        receiver_complete_time_ms: None,
     };
     let _ = frame_tx.send(stop_frame).await;
     management.connection_closed(&connection_id);
@@ -533,6 +535,7 @@ async fn route_control_payload(
     remote_ip: &str,
     management: &ManagementState,
 ) {
+    let server_receive_ms = crate::clock::monotonic_epoch_ms();
     let Ok(mut command) = serde_json::from_slice::<crate::control::ControlCommand>(payload) else {
         return;
     };
@@ -545,12 +548,21 @@ async fn route_control_payload(
         _ => {}
     }
     match command {
-        crate::control::ControlCommand::Ping { id } => {
+        crate::control::ControlCommand::Ping { id, client_send_ms } => {
             management.touch_connection(connection_id);
-            let response = crate::control::TelemetryMessage::Pong { id };
+            let synchronized = client_send_ms.is_some_and(|value| value.is_finite() && value > 0.0);
+            let response = crate::control::TelemetryMessage::Pong {
+                id,
+                server_receive_ms: synchronized.then_some(server_receive_ms),
+                server_send_ms: synchronized.then(crate::clock::monotonic_epoch_ms),
+            };
             if let Ok(response_payload) = serde_json::to_vec(&response) {
                 let _ = outbound_tx.send(response_payload).await;
             }
+        }
+        crate::control::ControlCommand::ClockSync { offset_ms, uncertainty_ms } => {
+            management.touch_connection(connection_id);
+            management.record_clock_sync(connection_id, offset_ms, uncertainty_ms);
         }
         crate::control::ControlCommand::ClientDiagnostic { level, message } => {
             // Diagnostics are recorded at the authenticated transport boundary
@@ -571,12 +583,20 @@ async fn route_control_payload(
                 );
             }
         }
-        crate::control::ControlCommand::LatencyReport { seq, total_ms, encode_ms, transport_queue_ms, decode_display_ms } => {
+        crate::control::ControlCommand::LatencyReport {
+            seq, total_ms, encode_ms, sender_queue_ms, delivery_ms, receiver_queue_ms,
+            transport_queue_ms, decode_display_ms, access_unit_bytes, media_write_blocked_ms,
+            clock_uncertainty_ms, clock_sync_age_ms, configured_bitrate_mbps,
+            adaptive_bitrate_mbps, dropped_input_frames, effective_fps,
+        } => {
             management.touch_connection(connection_id);
             management.record_estimated_latency(
                 connection_id,
                 crate::management::EstimatedLatencySnapshot {
-                    seq, total_ms, encode_ms, transport_queue_ms, decode_display_ms,
+                    seq, total_ms, encode_ms, sender_queue_ms, delivery_ms, receiver_queue_ms,
+                    transport_queue_ms, decode_display_ms, access_unit_bytes, media_write_blocked_ms,
+                    clock_uncertainty_ms, clock_sync_age_ms, configured_bitrate_mbps,
+                    adaptive_bitrate_mbps, dropped_input_frames, effective_fps,
                 },
             );
         }

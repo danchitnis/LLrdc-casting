@@ -28,8 +28,17 @@ const cases: readonly CodecCase[] = [
 interface EstimatedLatencySnapshot {
   total_ms: number;
   encode_ms: number;
+  sender_queue_ms: number;
+  delivery_ms: number;
+  receiver_queue_ms: number;
   transport_queue_ms: number;
   decode_display_ms: number;
+  media_write_blocked_ms: number;
+  clock_uncertainty_ms: number;
+  adaptive_bitrate_mbps: number;
+  configured_bitrate_mbps: number;
+  dropped_input_frames: number;
+  effective_fps: number;
 }
 
 interface ManagementLatencySnapshot {
@@ -87,7 +96,7 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
   const estimatedLatency = Number.parseInt((await page.locator('#statDevicePing').textContent())?.replace(/\D/g, '') || '0', 10);
   expect(estimatedLatency).toBeGreaterThan(0);
   expect(estimatedLatency).toBeLessThan(5_000);
-  await expect(page.locator('#statLatencyDetail')).toHaveText(/^Encode \d+ · Transport\/queue \d+ · Decode\/display ~\d+ ms$/);
+  await expect(page.locator('#statLatencyDetail')).toHaveText('Synchronized encoder-input-to-display estimate');
   await expect.poll(async () => {
     const response = await page.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
     if (!response.ok()) return null;
@@ -112,10 +121,17 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
   expect(managementLatency.total_ms).toBeGreaterThan(0);
   expect(managementLatency.total_ms).toBeLessThan(5_000);
   expect(managementLatency.total_ms).toBeCloseTo(
-    managementLatency.encode_ms + managementLatency.transport_queue_ms + managementLatency.decode_display_ms,
+    managementLatency.encode_ms + managementLatency.sender_queue_ms + managementLatency.delivery_ms
+      + managementLatency.receiver_queue_ms + managementLatency.decode_display_ms,
     5,
   );
   expect(managementLatencySamples.length).toBeGreaterThan(0);
+  expect(managementLatency.transport_queue_ms).toBeCloseTo(
+    managementLatency.sender_queue_ms + managementLatency.delivery_ms + managementLatency.receiver_queue_ms, 5,
+  );
+  expect(managementLatency.clock_uncertainty_ms).toBeGreaterThanOrEqual(0);
+  expect(managementLatency.adaptive_bitrate_mbps).toBeLessThanOrEqual(managementLatency.configured_bitrate_mbps);
+  expect(managementLatency.effective_fps).toBeGreaterThan(0);
   expect(activeStream.estimated_latency_age_ms).not.toBeNull();
   expect(activeStream.estimated_latency_age_ms ?? Number.POSITIVE_INFINITY).toBeLessThan(3_000);
   const graphedLatency = managementLatencySamples.at(-1);
@@ -135,7 +151,8 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
     });
     await expect.poll(() => page.evaluate(() => document.visibilityState), { timeout: 5_000 }).toBe('hidden');
     await expect.poll(() => portal.evaluate(() => document.visibilityState), { timeout: 5_000 }).toBe('visible');
-    await expect(portal.locator('#metrics')).not.toContainText('Measuring…');
+    await expect(portal.locator('#latencyMetrics')).not.toContainText('Measuring…');
+    await expect(portal.locator('#congestionMetrics')).not.toContainText('Measuring…');
     await portal.waitForTimeout(35_000);
     const sustainedResponse = await portal.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
     expect(sustainedResponse.ok()).toBe(true);
@@ -145,7 +162,8 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
     expect(sustainedStream.latency_samples.length).toBeGreaterThanOrEqual(initialLatencySampleCount + 20);
     expect(sustainedStream.estimated_latency_age_ms).not.toBeNull();
     expect(sustainedStream.estimated_latency_age_ms ?? Number.POSITIVE_INFINITY).toBeLessThan(3_000);
-    await expect(portal.locator('#metrics')).not.toContainText('Measuring…');
+    await expect(portal.locator('#latencyMetrics')).not.toContainText('Measuring…');
+    await expect(portal.locator('#congestionMetrics')).not.toContainText('Measuring…');
     await expect(portal.locator('#latencyFreshness')).toHaveText('Latency samples are current');
     await portal.close();
     await page.bringToFront();

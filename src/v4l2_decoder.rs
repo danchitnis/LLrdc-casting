@@ -13,11 +13,14 @@ use crate::config::packet::{
     H264_TAG, H265_MAX_HEIGHT, H265_MAX_WIDTH, H265_TAG, HEIGHT_OFFSET, LEGACY_H264_TAG,
     LEGACY_H265_TAG, MAX_ACCESS_UNIT_BYTES, MAX_IN_FLIGHT_ACCESS_UNITS,
     ENCODE_DURATION_BYTES, ENCODE_DURATION_OFFSET, LEGACY_PACKET_HEADER_BYTES, PACKET_HEADER_BYTES,
-    SEQUENCE_BYTES, SEQUENCE_OFFSET, STOP_TAG, TIMED_H264_TAG, TIMED_H265_TAG, WIDTH_OFFSET,
+    SEND_START_TIME_BYTES, SEND_START_TIME_OFFSET, SEQUENCE_BYTES, SEQUENCE_OFFSET,
+    STOP_TAG, SYNC_TIMED_H264_TAG, SYNC_TIMED_H265_TAG, TIMED_H264_TAG, TIMED_H265_TAG,
+    TIMED_V1_PACKET_HEADER_BYTES, WIDTH_OFFSET,
 };
 
 const MAX_CHUNKS: usize = (MAX_ACCESS_UNIT_BYTES + CHUNK_BYTES - 1) / CHUNK_BYTES;
 const MAX_IN_FLIGHT: usize = MAX_IN_FLIGHT_ACCESS_UNITS;
+const MAX_PIPELINE_DURATION_MS: f32 = 30_000.0;
 const ASSEMBLY_TTL: Duration = crate::config::packet::ACCESS_UNIT_ASSEMBLY_TTL;
 
 static LAST_COMPLETED_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -44,6 +47,8 @@ pub struct VideoFrame {
     pub first_packet_at: Instant,
     pub capture_time_ms: Option<f64>,
     pub encode_duration_ms: Option<f32>,
+    pub send_start_time_ms: Option<f64>,
+    pub receiver_complete_time_ms: Option<f64>,
 }
 
 struct Assembly {
@@ -57,6 +62,7 @@ struct Assembly {
     first_packet_at: Instant,
     capture_time_ms: Option<f64>,
     encode_duration_ms: Option<f32>,
+    send_start_time_ms: Option<f64>,
 }
 
 static ASSEMBLIES: LazyLock<Mutex<Vec<Assembly>>> = LazyLock::new(|| Mutex::new(Vec::new()));
@@ -94,16 +100,20 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
             first_packet_at: Instant::now(),
             capture_time_ms: None,
             encode_duration_ms: None,
+            send_start_time_ms: None,
+            receiver_complete_time_ms: None,
         });
     }
     if packet.len() <= LEGACY_PACKET_HEADER_BYTES { return ignore_packet(); }
     STATS_CHUNKS.fetch_add(1, Ordering::Relaxed);
 
     let tag = &packet[..CODEC_TAG_BYTES];
-    let timed = tag == TIMED_H264_TAG || tag == TIMED_H265_TAG;
-    let codec = if tag == H265_TAG || tag == LEGACY_H265_TAG || tag == TIMED_H265_TAG {
+    let timed_v1 = tag == TIMED_H264_TAG || tag == TIMED_H265_TAG;
+    let synchronized = tag == SYNC_TIMED_H264_TAG || tag == SYNC_TIMED_H265_TAG;
+    let timed = timed_v1 || synchronized;
+    let codec = if tag == H265_TAG || tag == LEGACY_H265_TAG || tag == TIMED_H265_TAG || tag == SYNC_TIMED_H265_TAG {
         "hevc"
-    } else if tag == H264_TAG || tag == LEGACY_H264_TAG || tag == TIMED_H264_TAG {
+    } else if tag == H264_TAG || tag == LEGACY_H264_TAG || tag == TIMED_H264_TAG || tag == SYNC_TIMED_H264_TAG {
         "h264"
     } else {
         return ignore_packet();
@@ -145,23 +155,30 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
             .try_into()
             .ok()?,
     );
-    let (header_len, capture_time_ms, encode_duration_ms) = if timed {
-        if packet.len() <= PACKET_HEADER_BYTES { return ignore_packet(); }
+    let (header_len, capture_time_ms, encode_duration_ms, send_start_time_ms) = if timed {
+        let header_len = if synchronized { PACKET_HEADER_BYTES } else { TIMED_V1_PACKET_HEADER_BYTES };
+        if packet.len() <= header_len { return ignore_packet(); }
         let capture_time_ms = f64::from_be_bytes(
             packet[CAPTURE_TIME_OFFSET..CAPTURE_TIME_OFFSET + CAPTURE_TIME_BYTES].try_into().ok()?,
         );
         let encode_duration_ms = f32::from_be_bytes(
             packet[ENCODE_DURATION_OFFSET..ENCODE_DURATION_OFFSET + ENCODE_DURATION_BYTES].try_into().ok()?,
         );
+        let send_start_time_ms = if synchronized {
+            Some(f64::from_be_bytes(
+                packet[SEND_START_TIME_OFFSET..SEND_START_TIME_OFFSET + SEND_START_TIME_BYTES].try_into().ok()?,
+            ))
+        } else {
+            None
+        };
         let valid_timing = capture_time_ms.is_finite() && capture_time_ms > 0.0
-            && encode_duration_ms.is_finite() && (0.0..=2_000.0).contains(&encode_duration_ms);
-        (
-            PACKET_HEADER_BYTES,
-            valid_timing.then_some(capture_time_ms),
-            valid_timing.then_some(encode_duration_ms),
-        )
+            && encode_duration_ms.is_finite() && (0.0..=MAX_PIPELINE_DURATION_MS).contains(&encode_duration_ms);
+        if !valid_timing || send_start_time_ms.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+            return ignore_packet();
+        }
+        (header_len, Some(capture_time_ms), Some(encode_duration_ms), send_start_time_ms)
     } else {
-        (LEGACY_PACKET_HEADER_BYTES, None, None)
+        (LEGACY_PACKET_HEADER_BYTES, None, None, None)
     };
     if total_chunks == 0 || total_chunks as usize > MAX_CHUNKS || chunk_index >= total_chunks || width == 0 || height == 0 {
         return ignore_packet();
@@ -195,7 +212,8 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
     if let Some(index) = assemblies.iter().position(|entry| entry.seq == seq) {
         let entry = &mut assemblies[index];
         if entry.total_chunks != total_chunks || entry.width != width || entry.height != height || entry.codec != codec
-            || entry.capture_time_ms != capture_time_ms || entry.encode_duration_ms != encode_duration_ms { return ignore_packet(); }
+            || entry.capture_time_ms != capture_time_ms || entry.encode_duration_ms != encode_duration_ms
+            || entry.send_start_time_ms != send_start_time_ms { return ignore_packet(); }
         let slot = &mut entry.chunks[chunk_index as usize];
         if slot.is_none() {
             *slot = Some(payload.to_vec());
@@ -210,7 +228,7 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
         }
         let mut chunks = (0..total_chunks).map(|_| None).collect::<Vec<_>>();
         chunks[chunk_index as usize] = Some(payload.to_vec());
-        assemblies.push(Assembly { seq, total_chunks, width, height, codec, chunks, received: 1, first_packet_at: now, capture_time_ms, encode_duration_ms });
+        assemblies.push(Assembly { seq, total_chunks, width, height, codec, chunks, received: 1, first_packet_at: now, capture_time_ms, encode_duration_ms, send_start_time_ms });
     }
 
     let completed_index = assemblies.iter().position(|entry| entry.seq == seq && entry.received == entry.total_chunks as usize)?;
@@ -249,6 +267,8 @@ pub fn process_udp_chunk(packet: &[u8]) -> Option<VideoFrame> {
         first_packet_at: completed.first_packet_at,
         capture_time_ms: completed.capture_time_ms,
         encode_duration_ms: completed.encode_duration_ms,
+        send_start_time_ms: completed.send_start_time_ms,
+        receiver_complete_time_ms: completed.send_start_time_ms.map(|_| crate::clock::monotonic_epoch_ms()),
     };
     validate_access_unit_bitstream(&frame);
     Some(frame)
@@ -349,6 +369,13 @@ mod tests {
         out.extend_from_slice(payload);
         out
     }
+    fn synchronized_packet(seq: u32, capture_time_ms: f64, encode_duration_ms: f32, send_start_time_ms: f64, payload: &[u8]) -> Vec<u8> {
+        let mut out = timed_packet(seq, capture_time_ms, encode_duration_ms, &[]);
+        out[..CODEC_TAG_BYTES].copy_from_slice(SYNC_TIMED_H265_TAG);
+        out.extend_from_slice(&send_start_time_ms.to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
     #[test]
     fn reassembles_out_of_order_without_duplicate_bytes() {
         let _guard = TEST_LOCK.lock().unwrap();
@@ -373,21 +400,42 @@ mod tests {
         assert_eq!(frame.access_unit, b"frame");
         assert_eq!(frame.capture_time_ms, Some(1_725_000_000_123.5));
         assert_eq!(frame.encode_duration_ms, Some(7.25));
+        assert_eq!(frame.send_start_time_ms, None);
     }
 
     #[test]
-    fn invalid_timing_metadata_does_not_drop_video() {
+    fn preserves_synchronized_packet_metadata() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_decoder_pipeline();
-        let nan_frame = process_udp_chunk(&timed_packet(1, f64::NAN, 7.0, b"frame")).unwrap();
-        assert_eq!(nan_frame.access_unit, b"frame");
-        assert_eq!(nan_frame.capture_time_ms, None);
-        assert_eq!(nan_frame.encode_duration_ms, None);
+        let frame = process_udp_chunk(&synchronized_packet(1, 1_725_000_000_123.5, 7.25, 1_725_000_000_131.0, b"frame")).unwrap();
+        assert_eq!(frame.access_unit, b"frame");
+        assert_eq!(frame.send_start_time_ms, Some(1_725_000_000_131.0));
+        assert!(frame.receiver_complete_time_ms.is_some());
+    }
+
+    #[test]
+    fn accepts_slow_hardware_encoder_startup_timing() {
+        let _guard = TEST_LOCK.lock().unwrap();
         reset_decoder_pipeline();
-        let negative_frame = process_udp_chunk(&timed_packet(1, 1_725_000_000_123.5, -1.0, b"frame")).unwrap();
-        assert_eq!(negative_frame.access_unit, b"frame");
-        assert_eq!(negative_frame.capture_time_ms, None);
-        assert_eq!(negative_frame.encode_duration_ms, None);
+        let frame = process_udp_chunk(&synchronized_packet(
+            1,
+            1_725_000_000_123.5,
+            2_500.0,
+            1_725_000_002_625.0,
+            b"frame",
+        ))
+        .unwrap();
+        assert_eq!(frame.seq, 1);
+        assert_eq!(frame.encode_duration_ms, Some(2_500.0));
+    }
+
+    #[test]
+    fn invalid_timing_metadata_is_rejected() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_decoder_pipeline();
+        assert!(process_udp_chunk(&timed_packet(1, f64::NAN, 7.0, b"frame")).is_none());
+        reset_decoder_pipeline();
+        assert!(process_udp_chunk(&timed_packet(1, 1_725_000_000_123.5, -1.0, b"frame")).is_none());
     }
 
     #[test]

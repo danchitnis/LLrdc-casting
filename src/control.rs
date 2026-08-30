@@ -73,6 +73,12 @@ pub enum ControlCommand {
     Ping {
         #[serde(default)]
         id: Option<u64>,
+        #[serde(default)]
+        client_send_ms: Option<f64>,
+    },
+    ClockSync {
+        offset_ms: f64,
+        uncertainty_ms: f64,
     },
     GetStatus,
     /// Browser-side diagnostic forwarded over the authenticated control stream.
@@ -89,8 +95,19 @@ pub enum ControlCommand {
         seq: u32,
         total_ms: f64,
         encode_ms: f64,
+        sender_queue_ms: f64,
+        delivery_ms: f64,
+        receiver_queue_ms: f64,
         transport_queue_ms: f64,
         decode_display_ms: f64,
+        #[serde(default)] access_unit_bytes: u64,
+        #[serde(default)] media_write_blocked_ms: f64,
+        #[serde(default)] clock_uncertainty_ms: f64,
+        #[serde(default)] clock_sync_age_ms: f64,
+        #[serde(default)] configured_bitrate_mbps: f64,
+        #[serde(default)] adaptive_bitrate_mbps: f64,
+        #[serde(default)] dropped_input_frames: u64,
+        #[serde(default)] effective_fps: f64,
     },
 }
 
@@ -100,11 +117,18 @@ pub enum TelemetryMessage {
     Pong {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_receive_ms: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_send_ms: Option<f64>,
     },
     LatencySample {
         seq: u32,
         capture_time_ms: f64,
         encode_duration_ms: f32,
+        send_start_time_ms: f64,
+        receiver_complete_time_ms: f64,
+        receiver_queue_ms: f64,
     },
     Status {
         state: String,
@@ -180,11 +204,15 @@ mod tests {
             seq: 30,
             capture_time_ms: 1_725_000_000_123.5,
             encode_duration_ms: 7.25,
+            send_start_time_ms: 1_725_000_000_131.0,
+            receiver_complete_time_ms: 1_725_000_000_140.0,
+            receiver_queue_ms: 3.5,
         }).unwrap();
         assert_eq!(json["type"], "latency_sample");
         assert_eq!(json["seq"], 30);
         assert_eq!(json["capture_time_ms"], 1_725_000_000_123.5);
         assert_eq!(json["encode_duration_ms"], 7.25);
+        assert_eq!(json["receiver_queue_ms"], 3.5);
     }
 
     #[test]
@@ -194,6 +222,9 @@ mod tests {
             "seq": 31,
             "total_ms": 29.5,
             "encode_ms": 7.0,
+            "sender_queue_ms": 1.0,
+            "delivery_ms": 2.0,
+            "receiver_queue_ms": 2.8,
             "transport_queue_ms": 5.8,
             "decode_display_ms": 16.7
         })).unwrap();

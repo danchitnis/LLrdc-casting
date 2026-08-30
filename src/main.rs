@@ -174,10 +174,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(submission) = playback_submission_rx.recv() => {
                 if streaming_active.load(Ordering::Relaxed) {
                     if latency_ack_cadence.should_emit(std::time::Instant::now()) {
+                        management.record_receiver_estimated_latency(
+                            submission.seq,
+                            submission.capture_time_ms,
+                            submission.encode_duration_ms,
+                            submission.send_start_time_ms,
+                            submission.receiver_complete_time_ms,
+                            submission.receiver_queue_ms,
+                            vrefresh,
+                        );
                         control_channel.send_telemetry(control::TelemetryMessage::LatencySample {
                             seq: submission.seq,
                             capture_time_ms: submission.capture_time_ms,
                             encode_duration_ms: submission.encode_duration_ms,
+                            send_start_time_ms: submission.send_start_time_ms,
+                            receiver_complete_time_ms: submission.receiver_complete_time_ms,
+                            receiver_queue_ms: submission.receiver_queue_ms,
                         });
                     }
                 }
@@ -317,11 +329,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             panel_resolution: panel_resolution.clone(),
                         });
                     }
-                    control::ControlCommand::Ping { id } => {
+                    control::ControlCommand::Ping { id, .. } => {
                         // WebTransport pings are answered directly on their
                         // originating control stream. This legacy command
                         // path remains for the older WebSocket endpoint.
-                        control_channel.send_telemetry(control::TelemetryMessage::Pong { id });
+                        control_channel.send_telemetry(control::TelemetryMessage::Pong { id, server_receive_ms: None, server_send_ms: None });
                     }
                     control::ControlCommand::ClientDiagnostic { level, message } => {
                         let normalized_level = match level.to_ascii_lowercase().as_str() {
@@ -339,6 +351,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Direct WebTransport reports are consumed at the
                         // authenticated connection boundary. Ignore any report
                         // reaching this legacy shared command path.
+                    }
+                    control::ControlCommand::ClockSync { .. } => {
+                        // Clock sync is scoped to authenticated WebTransport connections.
                     }
                     control::ControlCommand::GetStatus => {
                         let is_act = streaming_active.load(Ordering::Relaxed);
@@ -482,11 +497,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let frame_seq = frame.seq;
                         let frame_bytes = frame.access_unit.len();
-                        let timing = match (frame.capture_time_ms, frame.encode_duration_ms) {
-                            (Some(capture_time_ms), Some(encode_duration_ms)) => Some(playback::PlaybackTiming {
+                        let timing = match (frame.capture_time_ms, frame.encode_duration_ms, frame.send_start_time_ms, frame.receiver_complete_time_ms) {
+                            (Some(capture_time_ms), Some(encode_duration_ms), Some(send_start_time_ms), Some(receiver_complete_time_ms)) => Some(playback::PlaybackTiming {
                                 seq: frame_seq,
                                 capture_time_ms,
                                 encode_duration_ms,
+                                send_start_time_ms,
+                                receiver_complete_time_ms,
                             }),
                             _ => None,
                         };

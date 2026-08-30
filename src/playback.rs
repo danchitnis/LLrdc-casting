@@ -15,6 +15,8 @@ pub struct PlaybackTiming {
     pub seq: u32,
     pub capture_time_ms: f64,
     pub encode_duration_ms: f32,
+    pub send_start_time_ms: f64,
+    pub receiver_complete_time_ms: f64,
 }
 
 pub struct PlaybackBuffer {
@@ -33,6 +35,13 @@ pub struct PlaybackSubmission {
     pub seq: u32,
     pub capture_time_ms: f64,
     pub encode_duration_ms: f32,
+    pub send_start_time_ms: f64,
+    pub receiver_complete_time_ms: f64,
+    pub receiver_queue_ms: f64,
+}
+
+fn receiver_queue_ms(receiver_complete_time_ms: f64, flush_time_ms: f64) -> f64 {
+    (flush_time_ms - receiver_complete_time_ms).max(0.0)
 }
 
 pub struct LatencyAckCadence {
@@ -77,7 +86,7 @@ pub struct PlaybackEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_kms_sink_args, encoded_pipeline_args, LatencyAckCadence};
+    use super::{append_kms_sink_args, encoded_pipeline_args, receiver_queue_ms, LatencyAckCadence};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -106,6 +115,12 @@ mod tests {
         let mut args = Vec::new();
         append_kms_sink_args(&mut args, "54", "33", Some("<0,0,3840,2160>"));
         assert!(args.iter().any(|arg| arg == "render-rectangle=<0,0,3840,2160>"));
+    }
+
+    #[test]
+    fn receiver_queue_spans_complete_arrival_through_gstreamer_flush() {
+        assert_eq!(receiver_queue_ms(1_000.0, 1_012.5), 12.5);
+        assert_eq!(receiver_queue_ms(1_012.5, 1_000.0), 0.0);
     }
 }
 
@@ -285,10 +300,14 @@ pub fn start_persistent_playback(
                 break;
             }
             if let Some(timing) = buffer.timing {
+                let receiver_queue_ms = receiver_queue_ms(timing.receiver_complete_time_ms, crate::clock::monotonic_epoch_ms());
                 let _ = writer_submission_tx.send(PlaybackSubmission {
                     seq: timing.seq,
                     capture_time_ms: timing.capture_time_ms,
                     encode_duration_ms: timing.encode_duration_ms,
+                    send_start_time_ms: timing.send_start_time_ms,
+                    receiver_complete_time_ms: timing.receiver_complete_time_ms,
+                    receiver_queue_ms,
                 });
             }
         }

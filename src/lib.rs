@@ -5,6 +5,7 @@ pub mod admin;
 pub mod admin_protocol;
 pub mod cert;
 pub mod cloud_discovery;
+pub mod clock;
 pub mod config;
 pub mod control;
 pub mod dashboard;

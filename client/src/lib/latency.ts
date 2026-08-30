@@ -6,16 +6,24 @@ export interface EncoderTiming {
 export interface LatencyComponents {
   totalMs: number;
   encodeMs: number;
-  transportQueueMs: number;
+  senderQueueMs: number;
+  deliveryMs: number;
+  receiverQueueMs: number;
   decodeDisplayMs: number;
+}
+
+export interface ClockEstimate {
+  offsetMs: number;
+  uncertaintyMs: number;
+  sampledAtMs: number;
 }
 
 const MAX_TRACKED_FRAMES = 64;
 const MAX_SAMPLE_AGE_MS = 30_000;
-const MAX_ENCODE_DURATION_MS = 2_000;
+const MAX_PIPELINE_DURATION_MS = 30_000;
 const MIN_REPORT_INTERVAL_MS = 1_000;
-const MIN_DISPLAY_FPS = 1;
-const MAX_DISPLAY_FPS = 240;
+const CLOCK_SAMPLE_LIMIT = 8;
+const CLOCK_DRIFT_MS_PER_MS = 0.00005;
 
 export function monotonicEpochMs(): number {
   return performance.timeOrigin + performance.now();
@@ -29,13 +37,13 @@ export class EncoderTimingTracker {
     const entries = this.captures.get(timestamp) ?? [];
     entries.push(captureTimeMs);
     this.captures.set(timestamp, entries);
-    this.trackedFrames += 1;
+    this.trackedFrames++;
     while (this.trackedFrames > MAX_TRACKED_FRAMES) {
       const oldest = this.captures.entries().next().value as [number, number[]] | undefined;
       if (!oldest) break;
       oldest[1].shift();
-      this.trackedFrames -= 1;
-      if (oldest[1].length === 0) this.captures.delete(oldest[0]);
+      this.trackedFrames--;
+      if (!oldest[1].length) this.captures.delete(oldest[0]);
     }
   }
 
@@ -43,12 +51,9 @@ export class EncoderTimingTracker {
     const entries = this.captures.get(timestamp);
     const captureTimeMs = entries?.shift();
     if (captureTimeMs === undefined) return null;
-    this.trackedFrames -= 1;
-    if (entries?.length === 0) this.captures.delete(timestamp);
-    return {
-      captureTimeMs,
-      encodeDurationMs: Math.max(0, encodedAtMs - captureTimeMs),
-    };
+    this.trackedFrames--;
+    if (!entries?.length) this.captures.delete(timestamp);
+    return { captureTimeMs, encodeDurationMs: Math.max(0, encodedAtMs - captureTimeMs) };
   }
 
   reset(): void {
@@ -57,27 +62,73 @@ export class EncoderTimingTracker {
   }
 }
 
+export class ClockSynchronizer {
+  private samples: Array<ClockEstimate & { delayMs: number }> = [];
+
+  record(t0: number, s1: number, s2: number, t3: number): ClockEstimate | null {
+    if (![t0, s1, s2, t3].every(Number.isFinite)) return null;
+    const serverWorkMs = s2 - s1;
+    const delayMs = t3 - t0 - serverWorkMs;
+    if (serverWorkMs < 0 || delayMs < 0 || delayMs > MAX_SAMPLE_AGE_MS) return null;
+    this.samples.push({
+      offsetMs: ((s1 - t0) + (s2 - t3)) / 2,
+      uncertaintyMs: delayMs / 2,
+      sampledAtMs: t3,
+      delayMs,
+    });
+    if (this.samples.length > CLOCK_SAMPLE_LIMIT) this.samples.shift();
+    return this.estimate(t3);
+  }
+
+  estimate(nowMs: number): ClockEstimate | null {
+    if (!Number.isFinite(nowMs) || !this.samples.length) return null;
+    const best = this.samples.reduce((selected, sample) => sample.delayMs < selected.delayMs ? sample : selected);
+    const ageMs = nowMs - best.sampledAtMs;
+    if (ageMs < 0) return null;
+    return {
+      offsetMs: best.offsetMs,
+      uncertaintyMs: best.uncertaintyMs + ageMs * CLOCK_DRIFT_MS_PER_MS,
+      sampledAtMs: best.sampledAtMs,
+    };
+  }
+
+  reset(): void {
+    this.samples = [];
+  }
+}
+
+export interface PhaseTimingSample {
+  captureTimeMs: number;
+  encodeDurationMs: number;
+  sendStartTimeMs: number;
+  receiverCompleteTimeMs: number;
+  receiverQueueMs: number;
+}
+
 export function calculateLatencyComponents(
-  captureTimeMs: number,
-  encodeDurationMs: number,
-  receivedAtMs: number,
-  rttMs: number,
+  sample: PhaseTimingSample,
+  clock: ClockEstimate,
   displayFps: number,
 ): LatencyComponents | null {
-  if (![captureTimeMs, encodeDurationMs, receivedAtMs, rttMs, displayFps].every(Number.isFinite)) return null;
-  const ageMs = receivedAtMs - captureTimeMs;
-  if (ageMs < 0 || ageMs > MAX_SAMPLE_AGE_MS) return null;
-  if (encodeDurationMs < 0 || encodeDurationMs > MAX_ENCODE_DURATION_MS || encodeDurationMs > ageMs) return null;
-  if (rttMs < 0 || rttMs > MAX_SAMPLE_AGE_MS) return null;
-  if (displayFps < MIN_DISPLAY_FPS || displayFps > MAX_DISPLAY_FPS) return null;
+  if (![...Object.values(sample), clock.offsetMs, clock.uncertaintyMs, displayFps].every(Number.isFinite)) return null;
+  if (sample.encodeDurationMs < 0 || sample.encodeDurationMs > MAX_PIPELINE_DURATION_MS
+    || sample.receiverQueueMs < 0 || displayFps < 1 || displayFps > 240 || clock.uncertaintyMs < 0) return null;
 
-  const measuredPipelineMs = Math.max(encodeDurationMs, ageMs - rttMs / 2);
-  const transportQueueMs = Math.max(0, measuredPipelineMs - encodeDurationMs);
+  const senderQueueRawMs = sample.sendStartTimeMs - sample.captureTimeMs - sample.encodeDurationMs;
+  const deliveryRawMs = sample.receiverCompleteTimeMs - clock.offsetMs - sample.sendStartTimeMs;
+  if (senderQueueRawMs < -clock.uncertaintyMs || deliveryRawMs < -clock.uncertaintyMs) return null;
+
+  const senderQueueMs = Math.max(0, senderQueueRawMs);
+  const deliveryMs = Math.max(0, deliveryRawMs);
+  const pipelineMs = sample.encodeDurationMs + senderQueueMs + deliveryMs + sample.receiverQueueMs;
+  if (pipelineMs > MAX_PIPELINE_DURATION_MS) return null;
   const decodeDisplayMs = 1_000 / displayFps;
   return {
-    totalMs: encodeDurationMs + transportQueueMs + decodeDisplayMs,
-    encodeMs: encodeDurationMs,
-    transportQueueMs,
+    totalMs: pipelineMs + decodeDisplayMs,
+    encodeMs: sample.encodeDurationMs,
+    senderQueueMs,
+    deliveryMs,
+    receiverQueueMs: sample.receiverQueueMs,
     decodeDisplayMs,
   };
 }
@@ -93,13 +144,15 @@ export class LatencySmoother {
   update(sample: LatencyComponents): LatencyComponents {
     if (!this.value) {
       this.value = { ...sample };
-      return { ...this.value };
+      return { ...sample };
     }
     const blend = (previous: number, next: number): number => previous + this.alpha * (next - previous);
     this.value = {
       totalMs: blend(this.value.totalMs, sample.totalMs),
       encodeMs: blend(this.value.encodeMs, sample.encodeMs),
-      transportQueueMs: blend(this.value.transportQueueMs, sample.transportQueueMs),
+      senderQueueMs: blend(this.value.senderQueueMs, sample.senderQueueMs),
+      deliveryMs: blend(this.value.deliveryMs, sample.deliveryMs),
+      receiverQueueMs: blend(this.value.receiverQueueMs, sample.receiverQueueMs),
       decodeDisplayMs: blend(this.value.decodeDisplayMs, sample.decodeDisplayMs),
     };
     return { ...this.value };
@@ -110,59 +163,71 @@ export class LatencySmoother {
   }
 }
 
-export interface PendingLatencySample {
+export interface PendingLatencySample extends PhaseTimingSample {
   seq: number;
-  captureTimeMs: number;
-  encodeDurationMs: number;
-  receivedAtMs: number;
+  accessUnitBytes?: number;
+  writeBlockedMs?: number;
+  droppedInputFrames?: number;
+  configuredBitrateMbps?: number;
+  adaptiveBitrateMbps?: number;
+  effectiveFps?: number;
 }
 
 export interface PreparedLatencySample {
   seq: number;
   components: LatencyComponents;
-  rttAgeMs: number;
+  clockUncertaintyMs: number;
+  clockAgeMs: number;
+  diagnostics: Omit<PendingLatencySample, keyof PhaseTimingSample | 'seq'>;
 }
 
-/** Coordinates asynchronous playback acknowledgements and RTT pongs. */
 export class LatencySampleCoordinator {
   private pending: PendingLatencySample | null = null;
-  private rtt: { valueMs: number; sampledAtMs: number } | null = null;
   private lastReportAtMs: number | null = null;
+  readonly clock = new ClockSynchronizer();
 
   acknowledge(sample: PendingLatencySample): void {
-    if (sample.seq > 0 && [sample.captureTimeMs, sample.encodeDurationMs, sample.receivedAtMs].every(Number.isFinite)) {
+    if (sample.seq > 0 && Object.values(sample).every(value => value === undefined || Number.isFinite(value))) {
       this.pending = sample;
     }
   }
 
-  recordRtt(valueMs: number, sampledAtMs: number): void {
-    if (Number.isFinite(valueMs) && valueMs >= 0 && Number.isFinite(sampledAtMs)) {
-      this.rtt = { valueMs, sampledAtMs };
-    }
-  }
-
   prepare(nowMs: number, displayFps: number): PreparedLatencySample | null {
-    if (!this.pending || !this.rtt || !Number.isFinite(nowMs)) return null;
-    const rttAgeMs = nowMs - this.rtt.sampledAtMs;
-    if (rttAgeMs < 0) return null;
+    const estimate = this.clock.estimate(nowMs);
+    if (!this.pending || !estimate || !Number.isFinite(nowMs)) return null;
     if (this.lastReportAtMs !== null && nowMs - this.lastReportAtMs < MIN_REPORT_INTERVAL_MS) return null;
+
     const pending = this.pending;
-    const components = calculateLatencyComponents(
-      pending.captureTimeMs,
-      pending.encodeDurationMs,
-      pending.receivedAtMs,
-      this.rtt.valueMs,
-      displayFps,
-    );
     this.pending = null;
+    const receiverCompleteClientMs = pending.receiverCompleteTimeMs - estimate.offsetMs;
+    if (pending.captureTimeMs > nowMs + estimate.uncertaintyMs
+      || receiverCompleteClientMs > nowMs + estimate.uncertaintyMs
+      || nowMs - pending.captureTimeMs > MAX_SAMPLE_AGE_MS) return null;
+    const components = calculateLatencyComponents(pending, estimate, displayFps);
     if (!components) return null;
+
     this.lastReportAtMs = nowMs;
-    return { seq: pending.seq, components, rttAgeMs };
+    const {
+      seq,
+      captureTimeMs: _capture,
+      encodeDurationMs: _encode,
+      sendStartTimeMs: _send,
+      receiverCompleteTimeMs: _receiver,
+      receiverQueueMs: _queue,
+      ...diagnostics
+    } = pending;
+    return {
+      seq,
+      components,
+      clockUncertaintyMs: estimate.uncertaintyMs,
+      clockAgeMs: nowMs - estimate.sampledAtMs,
+      diagnostics,
+    };
   }
 
   reset(): void {
     this.pending = null;
-    this.rtt = null;
     this.lastReportAtMs = null;
+    this.clock.reset();
   }
 }

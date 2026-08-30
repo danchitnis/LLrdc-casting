@@ -1,7 +1,8 @@
 import { convertToAnnexB, createNalCache } from './annexb';
 import { DECODER_LIMITS, ENCODER_GUARDRAILS, TRANSPORT_CONFIG } from './config';
 import { VideoFrameCompositor } from './compositor';
-import { EncoderTimingTracker, type EncoderTiming } from './latency';
+import { CongestionController } from './congestion';
+import { EncoderTimingTracker, monotonicEpochMs, type EncoderTiming } from './latency';
 import type {
   StreamWorkerMessage,
   StreamWorkerOutboundMessage,
@@ -39,6 +40,7 @@ function makePacket(
   height: number,
   wireCodec: 'H264' | 'H265',
   timing: EncoderTiming | null,
+  sendStartTimeMs: number,
 ): Uint8Array {
   const timedTag = wireCodec === 'H265' ? TRANSPORT_CONFIG.CODEC_TAGS.H265 : TRANSPORT_CONFIG.CODEC_TAGS.H264;
   const legacyTag = wireCodec === 'H265' ? TRANSPORT_CONFIG.LEGACY_CODEC_TAGS.H265 : TRANSPORT_CONFIG.LEGACY_CODEC_TAGS.H264;
@@ -62,6 +64,7 @@ function makePacket(
   if (timing) {
     view.setFloat64(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.CAPTURE_TIME, timing.captureTimeMs, false);
     view.setFloat32(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.ENCODE_DURATION, timing.encodeDurationMs, false);
+    view.setFloat64(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.SEND_START_TIME, sendStartTimeMs, false);
   }
   packet.set(accessUnit, TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + headerBytes);
   return packet;
@@ -110,12 +113,36 @@ async function startStreaming(message: StreamWorkerStartMessage): Promise<void> 
   const minFrameIntervalMs = 1000 / message.framerate - ENCODER_GUARDRAILS.FRAME_TIMING_SLACK_MS;
   let writeTail = Promise.resolve();
   const encoderTiming = new EncoderTimingTracker();
+  const congestion = new CongestionController(message.congestionMode, message.bitrate, 1000 / message.framerate);
+  const startedAt = performance.now();
+  let forceNextKeyframe = false;
+
+  const encoderConfig = (bitrate: number): VideoEncoderConfig => ({
+    codec: message.codecString, width: message.width, height: message.height, bitrate,
+    framerate: message.framerate, latencyMode: message.latencyMode,
+    hardwareAcceleration: message.hardwareAcceleration,
+  });
 
   const writeAccessUnit = (accessUnit: Uint8Array, seq: number, timing: EncoderTiming | null): void => {
+    congestion.writeStarted();
     writeTail = writeTail.then(async () => {
       if (!activeWriter || stopRequested) return;
-      await activeWriter.write(makePacket(accessUnit, seq, message.width, message.height, message.wireCodec, timing));
-      workerScope.postMessage({ type: 'progress', sequence: seq, accessUnitBytes: accessUnit.length });
+      const sendStartTimeMs = monotonicEpochMs();
+      const senderQueueMs = timing ? Math.max(0, sendStartTimeMs - timing.captureTimeMs - timing.encodeDurationMs) : 0;
+      const writeStartedAt = performance.now();
+      await activeWriter.write(makePacket(accessUnit, seq, message.width, message.height, message.wireCodec, timing, sendStartTimeMs));
+      const writeBlockedMs = performance.now() - writeStartedAt;
+      const snapshot = congestion.writeFinished(performance.now(), senderQueueMs, writeBlockedMs);
+      if (snapshot.bitrateChanged && activeEncoder?.state === 'configured') {
+        activeEncoder.configure(encoderConfig(snapshot.currentBitrate));
+        forceNextKeyframe = true;
+      }
+      workerScope.postMessage({
+        type: 'progress', sequence: seq, accessUnitBytes: accessUnit.length, senderQueueMs,
+        writeBlockedMs, droppedInputFrames: snapshot.droppedInputFrames,
+        configuredBitrate: message.bitrate, adaptiveBitrate: snapshot.currentBitrate,
+        effectiveFps: seq * 1000 / Math.max(1, performance.now() - startedAt),
+      });
       if (seq % message.framerate === 0) {
         notifyLog(`[STREAMING ${message.wireCodec}] Frame #${seq}: ${message.width}x${message.height} (${Math.round(accessUnit.length / 1024)} KB) via QUIC stream`);
       }
@@ -144,15 +171,7 @@ async function startStreaming(message: StreamWorkerStartMessage): Promise<void> 
       },
       error: (error) => notifyError(error),
     });
-    activeEncoder.configure({
-      codec: message.codecString,
-      width: message.width,
-      height: message.height,
-      bitrate: message.bitrate,
-      framerate: message.framerate,
-      latencyMode: message.latencyMode,
-      hardwareAcceleration: message.hardwareAcceleration,
-    });
+    activeEncoder.configure(encoderConfig(message.bitrate));
 
     while (!stopRequested) {
       const { done, value: rawFrame } = await reader.read();
@@ -161,10 +180,11 @@ async function startStreaming(message: StreamWorkerStartMessage): Promise<void> 
         const now = performance.now();
         if (lastFrameTime > 0 && (now - lastFrameTime) < minFrameIntervalMs) continue;
         lastFrameTime = now;
+        if (congestion.shouldDropInput(activeEncoder.encodeQueueSize, now)) continue;
         frameCount++;
         const needKeyFrame = frameCount <= ENCODER_GUARDRAILS.INITIAL_KEYFRAME_COUNT
-          || frameCount % message.keyframeInterval === 0;
-        if (activeEncoder.encodeQueueSize > ENCODER_GUARDRAILS.MAX_ENCODER_QUEUE) continue;
+          || frameCount % message.keyframeInterval === 0 || forceNextKeyframe;
+        forceNextKeyframe = false;
         encoderTiming.mark(rawFrame.timestamp);
         const composedFrame = compositor.compose(rawFrame);
         activeEncoder.encode(composedFrame, { keyFrame: needKeyFrame });

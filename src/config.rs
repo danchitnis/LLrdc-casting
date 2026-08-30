@@ -347,16 +347,21 @@ pub mod packet {
     pub const HEIGHT_OFFSET: usize = WIDTH_OFFSET + DIMENSION_BYTES;
     pub const CAPTURE_TIME_BYTES: usize = 8;
     pub const ENCODE_DURATION_BYTES: usize = 4;
+    pub const SEND_START_TIME_BYTES: usize = 8;
     pub const CAPTURE_TIME_OFFSET: usize = HEIGHT_OFFSET + DIMENSION_BYTES;
     pub const ENCODE_DURATION_OFFSET: usize = CAPTURE_TIME_OFFSET + CAPTURE_TIME_BYTES;
+    pub const SEND_START_TIME_OFFSET: usize = ENCODE_DURATION_OFFSET + ENCODE_DURATION_BYTES;
     /// Legacy codec tag, sequence, chunk index/count, width, and height.
     pub const LEGACY_PACKET_HEADER_BYTES: usize = HEIGHT_OFFSET + DIMENSION_BYTES;
     /// Timed packets append encoder-input wall time and encode duration.
-    pub const PACKET_HEADER_BYTES: usize = ENCODE_DURATION_OFFSET + ENCODE_DURATION_BYTES;
+    pub const TIMED_V1_PACKET_HEADER_BYTES: usize = ENCODE_DURATION_OFFSET + ENCODE_DURATION_BYTES;
+    pub const PACKET_HEADER_BYTES: usize = SEND_START_TIME_OFFSET + SEND_START_TIME_BYTES;
     pub const H264_TAG: &[u8; CODEC_TAG_BYTES] = b"H264";
     pub const H265_TAG: &[u8; CODEC_TAG_BYTES] = b"H265";
     pub const TIMED_H264_TAG: &[u8; CODEC_TAG_BYTES] = b"H24T";
     pub const TIMED_H265_TAG: &[u8; CODEC_TAG_BYTES] = b"H26T";
+    pub const SYNC_TIMED_H264_TAG: &[u8; CODEC_TAG_BYTES] = b"H24S";
+    pub const SYNC_TIMED_H265_TAG: &[u8; CODEC_TAG_BYTES] = b"H26S";
     pub const LEGACY_H264_TAG: &[u8; CODEC_TAG_BYTES] = b"VIDC";
     pub const LEGACY_H265_TAG: &[u8; CODEC_TAG_BYTES] = b"HEVC";
     pub const STOP_TAG: &[u8; CODEC_TAG_BYTES] = b"STOP";
@@ -376,7 +381,7 @@ pub mod packet {
 }
 
 pub mod transport {
-    pub const FRAME_CHANNEL_CAPACITY: usize = 64;
+    pub const FRAME_CHANNEL_CAPACITY: usize = 2;
     pub const CONTROL_CHANNEL_CAPACITY: usize = 32;
     pub const LENGTH_PREFIX_BYTES: usize = 4;
     pub const DATAGRAM_BUFFER_BYTES: usize = 64 * 1024;
@@ -388,7 +393,7 @@ pub mod playback {
     pub const RAW_PIPELINE_BLOCK_SIZE: usize = 64 * 1024;
     pub const RAW_PIPELINE_FRAMERATE: &str = "1/1";
     pub const RAW_QUEUE_CAPACITY: usize = 2;
-    pub const ENCODED_QUEUE_CAPACITY: usize = 16;
+    pub const ENCODED_QUEUE_CAPACITY: usize = 1;
     pub const ENCODED_CONFIG_INTERVAL: i32 = -1;
 }
 

@@ -1,4 +1,5 @@
 import type { AspectMode, DisplayGeometry } from './compositor';
+import type { CongestionMode } from './congestion';
 
 export interface StreamWorkerStartMessage {
   type: 'start';
@@ -11,6 +12,7 @@ export interface StreamWorkerStartMessage {
   bitrate: number;
   framerate: number;
   latencyMode: 'quality' | 'realtime';
+  congestionMode: CongestionMode;
   hardwareAcceleration: HardwareAcceleration;
   aspectMode: AspectMode;
   displayGeometry: DisplayGeometry;
@@ -27,6 +29,12 @@ export interface StreamWorkerProgressMessage {
   type: 'progress';
   sequence: number;
   accessUnitBytes: number;
+  senderQueueMs: number;
+  writeBlockedMs: number;
+  droppedInputFrames: number;
+  configuredBitrate: number;
+  adaptiveBitrate: number;
+  effectiveFps: number;
 }
 
 export interface StreamWorkerLogMessage {

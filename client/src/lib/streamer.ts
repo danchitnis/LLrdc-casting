@@ -24,6 +24,7 @@ import {
   type EncoderTiming,
 } from './latency';
 import StreamWorker from './stream-worker.ts?worker&inline';
+import { CongestionController } from './congestion';
 import type { StreamWorkerOutboundMessage } from './stream-worker-protocol';
 import {
   CERTIFICATE_CONFIG,
@@ -105,6 +106,11 @@ export interface ServerStatusMessage {
   seq?: number;
   capture_time_ms?: number;
   encode_duration_ms?: number;
+  send_start_time_ms?: number;
+  receiver_complete_time_ms?: number;
+  receiver_queue_ms?: number;
+  server_receive_ms?: number;
+  server_send_ms?: number;
 }
 
 declare global {
@@ -137,10 +143,12 @@ let pairedConnection: BootstrapConnection | null = null;
 let nalCache: NalCache = createNalCache();
 let pingTimer: number | null = null;
 let pingSequence = 0;
-let pendingPing: { id: number; sentAt: number } | null = null;
+let pendingPing: { id: number; sentAt: number; clientSendMs: number } | null = null;
 let currentDisplayFps: number = STREAM_DEFAULTS.fps;
 const latencySmoother = new LatencySmoother();
 const latencyCoordinator = new LatencySampleCoordinator();
+interface FrameDiagnostic { accessUnitBytes: number; writeBlockedMs: number; droppedInputFrames: number; configuredBitrateMbps: number; adaptiveBitrateMbps: number; effectiveFps: number; }
+const frameDiagnostics = new Map<number, FrameDiagnostic>();
 let pingVisibilityHandlerInstalled = false;
 type DiagnosticLevel = 'info' | 'warn' | 'error';
 
@@ -181,6 +189,7 @@ function updateLatencyDisplay(value: number | null, detail = 'Available while st
 function resetLatencyMetric(measuring = false): void {
   latencySmoother.reset();
   latencyCoordinator.reset();
+  frameDiagnostics.clear();
   updateLatencyDisplay(null, measuring ? 'Measuring…' : 'Available while streaming');
 }
 
@@ -189,28 +198,44 @@ function reportPendingLatencySample(): void {
   const prepared = latencyCoordinator.prepare(monotonicEpochMs(), currentDisplayFps);
   if (!prepared) return;
   const smoothed = latencySmoother.update(prepared.components);
-  updateLatencyDisplay(
-    smoothed.totalMs,
-    `Encode ${Math.round(smoothed.encodeMs)} · Transport/queue ${Math.round(smoothed.transportQueueMs)} · Decode/display ~${Math.round(smoothed.decodeDisplayMs)} ms`,
-  );
+  updateLatencyDisplay(smoothed.totalMs, 'Synchronized encoder-input-to-display estimate');
+  const diagnostic = prepared.diagnostics;
   void sendControlMessage({
     type: 'latency_report',
     seq: prepared.seq,
     total_ms: smoothed.totalMs,
     encode_ms: smoothed.encodeMs,
-    transport_queue_ms: smoothed.transportQueueMs,
+    sender_queue_ms: smoothed.senderQueueMs,
+    delivery_ms: smoothed.deliveryMs,
+    receiver_queue_ms: smoothed.receiverQueueMs,
+    transport_queue_ms: smoothed.senderQueueMs + smoothed.deliveryMs + smoothed.receiverQueueMs,
     decode_display_ms: smoothed.decodeDisplayMs,
+    access_unit_bytes: diagnostic.accessUnitBytes ?? 0,
+    media_write_blocked_ms: diagnostic.writeBlockedMs ?? 0,
+    clock_uncertainty_ms: prepared.clockUncertaintyMs,
+    clock_sync_age_ms: prepared.clockAgeMs,
+    configured_bitrate_mbps: diagnostic.configuredBitrateMbps ?? 0,
+    adaptive_bitrate_mbps: diagnostic.adaptiveBitrateMbps ?? 0,
+    dropped_input_frames: diagnostic.droppedInputFrames ?? 0,
+    effective_fps: diagnostic.effectiveFps ?? 0,
   }).catch(() => {});
 }
 
 function handleLatencySample(message: ServerStatusMessage): void {
   if (!isStreaming || !controlIsConnected()) return;
-  if (message.seq === undefined || message.capture_time_ms === undefined || message.encode_duration_ms === undefined) return;
+  if (message.seq === undefined || message.capture_time_ms === undefined || message.encode_duration_ms === undefined
+    || message.send_start_time_ms === undefined || message.receiver_complete_time_ms === undefined
+    || message.receiver_queue_ms === undefined) return;
+  const diagnostic = frameDiagnostics.get(message.seq);
+  frameDiagnostics.delete(message.seq);
   latencyCoordinator.acknowledge({
     seq: message.seq,
     captureTimeMs: message.capture_time_ms,
     encodeDurationMs: message.encode_duration_ms,
-    receivedAtMs: monotonicEpochMs(),
+    sendStartTimeMs: message.send_start_time_ms,
+    receiverCompleteTimeMs: message.receiver_complete_time_ms,
+    receiverQueueMs: message.receiver_queue_ms,
+    ...diagnostic,
   });
   reportPendingLatencySample();
 }
@@ -303,9 +328,10 @@ async function sendPing(): Promise<void> {
     pendingPing = null;
   }
   const id = pingSequence++;
-  pendingPing = { id, sentAt: performance.now() };
+  const clientSendMs = monotonicEpochMs();
+  pendingPing = { id, sentAt: performance.now(), clientSendMs };
   try {
-    await sendControlMessage({ type: 'ping', id });
+    await sendControlMessage({ type: 'ping', id, client_send_ms: clientSendMs });
   } catch {
     if (pendingPing?.id === id) pendingPing = null;
     markControlDisconnected();
@@ -320,11 +346,17 @@ function startPingSampling(): void {
   pingTimer = window.setInterval(() => { void sendPing(); }, TRANSPORT_CONFIG.KEEPALIVE_INTERVAL_MS);
 }
 
-function handlePong(id: number | undefined): void {
-  if (!pendingPing || (id !== undefined && id !== pendingPing.id)) return;
-  const elapsed = performance.now() - pendingPing.sentAt;
+function handlePong(message: ServerStatusMessage): void {
+  if (!pendingPing || (message.id !== undefined && message.id !== pendingPing.id)) return;
+  const receivedAtMs = monotonicEpochMs();
+  const ping = pendingPing;
   pendingPing = null;
-  latencyCoordinator.recordRtt(elapsed, monotonicEpochMs());
+  if (message.server_receive_ms !== undefined && message.server_send_ms !== undefined) {
+    const estimate = latencyCoordinator.clock.record(ping.clientSendMs, message.server_receive_ms, message.server_send_ms, receivedAtMs);
+    if (estimate) {
+      void sendControlMessage({ type: 'clock_sync', offset_ms: estimate.offsetMs, uncertainty_ms: estimate.uncertaintyMs }).catch(() => {});
+    }
+  }
   reportPendingLatencySample();
 }
 
@@ -414,7 +446,7 @@ export function parseCertHash(input: string | null): Uint8Array | null {
   return null;
 }
 
-async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number, height: number, codec: string, timing: EncoderTiming | null): Promise<void> {
+async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number, height: number, codec: string, timing: EncoderTiming | null): Promise<{ senderQueueMs: number; writeBlockedMs: number }> {
   const timedTag = codec === 'H265' ? TRANSPORT_CONFIG.CODEC_TAGS.H265 : TRANSPORT_CONFIG.CODEC_TAGS.H264;
   const legacyTag = codec === 'H265' ? TRANSPORT_CONFIG.LEGACY_CODEC_TAGS.H265 : TRANSPORT_CONFIG.LEGACY_CODEC_TAGS.H264;
   const tag = timing ? timedTag : legacyTag;
@@ -423,7 +455,9 @@ async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number
     const uniStream = await transport.createUnidirectionalStream();
     uniStreamWriter = uniStream.getWriter();
   }
-  if (!uniStreamWriter) return;
+  if (!uniStreamWriter) return { senderQueueMs: 0, writeBlockedMs: 0 };
+  const sendStartTimeMs = monotonicEpochMs();
+  const senderQueueMs = timing ? Math.max(0, sendStartTimeMs - timing.captureTimeMs - timing.encodeDurationMs) : 0;
 
   const headerBytes = timing ? TRANSPORT_CONFIG.PACKET_HEADER_BYTES : TRANSPORT_CONFIG.LEGACY_PACKET_HEADER_BYTES;
   const packetLen = headerBytes + accessUnit.length;
@@ -445,11 +479,14 @@ async function sendAccessUnit(accessUnit: Uint8Array, seq: number, width: number
   if (timing) {
     view.setFloat64(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.CAPTURE_TIME, timing.captureTimeMs, false);
     view.setFloat32(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.ENCODE_DURATION, timing.encodeDurationMs, false);
+    view.setFloat64(packetOffset + TRANSPORT_CONFIG.PACKET_FIELD_OFFSETS.SEND_START_TIME, sendStartTimeMs, false);
   }
 
   combinedBuf.set(accessUnit, TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + headerBytes);
 
+  const writeStartedAt = performance.now();
   await uniStreamWriter.write(combinedBuf);
+  return { senderQueueMs, writeBlockedMs: performance.now() - writeStartedAt };
 }
 
 function controlIsConnected(): boolean {
@@ -486,7 +523,7 @@ async function readControlMessages(reader: ReadableStreamDefaultReader<Uint8Arra
         pending = pending.slice(TRANSPORT_CONFIG.LENGTH_PREFIX_BYTES + length);
         const message = JSON.parse(new TextDecoder().decode(payload)) as ServerStatusMessage;
         if (message.type === 'status') handleServerStatusUpdate(message);
-        if (message.type === 'pong') handlePong(message.id);
+        if (message.type === 'pong') handlePong(message);
         if (message.type === 'latency_sample') handleLatencySample(message);
       }
     }
@@ -1039,6 +1076,9 @@ export async function toggleCasting(): Promise<void> {
     const TrackProcessorClass = window.MediaStreamTrackProcessor;
     let forceNextKeyframe = false;
     const encoderTiming = new EncoderTimingTracker();
+    const fallbackCongestion = new CongestionController(latencySetting as 'ULL' | 'balanced' | 'quality', targetBitrate, 1000 / targetFps);
+    const fallbackStartedAt = performance.now();
+    let fallbackWriteTail: Promise<void> = Promise.resolve();
 
     // Chromium/Edge can keep the capture processor, encoder, compositor, and
     // WebTransport writer active in a dedicated worker while this page is
@@ -1057,6 +1097,15 @@ export async function toggleCasting(): Promise<void> {
           const message = event.data;
           if (message.type === 'progress' && typeof message.sequence === 'number') {
             seqNum = message.sequence;
+            frameDiagnostics.set(message.sequence, {
+              accessUnitBytes: message.accessUnitBytes,
+              writeBlockedMs: message.writeBlockedMs,
+              droppedInputFrames: message.droppedInputFrames,
+              configuredBitrateMbps: message.configuredBitrate / 1_000_000,
+              adaptiveBitrateMbps: message.adaptiveBitrate / 1_000_000,
+              effectiveFps: message.effectiveFps,
+            });
+            while (frameDiagnostics.size > 64) frameDiagnostics.delete(frameDiagnostics.keys().next().value as number);
             const frameStat = document.getElementById('statFrameCount');
             if (frameStat) frameStat.textContent = message.sequence.toString();
           } else if (message.type === 'log' && message.message) {
@@ -1099,6 +1148,7 @@ export async function toggleCasting(): Promise<void> {
           bitrate: targetBitrate,
           framerate: targetFps,
           latencyMode: webcodecsLatencyMode as 'quality' | 'realtime',
+          congestionMode: latencySetting as 'ULL' | 'balanced' | 'quality',
           hardwareAcceleration: hardwarePref,
           aspectMode: compositorAspectMode,
           displayGeometry,
@@ -1126,20 +1176,42 @@ export async function toggleCasting(): Promise<void> {
     videoEncoder = new VideoEncoder({
       output: async (chunk, metadata) => {
         seqNum++;
+        const outputSeq = seqNum;
         const timing = encoderTiming.resolve(chunk.timestamp);
-        const accessUnit = convertToAnnexB(chunk, metadata, wireCodec, nalCache, seqNum, log);
+        const accessUnit = convertToAnnexB(chunk, metadata, wireCodec, nalCache, outputSeq, log);
         if (accessUnit.length > DECODER_LIMITS.MAX_ACCESS_UNIT_BYTES) {
           log(`[GUARDRAIL] Encoded access unit exceeds the ${DECODER_LIMITS.MAX_ACCESS_UNIT_BYTES} byte decoder limit`, true);
           await stopStreaming();
           return;
         }
-        await sendAccessUnit(accessUnit, seqNum, activeWidth, activeHeight, wireCodec, timing);
+        fallbackCongestion.writeStarted();
+        const writePromise = fallbackWriteTail.then(() => sendAccessUnit(accessUnit, outputSeq, activeWidth, activeHeight, wireCodec, timing));
+        fallbackWriteTail = writePromise.then(() => {}, () => {});
+        const writeDiagnostic = await writePromise;
+        const congestionSnapshot = fallbackCongestion.writeFinished(performance.now(), writeDiagnostic.senderQueueMs, writeDiagnostic.writeBlockedMs);
+        if (congestionSnapshot.bitrateChanged && videoEncoder?.state === 'configured') {
+          videoEncoder.configure({
+            codec: codecString, width: activeWidth, height: activeHeight,
+            bitrate: congestionSnapshot.currentBitrate, framerate: targetFps,
+            latencyMode: webcodecsLatencyMode as 'quality' | 'realtime', hardwareAcceleration: hardwarePref,
+          });
+          forceNextKeyframe = true;
+        }
+        frameDiagnostics.set(outputSeq, {
+          accessUnitBytes: accessUnit.length,
+          writeBlockedMs: writeDiagnostic.writeBlockedMs,
+          droppedInputFrames: congestionSnapshot.droppedInputFrames,
+          configuredBitrateMbps: targetBitrate / 1_000_000,
+          adaptiveBitrateMbps: congestionSnapshot.currentBitrate / 1_000_000,
+          effectiveFps: outputSeq * 1000 / Math.max(1, performance.now() - fallbackStartedAt),
+        });
+        while (frameDiagnostics.size > 64) frameDiagnostics.delete(frameDiagnostics.keys().next().value as number);
 
         const frameStat = document.getElementById('statFrameCount');
-        if (frameStat) frameStat.textContent = seqNum.toString();
+        if (frameStat) frameStat.textContent = outputSeq.toString();
 
-        if (seqNum % targetFps === 0) {
-          log(`[STREAMING ${wireCodec}] Frame #${seqNum}: ${activeWidth}x${activeHeight} (${Math.round(accessUnit.length / 1024)} KB) via QUIC stream`);
+        if (outputSeq % targetFps === 0) {
+          log(`[STREAMING ${wireCodec}] Frame #${outputSeq}: ${activeWidth}x${activeHeight} (${Math.round(accessUnit.length / 1024)} KB) via QUIC stream`);
         }
       },
       error: (e) => {
@@ -1221,23 +1293,21 @@ export async function toggleCasting(): Promise<void> {
           const now = performance.now();
           if (lastSyntheticFrameTime > 0 && (now - lastSyntheticFrameTime) < minFrameIntervalMs) continue;
           lastSyntheticFrameTime = now;
-          syntheticFrameCount++;
-
           if (fallbackVideo) {
             fallbackContext.drawImage(fallbackVideo, 0, 0, rawWidth, rawHeight);
           }
           const rawFrame = new VideoFrame(fallbackCanvas, { timestamp: Math.round(now * 1000) });
           try {
+            if (!videoEncoder || fallbackCongestion.shouldDropInput(videoEncoder.encodeQueueSize, now)) continue;
+            syntheticFrameCount++;
             const needKeyFrame = (syntheticFrameCount <= ENCODER_GUARDRAILS.INITIAL_KEYFRAME_COUNT
               || syntheticFrameCount % keyframeInterval === 0 || forceNextKeyframe);
             if (forceNextKeyframe) forceNextKeyframe = false;
-            if (videoEncoder && videoEncoder.encodeQueueSize <= ENCODER_GUARDRAILS.MAX_ENCODER_QUEUE) {
-              encoderTiming.mark(rawFrame.timestamp);
-              const composedFrame = frameCompositor?.compose(rawFrame);
-              if (!composedFrame) throw new Error('Video compositor is not initialized');
-              videoEncoder.encode(composedFrame, { keyFrame: needKeyFrame });
-              if (composedFrame !== rawFrame) composedFrame.close();
-            }
+            encoderTiming.mark(rawFrame.timestamp);
+            const composedFrame = frameCompositor?.compose(rawFrame);
+            if (!composedFrame) throw new Error('Video compositor is not initialized');
+            videoEncoder.encode(composedFrame, { keyFrame: needKeyFrame });
+            if (composedFrame !== rawFrame) composedFrame.close();
           } finally {
             rawFrame.close();
           }
@@ -1273,13 +1343,12 @@ export async function toggleCasting(): Promise<void> {
         }
         lastFrameTime = now;
 
-        frameCount++;
-        const needKeyFrame = (frameCount <= ENCODER_GUARDRAILS.INITIAL_KEYFRAME_COUNT || frameCount % keyframeInterval === 0 || forceNextKeyframe);
-        if (forceNextKeyframe) forceNextKeyframe = false;
-
-        if (videoEncoder && videoEncoder.encodeQueueSize > ENCODER_GUARDRAILS.MAX_ENCODER_QUEUE) {
+        if (videoEncoder && fallbackCongestion.shouldDropInput(videoEncoder.encodeQueueSize, now)) {
           rawFrame.close();
         } else if (videoEncoder) {
+          frameCount++;
+          const needKeyFrame = (frameCount <= ENCODER_GUARDRAILS.INITIAL_KEYFRAME_COUNT || frameCount % keyframeInterval === 0 || forceNextKeyframe);
+          if (forceNextKeyframe) forceNextKeyframe = false;
           if (frameCount === 1 && frameCompositor) {
             const frameLayout = frameCompositor.layoutFor(rawFrame.displayWidth, rawFrame.displayHeight);
             const visibleRect = rawFrame.visibleRect;

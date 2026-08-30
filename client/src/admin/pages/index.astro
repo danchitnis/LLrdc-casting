@@ -37,6 +37,9 @@ import ManagementCard from '../components/ManagementCard.astro';
       .metric { background: #0b1729; border-radius: 8px; padding: 11px; }
       .label { display: block; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
       .value { display: block; margin-top: 5px; font: 600 1.05rem ui-monospace, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .value[data-overflowing="true"] { cursor: help; text-decoration: underline dotted rgba(144, 164, 189, .55); text-underline-offset: 4px; }
+      .metric-tooltip { position: fixed; z-index: 1000; max-width: min(420px, calc(100vw - 24px)); padding: 8px 10px; border: 1px solid #456789; border-radius: 8px; background: #071321; box-shadow: 0 10px 30px rgba(0, 0, 0, .38); color: var(--text); font: 600 .8rem/1.4 ui-monospace, monospace; overflow-wrap: anywhere; pointer-events: none; }
+      .metric-tooltip[hidden] { display: none; }
       button { border-radius: 8px; padding: 10px 15px; font-weight: 800; cursor: pointer; }
       button:disabled { opacity: .45; cursor: not-allowed; }
       input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--blue); }
@@ -72,6 +75,23 @@ import ManagementCard from '../components/ManagementCard.astro';
       .muted { color: var(--muted); }
       .table-scroll { overflow: auto; }
       #metrics { margin-top: 12px; }
+      .section-intro { max-width: 760px; margin: 8px 0 0; color: var(--muted); line-height: 1.5; }
+      .latency-grid { margin-top: 14px; grid-template-columns: repeat(3, minmax(180px, 1fr)); }
+      .latency-grid .metric:first-child { grid-column: 1 / -1; padding: 16px; border: 1px solid rgba(255, 200, 87, .45); background: linear-gradient(115deg, rgba(255, 200, 87, .16), #0b1729 52%); }
+      .latency-grid .metric:first-child .label { color: var(--yellow); }
+      .latency-grid .metric:first-child .value { font-size: 1.5rem; }
+      .latency-flow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; margin-top: 10px; color: var(--muted); font-size: .7rem; text-align: center; }
+      .latency-flow span { position: relative; padding: 6px 4px; border-top: 1px solid var(--line); }
+      .latency-flow span:not(:last-child)::after { content: '›'; position: absolute; right: -7px; top: 2px; color: var(--blue); font-size: 1rem; }
+      .status-line { margin: 10px 0 0; }
+      .diagnostic-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 14px; }
+      .diagnostic-cadence { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+      .cadence-item { display: inline-flex; align-items: baseline; gap: 6px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 99px; background: rgba(69, 194, 255, .06); color: var(--muted); font-size: .72rem; }
+      .cadence-item strong { color: var(--blue); font-size: .75rem; }
+      .diagnostic-group { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: rgba(8, 17, 31, .42); }
+      .diagnostic-group h3 { margin: 0 0 5px; color: var(--text); font-size: .82rem; }
+      .diagnostic-group > p { margin: 0 0 11px; color: var(--muted); font-size: .76rem; line-height: 1.45; }
+      .diagnostic-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
       .log-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
       .log-toolbar select, .log-toolbar input { min-height: 38px; border: 1px solid #355477; border-radius: 8px; padding: 7px 10px; background: #0b1729; color: var(--text); }
       .log-toolbar input { min-width: min(260px, 65vw); }
@@ -98,6 +118,9 @@ import ManagementCard from '../components/ManagementCard.astro';
       @media (max-width: 560px) {
         body { padding: 14px; }
         .card-heading { align-items: flex-start; flex-direction: column; }
+        .latency-grid, .diagnostic-groups { grid-template-columns: 1fr; }
+        .latency-grid .metric:first-child { grid-column: auto; }
+        .latency-flow { display: none; }
         .log-entry { grid-template-columns: 1fr; }
       }
     </style>
@@ -121,27 +144,55 @@ import ManagementCard from '../components/ManagementCard.astro';
           <button id="resetChart" class="secondary" type="button">Reset plot</button>
           <button id="stop" class="danger" type="button" disabled>Stop sharing</button>
         </div>
+        <p class="section-intro">Current stream format and measured receiver ingest. These values describe payload flow, not end-to-end latency.</p>
         <div id="metrics" class="grid"></div>
-        <div class="chart-stack">
-          <section class="chart-panel" aria-labelledby="bandwidthChartTitle">
-            <h3 id="bandwidthChartTitle">Encoded payload throughput</h3>
-            <canvas id="chart" width="1000" height="300" aria-label="Measured encoded bitrate over time"></canvas>
-          </section>
-          <section class="chart-panel" aria-labelledby="latencyChartTitle">
-            <div class="chart-heading">
-              <h3 id="latencyChartTitle">Estimated stream latency</h3>
-              <div id="latencySeriesControls" class="series-controls" role="group" aria-label="Latency graph series">
-                <button class="series-toggle" type="button" data-latency-series="total" aria-pressed="true" style="--series-color: #ffc857"><span class="series-swatch" aria-hidden="true"></span>Total</button>
-                <button class="series-toggle" type="button" data-latency-series="encode" aria-pressed="false" style="--series-color: #45c2ff"><span class="series-swatch" aria-hidden="true"></span>Encoding</button>
-                <button class="series-toggle" type="button" data-latency-series="transport" aria-pressed="false" style="--series-color: #35d49a"><span class="series-swatch" aria-hidden="true"></span>Transport/queue</button>
-                <button class="series-toggle" type="button" data-latency-series="decode" aria-pressed="false" style="--series-color: #ff7eb6"><span class="series-swatch" aria-hidden="true"></span>Decode/display</button>
-              </div>
+        <section class="chart-panel chart-stack" aria-labelledby="bandwidthChartTitle">
+          <h3 id="bandwidthChartTitle">Encoded payload throughput</h3>
+          <canvas id="chart" width="1000" height="300" aria-label="Measured encoded bitrate over time"></canvas>
+        </section>
+        <p id="sender" class="muted">No active sender</p>
+      </ManagementCard>
+
+      <ManagementCard title="End-to-end latency estimate">
+        <p class="section-intro">Estimated encoder-input-to-display time. The total is the sum of the five phases below; decode/display remains a one-refresh allowance.</p>
+        <div id="latencyMetrics" class="grid latency-grid"></div>
+        <div class="latency-flow" aria-hidden="true"><span>Encode</span><span>Sender queue</span><span>Delivery</span><span>Receiver input</span><span>Display</span></div>
+        <p id="latencyFreshness" class="muted status-line">Latency is available while streaming</p>
+        <section class="chart-panel chart-stack" aria-labelledby="latencyChartTitle">
+          <div class="chart-heading">
+            <h3 id="latencyChartTitle">Actual latency samples</h3>
+            <div id="latencySeriesControls" class="series-controls" role="group" aria-label="Latency graph series">
+              <button class="series-toggle" type="button" data-latency-series="total" aria-pressed="true" style="--series-color: #ffc857"><span class="series-swatch" aria-hidden="true"></span>Total</button>
+              <button class="series-toggle" type="button" data-latency-series="encode" aria-pressed="false" style="--series-color: #45c2ff"><span class="series-swatch" aria-hidden="true"></span>Encoding</button>
+              <button class="series-toggle" type="button" data-latency-series="sender" aria-pressed="false" style="--series-color: #35d49a"><span class="series-swatch" aria-hidden="true"></span>Sender queue</button>
+              <button class="series-toggle" type="button" data-latency-series="delivery" aria-pressed="false" style="--series-color: #a78bfa"><span class="series-swatch" aria-hidden="true"></span>Delivery</button>
+              <button class="series-toggle" type="button" data-latency-series="receiver" aria-pressed="false" style="--series-color: #fb923c"><span class="series-swatch" aria-hidden="true"></span>Receiver queue/input</button>
+              <button class="series-toggle" type="button" data-latency-series="decode" aria-pressed="false" style="--series-color: #ff7eb6"><span class="series-swatch" aria-hidden="true"></span>Decode/display</button>
             </div>
-            <canvas id="latencyChart" width="1000" height="300" aria-label="Estimated stream latency over time"></canvas>
-            <p id="latencyFreshness" class="muted">Latency is available while streaming</p>
+          </div>
+          <canvas id="latencyChart" width="1000" height="300" aria-label="Estimated stream latency over time"></canvas>
+        </section>
+      </ManagementCard>
+
+      <ManagementCard title="Transport and congestion diagnostics">
+        <p class="section-intro">Supporting evidence for explaining high sender queue or delivery time. These values are diagnostics and are not added to the latency total.</p>
+        <div id="diagnosticCadence" class="diagnostic-cadence" role="note" aria-label="Diagnostic update rates">
+          <span class="cadence-item">Displayed samples <strong>~1 Hz</strong></span>
+          <span class="cadence-item">Congestion evaluation <strong>every 2s</strong></span>
+          <span class="cadence-item">Bitrate recovery <strong>after 10s healthy</strong></span>
+        </div>
+        <div class="diagnostic-groups">
+          <section class="diagnostic-group" aria-labelledby="senderPressureTitle">
+            <h3 id="senderPressureTitle">Sender pressure and adaptation</h3>
+            <p>Shows whether the sender is reducing bitrate or input frame rate to keep encoded writes bounded.</p>
+            <div id="congestionMetrics" class="grid diagnostic-grid"></div>
+          </section>
+          <section class="diagnostic-group" aria-labelledby="measurementQualityTitle">
+            <h3 id="measurementQualityTitle">Transport integrity and confidence</h3>
+            <p>Packet size, receiver ingest timing, sequence integrity, and clock-synchronization quality.</p>
+            <div id="measurementMetrics" class="grid diagnostic-grid"></div>
           </section>
         </div>
-        <p id="sender" class="muted">No active sender</p>
       </ManagementCard>
 
       <ManagementCard title="Connected devices">
@@ -241,6 +292,8 @@ import ManagementCard from '../components/ManagementCard.astro';
       <div class="settings-actions"><button id="saveSettings" class="secondary" type="button" disabled>Apply settings</button><p id="settingsStatus" class="setting-status" role="status" aria-live="polite"></p></div>
       </div>
     </main>
+
+    <div id="metricTooltip" class="metric-tooltip" role="tooltip" hidden></div>
 
     <script>
       import '../lib/dashboard';

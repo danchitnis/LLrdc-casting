@@ -8,7 +8,8 @@ use tokio::sync::broadcast;
 const MAX_EVENTS: usize = 2_000;
 const MAX_HISTORY: usize = 10_000;
 const MAX_SAMPLES: usize = 300;
-const ESTIMATED_LATENCY_MAX_MS: f64 = 5_000.0;
+const ESTIMATED_LATENCY_MAX_MS: f64 = 30_000.0;
+const CLOCK_DRIFT_MS_PER_MS: f64 = 0.00005;
 
 #[derive(Clone)]
 pub struct ManagementState {
@@ -23,7 +24,15 @@ struct Inner {
     history: VecDeque<SessionRecord>,
     events: VecDeque<EventRecord>,
     connections: HashMap<String, ConnectionRecord>,
+    clock_syncs: HashMap<String, ClockSyncState>,
     health: HealthSnapshot,
+}
+
+#[derive(Clone, Copy)]
+struct ClockSyncState {
+    offset_ms: f64,
+    uncertainty_ms: f64,
+    received_at: Instant,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,7 +85,9 @@ pub struct LatencyMetricSample {
     pub elapsed_sec: f64,
     pub total_ms: f64,
     pub encode_ms: f64,
-    pub transport_queue_ms: f64,
+    pub sender_queue_ms: f64,
+    pub delivery_ms: f64,
+    pub receiver_queue_ms: f64,
     pub decode_display_ms: f64,
 }
 
@@ -154,8 +165,20 @@ pub struct EstimatedLatencySnapshot {
     pub seq: u32,
     pub total_ms: f64,
     pub encode_ms: f64,
+    pub sender_queue_ms: f64,
+    pub delivery_ms: f64,
+    pub receiver_queue_ms: f64,
+    /// Deprecated aggregate retained for older management consumers.
     pub transport_queue_ms: f64,
     pub decode_display_ms: f64,
+    pub access_unit_bytes: u64,
+    pub media_write_blocked_ms: f64,
+    pub clock_uncertainty_ms: f64,
+    pub clock_sync_age_ms: f64,
+    pub configured_bitrate_mbps: f64,
+    pub adaptive_bitrate_mbps: f64,
+    pub dropped_input_frames: u64,
+    pub effective_fps: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -207,6 +230,7 @@ impl ManagementState {
                 history: VecDeque::new(),
                 events: VecDeque::new(),
                 connections: HashMap::new(),
+                clock_syncs: HashMap::new(),
                 health: HealthSnapshot { playback_state: "idle_dashboard".into(), ..HealthSnapshot::default() },
             })),
             updates,
@@ -244,6 +268,7 @@ impl ManagementState {
         let mut disconnect_message = format!("connection={connection_id} cause=peer_close");
         let sender_was_active = if let Ok(mut inner) = self.inner.lock() {
             let elapsed = inner.started.elapsed().as_secs_f64();
+            inner.clock_syncs.remove(connection_id);
             if let Some(connection) = inner.connections.get_mut(connection_id) {
                 disconnect_message = format!("connection={connection_id} device={} ip={} cause=peer_close duration_sec={:.1}", connection.device_id, connection.remote_ip, elapsed - connection.connected_at_sec);
                 connection.connected = false; connection.sharing = false; connection.last_seen_at_sec = elapsed;
@@ -281,6 +306,20 @@ impl ManagementState {
         touched
     }
 
+    pub fn record_clock_sync(&self, connection_id: &str, offset_ms: f64, uncertainty_ms: f64) -> bool {
+        if !offset_ms.is_finite() || !uncertainty_ms.is_finite() || !(0.0..=ESTIMATED_LATENCY_MAX_MS).contains(&uncertainty_ms) {
+            return false;
+        }
+        let accepted = if let Ok(mut inner) = self.inner.lock() {
+            if inner.connections.get(connection_id).is_some_and(|connection| connection.connected) {
+                inner.clock_syncs.insert(connection_id.to_string(), ClockSyncState { offset_ms, uncertainty_ms, received_at: Instant::now() });
+                true
+            } else { false }
+        } else { false };
+        if accepted { let _ = self.updates.send(()); }
+        accepted
+    }
+
     /// Return whether the sender owning the active stream has recently
     /// touched its authenticated connection. A different paired client must
     /// never keep another client's stream alive.
@@ -304,6 +343,7 @@ impl ManagementState {
             let now = Instant::now();
             let elapsed = inner.started.elapsed().as_secs_f64();
             if let Some(sender) = sender.as_ref() {
+                inner.clock_syncs.remove(&sender.connection_id);
                 if let Some(c) = inner.connections.get_mut(&sender.connection_id) { c.sharing = true; c.last_seen_at_sec = elapsed; }
             }
             inner.stream = Some(ActiveStream { id, sender, config, started_at: now, frames: 0, bytes: 0, last_seq: None, sequence_gaps: 0, latency_total_ms: 0.0, latency_count: 0, peak_bitrate_mbps: 0.0, recent_bytes: VecDeque::new(), recent_frames: VecDeque::new(), samples: VecDeque::new(), last_sample_at: now, sample_bytes: 0, sample_frames: 0, latency_window: VecDeque::new(), latency_samples: Vec::new(), last_latency_evaluation: now, high_latency: false, healthy_latency_windows: 0, estimated_latency: None, estimated_latency_samples: VecDeque::new() });
@@ -319,28 +359,39 @@ impl ManagementState {
         connection_id: &str,
         sample: EstimatedLatencySnapshot,
     ) -> bool {
-        let components_total = sample.encode_ms + sample.transport_queue_ms + sample.decode_display_ms;
-        let values = [sample.total_ms, sample.encode_ms, sample.transport_queue_ms, sample.decode_display_ms];
+        let aggregate = sample.sender_queue_ms + sample.delivery_ms + sample.receiver_queue_ms;
+        let components_total = sample.encode_ms + aggregate + sample.decode_display_ms;
+        let values = [sample.total_ms, sample.encode_ms, sample.sender_queue_ms, sample.delivery_ms,
+            sample.receiver_queue_ms, sample.decode_display_ms, sample.media_write_blocked_ms,
+            sample.clock_uncertainty_ms, sample.clock_sync_age_ms, sample.configured_bitrate_mbps,
+            sample.adaptive_bitrate_mbps, sample.effective_fps];
         let valid_values = values.into_iter().all(|value| value.is_finite() && (0.0..=ESTIMATED_LATENCY_MAX_MS).contains(&value));
-        if sample.seq == 0 || !valid_values || (sample.total_ms - components_total).abs() > 2.0 {
+        if sample.seq == 0 || !valid_values || (sample.total_ms - components_total).abs() > 2.0
+            || (sample.transport_queue_ms - aggregate).abs() > 2.0 {
             return false;
         }
 
         let accepted = if let Ok(mut inner) = self.inner.lock() {
             let Some(stream) = inner.stream.as_mut() else { return false; };
             let owned = stream.sender.as_ref().is_some_and(|sender| sender.connection_id == connection_id);
-            let newer = stream.estimated_latency.as_ref().map_or(true, |(_, previous)| sample.seq > previous.seq);
+            let previous_seq = stream.estimated_latency.as_ref().map(|(_, previous)| previous.seq);
+            let newer = previous_seq.is_none_or(|previous| sample.seq > previous);
+            let same = previous_seq == Some(sample.seq);
             let submitted = stream.last_seq.is_some_and(|last_seq| sample.seq <= last_seq);
-            if owned && newer && submitted {
-                stream.estimated_latency_samples.push_back(LatencyMetricSample {
-                    elapsed_sec: stream.started_at.elapsed().as_secs_f64(),
-                    total_ms: sample.total_ms,
-                    encode_ms: sample.encode_ms,
-                    transport_queue_ms: sample.transport_queue_ms,
-                    decode_display_ms: sample.decode_display_ms,
-                });
-                while stream.estimated_latency_samples.len() > MAX_SAMPLES {
-                    stream.estimated_latency_samples.pop_front();
+            if owned && (newer || same) && submitted {
+                if newer {
+                    stream.estimated_latency_samples.push_back(LatencyMetricSample {
+                        elapsed_sec: stream.started_at.elapsed().as_secs_f64(),
+                        total_ms: sample.total_ms,
+                        encode_ms: sample.encode_ms,
+                        sender_queue_ms: sample.sender_queue_ms,
+                        delivery_ms: sample.delivery_ms,
+                        receiver_queue_ms: sample.receiver_queue_ms,
+                        decode_display_ms: sample.decode_display_ms,
+                    });
+                    while stream.estimated_latency_samples.len() > MAX_SAMPLES {
+                        stream.estimated_latency_samples.pop_front();
+                    }
                 }
                 stream.estimated_latency = Some((Instant::now(), sample));
                 true
@@ -350,6 +401,72 @@ impl ManagementState {
         } else {
             false
         };
+        if accepted { let _ = self.updates.send(()); }
+        accepted
+    }
+
+    /// Record portal latency directly at the receiver so background-tab
+    /// throttling cannot interrupt management sampling.
+    pub fn record_receiver_estimated_latency(
+        &self,
+        seq: u32,
+        capture_time_ms: f64,
+        encode_duration_ms: f32,
+        send_start_time_ms: f64,
+        receiver_complete_time_ms: f64,
+        receiver_queue_ms: f64,
+        display_fps: u32,
+    ) -> bool {
+        if display_fps == 0 || seq == 0 { return false; }
+        let accepted = if let Ok(mut inner) = self.inner.lock() {
+            let Some(connection_id) = inner.stream.as_ref().and_then(|stream| stream.sender.as_ref()).map(|sender| sender.connection_id.clone()) else { return false; };
+            let Some(sync) = inner.clock_syncs.get(&connection_id).copied() else { return false; };
+            let sync_age_ms = sync.received_at.elapsed().as_secs_f64() * 1_000.0;
+            let uncertainty_ms = sync.uncertainty_ms + sync_age_ms * CLOCK_DRIFT_MS_PER_MS;
+            let sender_raw_ms = send_start_time_ms - capture_time_ms - f64::from(encode_duration_ms);
+            let delivery_raw_ms = receiver_complete_time_ms - sync.offset_ms - send_start_time_ms;
+            if ![capture_time_ms, f64::from(encode_duration_ms), send_start_time_ms, receiver_complete_time_ms,
+                receiver_queue_ms, uncertainty_ms, sender_raw_ms, delivery_raw_ms].into_iter().all(f64::is_finite)
+                || sender_raw_ms < -uncertainty_ms || delivery_raw_ms < -uncertainty_ms || receiver_queue_ms < 0.0 {
+                return false;
+            }
+            let Some(stream) = inner.stream.as_mut() else { return false; };
+            if stream.estimated_latency.as_ref().is_some_and(|(_, previous)| seq <= previous.seq) { return false; }
+            let previous = stream.estimated_latency.as_ref().map(|(_, sample)| sample.clone());
+            let blend = |previous: f64, current: f64| previous + 0.25 * (current - previous);
+            let encode_ms = previous.as_ref().map_or(f64::from(encode_duration_ms), |sample| blend(sample.encode_ms, f64::from(encode_duration_ms)));
+            let sender_queue_ms = previous.as_ref().map_or(sender_raw_ms.max(0.0), |sample| blend(sample.sender_queue_ms, sender_raw_ms.max(0.0)));
+            let delivery_ms = previous.as_ref().map_or(delivery_raw_ms.max(0.0), |sample| blend(sample.delivery_ms, delivery_raw_ms.max(0.0)));
+            let receiver_queue_ms = previous.as_ref().map_or(receiver_queue_ms, |sample| blend(sample.receiver_queue_ms, receiver_queue_ms));
+            let decode_display_ms = 1_000.0 / f64::from(display_fps);
+            let total_ms = encode_ms + sender_queue_ms + delivery_ms + receiver_queue_ms + decode_display_ms;
+            if total_ms > ESTIMATED_LATENCY_MAX_MS { return false; }
+            let sample = EstimatedLatencySnapshot {
+                seq,
+                total_ms,
+                encode_ms,
+                sender_queue_ms,
+                delivery_ms,
+                receiver_queue_ms,
+                transport_queue_ms: sender_queue_ms + delivery_ms + receiver_queue_ms,
+                decode_display_ms,
+                access_unit_bytes: previous.as_ref().map_or(0, |sample| sample.access_unit_bytes),
+                media_write_blocked_ms: previous.as_ref().map_or(0.0, |sample| sample.media_write_blocked_ms),
+                clock_uncertainty_ms: uncertainty_ms,
+                clock_sync_age_ms: sync_age_ms,
+                configured_bitrate_mbps: previous.as_ref().map_or(f64::from(stream.config.bitrate_mbps), |sample| sample.configured_bitrate_mbps),
+                adaptive_bitrate_mbps: previous.as_ref().map_or(f64::from(stream.config.bitrate_mbps), |sample| sample.adaptive_bitrate_mbps),
+                dropped_input_frames: previous.as_ref().map_or(0, |sample| sample.dropped_input_frames),
+                effective_fps: previous.as_ref().map_or(f64::from(stream.config.fps), |sample| sample.effective_fps),
+            };
+            stream.estimated_latency_samples.push_back(LatencyMetricSample {
+                elapsed_sec: stream.started_at.elapsed().as_secs_f64(), total_ms, encode_ms: sample.encode_ms,
+                sender_queue_ms, delivery_ms, receiver_queue_ms, decode_display_ms,
+            });
+            while stream.estimated_latency_samples.len() > MAX_SAMPLES { stream.estimated_latency_samples.pop_front(); }
+            stream.estimated_latency = Some((Instant::now(), sample));
+            true
+        } else { false };
         if accepted { let _ = self.updates.send(()); }
         accepted
     }
@@ -536,6 +653,17 @@ mod tests {
         }
     }
 
+    fn latency_sample(seq: u32) -> EstimatedLatencySnapshot {
+        EstimatedLatencySnapshot {
+            seq, total_ms: 29.5, encode_ms: 7.0, sender_queue_ms: 1.0,
+            delivery_ms: 2.0, receiver_queue_ms: 2.8, transport_queue_ms: 5.8,
+            decode_display_ms: 16.7, access_unit_bytes: 100_000,
+            media_write_blocked_ms: 1.0, clock_uncertainty_ms: 0.5,
+            clock_sync_age_ms: 100.0, configured_bitrate_mbps: 8.0,
+            adaptive_bitrate_mbps: 6.4, dropped_input_frames: 2, effective_fps: 29.0,
+        }
+    }
+
     #[test]
     fn lifecycle_records_frames_and_stop_reason() {
         let state = ManagementState::new();
@@ -590,10 +718,7 @@ mod tests {
         state.hello(client("other"));
         state.start(config(), Some(client("sender")));
         state.record_frame(7, 1_000, 2.0);
-        let sample = EstimatedLatencySnapshot {
-            seq: 7, total_ms: 29.5, encode_ms: 7.0,
-            transport_queue_ms: 5.8, decode_display_ms: 16.7,
-        };
+        let sample = latency_sample(7);
         assert!(!state.record_estimated_latency("other", sample.clone()));
         assert!(state.record_estimated_latency("sender", sample.clone()));
         let active = state.snapshot().active_stream.unwrap();
@@ -601,7 +726,8 @@ mod tests {
         assert_eq!(active.estimated_latency.unwrap().seq, 7);
         assert_eq!(active.latency_samples.len(), 1);
         assert_eq!(active.latency_samples[0].total_ms, 29.5);
-        assert!(!state.record_estimated_latency("sender", sample));
+        assert!(state.record_estimated_latency("sender", sample));
+        assert_eq!(state.snapshot().active_stream.unwrap().latency_samples.len(), 1);
     }
 
     #[test]
@@ -609,16 +735,11 @@ mod tests {
         let state = ManagementState::new();
         state.hello(client("sender"));
         state.start(config(), Some(client("sender")));
-        let unsubmitted = EstimatedLatencySnapshot {
-            seq: 1, total_ms: 29.5, encode_ms: 7.0,
-            transport_queue_ms: 5.8, decode_display_ms: 16.7,
-        };
+        let unsubmitted = latency_sample(1);
         assert!(!state.record_estimated_latency("sender", unsubmitted));
         state.record_frame(1, 1_000, 2.0);
-        let inconsistent = EstimatedLatencySnapshot {
-            seq: 1, total_ms: 200.0, encode_ms: 7.0,
-            transport_queue_ms: 5.8, decode_display_ms: 16.7,
-        };
+        let mut inconsistent = latency_sample(1);
+        inconsistent.total_ms = 200.0;
         assert!(!state.record_estimated_latency("sender", inconsistent));
         let active = state.snapshot().active_stream.unwrap();
         assert!(active.estimated_latency.is_none());
@@ -631,10 +752,7 @@ mod tests {
         state.hello(client("sender"));
         state.start(config(), Some(client("sender")));
         state.record_frame(1, 1_000, 2.0);
-        assert!(state.record_estimated_latency("sender", EstimatedLatencySnapshot {
-            seq: 1, total_ms: 29.5, encode_ms: 7.0,
-            transport_queue_ms: 5.8, decode_display_ms: 16.7,
-        }));
+        assert!(state.record_estimated_latency("sender", latency_sample(1)));
         if let Ok(mut inner) = state.inner.lock() {
             if let Some((received_at, _)) = inner.stream.as_mut().and_then(|stream| stream.estimated_latency.as_mut()) {
                 *received_at = Instant::now() - Duration::from_secs(4);
@@ -643,6 +761,23 @@ mod tests {
         let active = state.snapshot().active_stream.unwrap();
         assert!(active.estimated_latency.is_some());
         assert!(active.estimated_latency_age_ms.is_some_and(|age| age >= 4_000.0));
+    }
+
+    #[test]
+    fn receiver_records_continuous_phases_without_browser_ack_processing() {
+        let state = ManagementState::new();
+        state.hello(client("sender"));
+        state.start(config(), Some(client("sender")));
+        assert!(state.record_clock_sync("sender", 100.0, 1.0));
+        state.record_frame(1, 1_000, 2.0);
+        assert!(state.record_receiver_estimated_latency(1, 1_000.0, 5.0, 1_010.0, 1_115.0, 3.0, 60));
+        let active = state.snapshot().active_stream.unwrap();
+        let sample = active.estimated_latency.unwrap();
+        assert_eq!(sample.encode_ms, 5.0);
+        assert_eq!(sample.sender_queue_ms, 5.0);
+        assert_eq!(sample.delivery_ms, 5.0);
+        assert_eq!(sample.receiver_queue_ms, 3.0);
+        assert_eq!(active.latency_samples.len(), 1);
     }
 
     #[test]
