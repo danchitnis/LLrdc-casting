@@ -23,6 +23,10 @@ connected HDMI display without sending the content through a cloud service.
 - **Idle status screen:** See the receiver's network and display status while
   no content is being shared.
 
+The latency estimator, queue limits, raw-frame dropping policy, and adaptive
+bitrate controller are documented in
+[Latency Measurement and Congestion Control](LATENCY_AND_CONGESTION.md).
+
 ## Requirements
 
 ### Receiver board
