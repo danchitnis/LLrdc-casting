@@ -30,6 +30,10 @@ struct RestartRequest { confirm_restart: bool }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct UpdateRequest { confirm_update: bool }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SettingsRequest { settings: EditableSettings, confirm_restart: bool }
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +169,7 @@ async fn handle_http<S>(mut stream: S, supervisor: SupervisorHandle) -> Result<(
 
     if method == "GET" && (path == "/" || path == "/index.html") { return response(&mut stream, "200 OK", "text/html; charset=utf-8", ADMIN_HTML.as_bytes(), None).await }
     if method == "GET" && path == "/api/snapshot" { return response_json(&mut stream, "200 OK", &supervisor.snapshot()).await }
+    if method == "GET" && path == "/api/update" { return response_json(&mut stream, "200 OK", &serde_json::to_value(crate::update::status()).unwrap_or_else(|_| json!({"state":"failed","installed":false}))).await }
     if method == "GET" && path == "/health/manager" { return response(&mut stream, "200 OK", "text/plain", b"OK", None).await }
     if method == "GET" && path == "/health" { return response(&mut stream, if supervisor.is_ready() { "200 OK" } else { "503 Service Unavailable" }, "text/plain", if supervisor.is_ready() { b"OK" } else { b"RECEIVER UNAVAILABLE" }, None).await }
     if method == "GET" && path.starts_with("/api/logs?") {
@@ -190,6 +195,21 @@ async fn handle_http<S>(mut stream: S, supervisor: SupervisorHandle) -> Result<(
         if !request.confirm_restart { return response_json(&mut stream, "409 Conflict", &json!({"error":"restart_confirmation_required"})).await }
         let target = supervisor.restart("manual_restart").await.map_err(std::io::Error::other)?;
         return response_json(&mut stream, "202 Accepted", &json!({"ok":true,"target_generation":target})).await;
+    }
+    if method == "POST" && path == "/api/update/check" {
+        return match crate::update::request("check") {
+            Ok(()) => response_json(&mut stream, "202 Accepted", &json!({"ok":true})).await,
+            Err(_) => response_json(&mut stream, "503 Service Unavailable", &json!({"error":"updater_unavailable"})).await,
+        };
+    }
+    if method == "POST" && path == "/api/update/apply" {
+        let Ok(request) = serde_json::from_slice::<UpdateRequest>(body) else { return response_json(&mut stream, "400 Bad Request", &json!({"error":"invalid_json"})).await };
+        if !request.confirm_update { return response_json(&mut stream, "409 Conflict", &json!({"error":"update_confirmation_required"})).await }
+        if supervisor.is_streaming() { return response_json(&mut stream, "409 Conflict", &json!({"error":"stream_active"})).await }
+        return match crate::update::request("apply") {
+            Ok(()) => response_json(&mut stream, "202 Accepted", &json!({"ok":true})).await,
+            Err(_) => response_json(&mut stream, "503 Service Unavailable", &json!({"error":"updater_unavailable"})).await,
+        };
     }
     if method == "PUT" && (path == "/api/settings" || path == "/api/settings/cloud") {
         let current = supervisor.settings();
@@ -262,5 +282,6 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, Box<dyn std::error::E
 mod tests {
     use super::*;
     #[test] fn strict_restart_schema() { assert!(serde_json::from_str::<RestartRequest>(r#"{"confirm_restart":true,"extra":1}"#).is_err()); }
+    #[test] fn strict_update_schema() { assert!(serde_json::from_str::<UpdateRequest>(r#"{"confirm_update":true,"extra":1}"#).is_err()); }
     #[test] fn cross_site_is_rejected() { let mut headers = HashMap::new(); headers.insert("host".into(), "device:9090".into()); headers.insert("sec-fetch-site".into(), "cross-site".into()); assert!(!request_is_same_origin(&headers)); }
 }

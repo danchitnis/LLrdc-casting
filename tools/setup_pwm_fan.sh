@@ -112,6 +112,17 @@ function generate_dts() {
 DTS_EOF
 }
 
+function overlay_is_configured() {
+    [ -f /boot/armbianEnv.txt ] && awk -v overlay="$OVERLAY_NAME" '
+        /^user_overlays=/ {
+            sub(/^user_overlays=/, "")
+            count = split($0, entries, /[[:space:]]+/)
+            for (i = 1; i <= count; i++) if (entries[i] == overlay) found = 1
+        }
+        END { exit(found ? 0 : 1) }
+    ' /boot/armbianEnv.txt
+}
+
 function setup_local() {
     echo "================================================="
     echo " Setting up PWM Fan Overlay on Board"
@@ -125,6 +136,16 @@ function setup_local() {
 
     echo "2. Compiling DTBO..."
     dtc -@ -I dts -O dtb -o "$DTBO_PATH" "$DTS_PATH"
+
+    if [ ! -f /boot/armbianEnv.txt ]; then
+        echo "Error: /boot/armbianEnv.txt is required to activate the ROCK 4C+ fan overlay." >&2
+        exit 1
+    fi
+
+    if cmp -s "$DTBO_PATH" "/boot/overlay-user/${OVERLAY_NAME}.dtbo" && overlay_is_configured; then
+        echo "[✓] PWM fan overlay and thermal curve are already installed."
+        return 0
+    fi
 
     echo "3. Backing up existing overlay and boot configuration..."
     if [ -f "/boot/overlay-user/${OVERLAY_NAME}.dtbo" ]; then
@@ -140,23 +161,12 @@ function setup_local() {
     $SUDO cp "$DTBO_PATH" "/boot/overlay-user/${OVERLAY_NAME}.dtbo"
 
     echo "5. Updating /boot/armbianEnv.txt..."
-    if [ -f /boot/armbianEnv.txt ]; then
-        if ! awk -v overlay="$OVERLAY_NAME" '
-            /^user_overlays=/ {
-                sub(/^user_overlays=/, "")
-                count = split($0, entries, /[[:space:]]+/)
-                for (i = 1; i <= count; i++) if (entries[i] == overlay) found = 1
-            }
-            END { exit(found ? 0 : 1) }
-        ' /boot/armbianEnv.txt; then
-            if grep -q '^user_overlays=' /boot/armbianEnv.txt; then
-                $SUDO sed -i "/^user_overlays=/ s/$/ ${OVERLAY_NAME}/" /boot/armbianEnv.txt
-            else
-                echo "user_overlays=${OVERLAY_NAME}" | $SUDO tee -a /boot/armbianEnv.txt >/dev/null
-            fi
+    if ! overlay_is_configured; then
+        if grep -q '^user_overlays=' /boot/armbianEnv.txt; then
+            $SUDO sed -i "/^user_overlays=/ s/$/ ${OVERLAY_NAME}/" /boot/armbianEnv.txt
+        else
+            echo "user_overlays=${OVERLAY_NAME}" | $SUDO tee -a /boot/armbianEnv.txt >/dev/null
         fi
-    else
-        echo "Warning: /boot/armbianEnv.txt not found. Overlay installed to /boot/overlay-user/${OVERLAY_NAME}.dtbo"
     fi
 
     echo ""

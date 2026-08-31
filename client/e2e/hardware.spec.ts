@@ -194,6 +194,7 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
   await page.locator('#toggleBtn').click();
   await expect(page.locator('#statusBadge')).toHaveText('CONNECTED', { timeout: 30_000 });
   await expect(page.locator('#toggleText')).toHaveText('Start Casting');
+  await expect(page.locator('#toggleBtn')).toBeEnabled();
   await expect(page.locator('#settingsLockNotice')).toBeHidden();
   await expect(page.locator('#userNotice')).toBeHidden();
   await expect(page.locator('#statDevicePing')).toHaveText('--');

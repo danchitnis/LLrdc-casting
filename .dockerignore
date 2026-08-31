@@ -1,0 +1,13 @@
+.git
+.cloudflare
+.artefact
+.codex
+target
+node_modules
+client/node_modules
+client/test-results
+client/playwright-report
+client/.astro
+client/dist
+client/dist-admin
+cloudflare

@@ -55,6 +55,18 @@ Ethernet and falls back to Wi-Fi when Ethernet is unavailable.
 
 ## Set Up the Board
 
+For a fleet of independent ROCK 4C+ receivers, use the guided Mac initializer
+and Docker Hub update workflow in [FLEET.md](FLEET.md). Every initialized board
+has the same updater. `server.sh` can temporarily place a Mac development build
+on the selected board without removing its independent update capability.
+
+Run release checks with `./test_release.sh`, then use
+`./publish_docker_image.sh`. Uncommitted developer changes are supported and
+receive a content-fingerprinted immutable tag. The separate publisher asks the
+developer for a simple yes/no confirmation that tests passed and does not use
+`sudo`; privileged device initialization is run interactively by the device
+owner.
+
 These steps are required once for a new board.
 
 1. Connect the board to the network and HDMI display. Note its IP address.

@@ -1,0 +1,9 @@
+tools/setup_pwm_fan.sh
+tools/fan_control.py
+tools/test_fan_curve.sh
+tools/net_monitor.py
+tools/connect_wifi.sh
+tools/scan_wifi.sh
+tools/activate_eduroam.sh
+tools/eduroam-linux-installer.py
+tools/setup_mgmt_port.sh

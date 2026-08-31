@@ -33,7 +33,12 @@ struct RegistrationBody<'a> {
     ip_address: &'a str,
     webtransport_port: u16,
     cert_hash_hex: &'a str,
-    pairing_code: &'a str,
+}
+
+#[derive(Deserialize)]
+struct RegistrationResponse {
+    pairing_code: String,
+    code_expires_at: u64,
 }
 
 #[derive(Deserialize)]
@@ -218,18 +223,11 @@ pub fn spawn_registration(state: PairingState, cert_hash: String) {
                 tokio::time::sleep(Duration::from_secs(config::discovery::REGISTRATION_NO_IP_RETRY_SEC)).await;
                 continue;
             };
-            let Some(code) = state.snapshot().code else {
-                state.set_cloud_ip(None);
-                state.set_cloud_status("WAITING");
-                tokio::time::sleep(Duration::from_secs(config::discovery::REGISTRATION_NO_CODE_RETRY_SEC)).await;
-                continue;
-            };
             let body = match serde_json::to_vec(&RegistrationBody {
                 receiver_id: &receiver_id,
                 ip_address: &ip,
                 webtransport_port: port,
                 cert_hash_hex: &cert_hash,
-                pairing_code: &code,
             }) {
                 Ok(body) => body,
                 Err(_) => continue,
@@ -251,11 +249,25 @@ pub fn spawn_registration(state: PairingState, cert_hash: String) {
                 .await;
             match result {
                 Ok(response) if response.status().is_success() => {
-                    println!("[CLOUD DISCOVERY] Receiver registration succeeded via {ip}");
-                    state.set_cloud_ip(Some(ip));
-                    state.set_cloud_status("READY");
-                    retry_delay = Duration::from_secs(config::discovery::REGISTRATION_INITIAL_RETRY_SEC);
-                    tokio::time::sleep(Duration::from_secs(config::discovery::REGISTRATION_SUCCESS_RETRY_SEC)).await;
+                    match response.json::<RegistrationResponse>().await {
+                        Ok(registered) => {
+                            let valid_for = registered.code_expires_at.saturating_sub(unix_seconds());
+                            if state.adopt_cloud_code(&registered.pairing_code, Duration::from_secs(valid_for)).is_err() {
+                                state.set_cloud_ip(None); state.set_cloud_status("FAILED");
+                                tokio::time::sleep(retry_delay).await;
+                                continue;
+                            }
+                            println!("[CLOUD DISCOVERY] Receiver registration succeeded via {ip}");
+                            state.set_cloud_ip(Some(ip));
+                            state.set_cloud_status("READY");
+                            retry_delay = Duration::from_secs(config::discovery::REGISTRATION_INITIAL_RETRY_SEC);
+                            tokio::time::sleep(Duration::from_secs(config::discovery::REGISTRATION_SUCCESS_RETRY_SEC)).await;
+                        }
+                        Err(_) => {
+                            state.set_cloud_ip(None); state.set_cloud_status("FAILED");
+                            tokio::time::sleep(retry_delay).await;
+                        }
+                    }
                 }
                 Ok(response) => {
                     let status = response.status();

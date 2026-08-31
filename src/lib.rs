@@ -21,5 +21,6 @@ pub mod supervisor;
 pub mod sys_monitor;
 pub mod text;
 pub mod ui_delivery;
+pub mod update;
 pub mod v4l2_decoder;
 pub mod webtransport_server;

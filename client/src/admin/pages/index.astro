@@ -246,6 +246,15 @@ import ManagementCard from '../components/ManagementCard.astro';
       </div>
 
       <div id="settingsTab" class="tab-panel" role="tabpanel" aria-labelledby="settingsTabButton" hidden>
+      <ManagementCard title="Software update">
+        <div slot="actions">
+          <button id="checkUpdate" class="secondary" type="button">Check for update</button>
+          <button id="applyUpdate" class="danger" type="button" disabled>Update now</button>
+        </div>
+        <p class="section-intro">Production devices pull the fixed public ARM64 image. Updates are manual and are blocked while casting.</p>
+        <div id="updateMetrics" class="grid"></div>
+        <p id="updateStatus" class="setting-status" role="status" aria-live="polite"></p>
+      </ManagementCard>
       <ManagementCard title="Display">
         <div class="form-grid">
           <label class="field">DRM connector ID<input id="settingDrmConnector" /></label>
@@ -269,7 +278,7 @@ import ManagementCard from '../components/ManagementCard.astro';
           <label class="field">Pairing-code TTL (seconds)<input id="settingPairingTtl" type="number" min="1" /></label>
         </div>
       </ManagementCard>
-      <ManagementCard title="Deployment-managed settings">
+      <ManagementCard title="Installation settings">
         <div id="deploymentSettings" class="grid"></div>
         <p class="setting-help">These values come from the local repository and deployment provisioning and cannot be changed here.</p>
       </ManagementCard>

@@ -87,6 +87,7 @@ test.describe('cloud pairing handoff', () => {
     await page.locator('#toggleBtn').click();
     await expect(page.locator('#statusBadge')).toHaveText('CONNECTED', { timeout: 30_000 });
     await expect(page.locator('#toggleText')).toHaveText('Start Casting');
+    await expect(page.locator('#toggleBtn')).toBeEnabled();
     await expect(page.locator('#settingsLockNotice')).toBeHidden();
   });
 });

@@ -107,7 +107,7 @@ impl SupervisorHandle {
             object.insert("cloud_configuration_ready".into(), missing.is_empty().into());
             object.insert("cloud_configuration_missing".into(), missing.clone().into());
             object.insert("cloud_state".into(), inner.pairing.cloud_status.clone().into());
-            object.insert("pairing_code_source".into(), if std::env::var("PAIRING_CODE_FIXED").ok().is_some_and(|v| !v.is_empty()) { "fixed".into() } else { "rotating".into() });
+            object.insert("pairing_code_source".into(), if std::env::var("PAIRING_CODE_FIXED").ok().is_some_and(|v| !v.is_empty()) { "fixed".into() } else if inner.settings.cloud_discovery_enabled && inner.pairing.cloud_status == "READY" { "cloud".into() } else { "rotating".into() });
         }
         serde_json::json!({
             "management": inner.management,
@@ -122,12 +122,22 @@ impl SupervisorHandle {
                 last_failure: inner.last_failure.clone(), logging_healthy: self.log.healthy(),
                 configuration_error: inner.configuration_error.clone(),
             },
+            "build": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "revision": option_env!("LLRDC_BUILD_REVISION").unwrap_or("development"),
+                "built_at": option_env!("LLRDC_BUILD_DATE").unwrap_or("unknown"),
+            },
+            "update": crate::update::status(),
         })
     }
 
     pub fn settings(&self) -> ReceiverSettings { self.inner.lock().expect("supervisor lock poisoned").settings.clone() }
 
     pub fn is_ready(&self) -> bool { self.inner.lock().map(|inner| inner.receiver_state == "ready").unwrap_or(false) }
+
+    pub fn is_streaming(&self) -> bool {
+        self.inner.lock().ok().and_then(|inner| inner.management.as_ref().map(|snapshot| snapshot.active_stream.is_some())).unwrap_or(false)
+    }
 
     pub async fn restart(&self, reason: impl Into<String>) -> Result<u64, String> {
         let target = self.inner.lock().map_err(|_| "supervisor unavailable")?.receiver_generation + 1;

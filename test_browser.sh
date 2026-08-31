@@ -138,18 +138,7 @@ restore_management_config() {
        -v /var/lib/llrdc-secrets:/secrets \
        -v /var/lib/llrdc-management:/management \
        llrdc-casting -c 'set -eu; cp -p /stage/llrdc-management-config.restore /config/config.yaml.restore; chmod 640 /config/config.yaml.restore; sync; mv -f /config/config.yaml.restore /config/config.yaml; cp -p /stage/llrdc-management-runtime.restore /secrets/runtime.env.restore; chmod 600 /secrets/runtime.env.restore; sync; mv -f /secrets/runtime.env.restore /secrets/runtime.env; find /management -mindepth 1 -maxdepth 1 -delete; tar -C /management -xf /stage/llrdc-management-history.restore.tar; chmod 700 /management; sync'
-     docker rm -f llrdc-casting >/dev/null 2>&1 || true
-     docker run -d --name llrdc-casting --restart unless-stopped --net host --privileged \
-       --env-file /var/lib/llrdc-secrets/runtime.env \
-       -v /dev:/dev \
-       -v /var/lib/llrdc-certs:/certs \
-       -v /var/lib/llrdc-pairing:/pairing:ro \
-       -v /var/lib/llrdc-secrets:/secrets:ro \
-       -v /var/lib/llrdc-config:/config:rw \
-       -v /var/lib/llrdc-management:/management:rw \
-       -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting:ro \
-       -v /var/tmp/llrdc-bin/llrdc-management:/usr/local/bin/llrdc-management:ro \
-       llrdc-casting >/dev/null
+     docker stop -t 8 llrdc-casting >/dev/null
      rm -f /var/tmp/llrdc-management-config.restore /var/tmp/llrdc-management-runtime.restore /var/tmp/llrdc-management-history.restore.tar"
   for _ in {1..60}; do
     if curl -fsSk --connect-timeout 2 --max-time 3 "https://${board_ip}:9090/health" >/dev/null 2>&1; then
@@ -271,6 +260,11 @@ if [[ "$MODE" == "codec" ]]; then
   pairing_code="$("$SCRIPT_DIR/server.sh" --get-pairing-code --board-ip="$board_ip")"
 else
   echo "[E2E] Cloudflare enabled; waiting for receiver registration..."
+  cloud_receiver_id="$(ssh -o BatchMode=yes "$board_ip" "docker exec llrdc-casting awk '/^[[:space:]]*receiver_id:/ {gsub(/[\"[:space:]]/, \"\", \$2); print \$2; exit}' /config/config.yaml")"
+  if [[ ! "$cloud_receiver_id" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+    echo "[E2E] Receiver has no valid cloud device identity; see $artifact_dir/deploy.log" >&2
+    exit 1
+  fi
   registration_deadline=$((SECONDS + 90))
   last_registration_notice=0
   while (( SECONDS < registration_deadline )); do
@@ -297,7 +291,7 @@ else
     if pairing_candidate="$(
       cd "$SCRIPT_DIR/cloudflare/worker"
       ./node_modules/.bin/wrangler d1 execute cast-pairing --remote \
-        --command "SELECT pairing_code FROM active_receivers WHERE pairing_code IS NOT NULL AND code_expires_at > unixepoch() AND registration_expires_at > unixepoch() LIMIT 1" \
+        --command "SELECT pairing_code FROM active_receivers WHERE receiver_id = '$cloud_receiver_id' AND pairing_code IS NOT NULL AND code_expires_at > unixepoch() AND registration_expires_at > unixepoch() LIMIT 1" \
         --json 2>>"$artifact_dir/cloud-query.stderr" \
         | python3 -c 'import json, sys
 payload = json.load(sys.stdin)

@@ -24,7 +24,6 @@ interface ReceiverRegistration {
   ipAddress: string;
   webtransportPort: number;
   certHashHex: string;
-  pairingCode: string;
 }
 
 interface PairResult {
@@ -97,7 +96,6 @@ function parseRegistration(body: JsonObject): ReceiverRegistration | null {
   const ipAddress = body.ip_address;
   const port = body.webtransport_port;
   const certHash = body.cert_hash_hex;
-  const pairingCode = body.pairing_code;
 
   if (!isString(receiverId) || !PAIRING_VALIDATION.RECEIVER_ID_PATTERN.test(receiverId)) {
     return null;
@@ -116,17 +114,18 @@ function parseRegistration(body: JsonObject): ReceiverRegistration | null {
   if (!isString(certHash) || !/^[0-9a-fA-F]+$/.test(certHash) || certHash.length !== REQUEST_LIMITS.CERTIFICATE_HASH_HEX_LENGTH) {
     return null;
   }
-  if (!isString(pairingCode) || !PAIRING_CODE_PATTERN.test(pairingCode)) {
-    return null;
-  }
-
   return {
     receiverId,
     ipAddress,
     webtransportPort: port,
     certHashHex: certHash.toLowerCase(),
-    pairingCode: pairingCode.toUpperCase(),
   };
+}
+
+function randomPairingCode(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(4));
+  return Array.from(bytes, byte => alphabet[byte % alphabet.length]).join("");
 }
 
 function isPrivateIpv4(value: string): boolean {
@@ -375,43 +374,35 @@ async function handleRegistration(
 
   const codeExpiresAt = now + PAIRING_CODE_TTL_SECONDS;
   const registrationExpiresAt = now + REGISTRATION_TTL_SECONDS;
-  try {
-    await env.DB.batch([
-      env.DB.prepare(
-        "DELETE FROM active_receivers WHERE code_expires_at <= ? OR registration_expires_at <= ?",
-      ).bind(now, now),
-      env.DB.prepare(
-        `INSERT INTO active_receivers
-          (receiver_id, pairing_code, ip_address, webtransport_port, cert_hash_hex,
-           code_expires_at, registration_expires_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(receiver_id) DO UPDATE SET
-           pairing_code = excluded.pairing_code,
-           ip_address = excluded.ip_address,
-           webtransport_port = excluded.webtransport_port,
-           cert_hash_hex = excluded.cert_hash_hex,
-           code_expires_at = excluded.code_expires_at,
-           registration_expires_at = excluded.registration_expires_at,
-           updated_at = excluded.updated_at`,
-      ).bind(
-        registration.receiverId,
-        registration.pairingCode,
-        registration.ipAddress,
-        registration.webtransportPort,
-        registration.certHashHex,
-        codeExpiresAt,
-        registrationExpiresAt,
-        now,
-      ),
-    ]);
-  } catch (error) {
-    if (error instanceof Error && /unique|constraint/i.test(error.message)) {
-      return jsonResponse({ error: "pairing code unavailable", retryable: true }, 409);
+  await env.DB.prepare("DELETE FROM active_receivers WHERE code_expires_at <= ? OR registration_expires_at <= ?").bind(now, now).run();
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const pairingCode = randomPairingCode();
+    try {
+      const stored = await env.DB.prepare(
+          `INSERT INTO active_receivers
+            (receiver_id, pairing_code, ip_address, webtransport_port, cert_hash_hex,
+             code_expires_at, registration_expires_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(receiver_id) DO UPDATE SET
+             pairing_code = CASE
+               WHEN active_receivers.pairing_code IS NOT NULL AND active_receivers.code_expires_at > ?
+               THEN active_receivers.pairing_code ELSE excluded.pairing_code END,
+             ip_address = excluded.ip_address,
+             webtransport_port = excluded.webtransport_port,
+             cert_hash_hex = excluded.cert_hash_hex,
+             code_expires_at = excluded.code_expires_at,
+             registration_expires_at = excluded.registration_expires_at,
+             updated_at = excluded.updated_at
+           RETURNING pairing_code`,
+        ).bind(registration.receiverId, pairingCode, registration.ipAddress, registration.webtransportPort,
+          registration.certHashHex, codeExpiresAt, registrationExpiresAt, now, now).first<{ pairing_code: string }>();
+      if (stored === null) throw new Error("registration did not return a pairing code");
+      return jsonResponse({ ok: true, pairing_code: stored.pairing_code, code_expires_at: codeExpiresAt, registration_expires_at: registrationExpiresAt });
+    } catch (error) {
+      if (!(error instanceof Error && /unique|constraint/i.test(error.message))) throw error;
     }
-    throw error;
   }
-
-  return jsonResponse({ ok: true, code_expires_at: codeExpiresAt, registration_expires_at: registrationExpiresAt });
+  return jsonResponse({ error: "pairing code unavailable", retryable: true }, 503);
 }
 
 function clientAddress(request: Request): string {

@@ -104,9 +104,12 @@ mod tests {
     }
 
     #[test]
-    fn encoded_pipeline_has_no_pixel_aspect_override() {
+    fn encoded_pipeline_sets_rk3399_pixel_aspect_before_decode() {
         let args = encoded_pipeline_args("h265");
-        assert!(!args.iter().any(|arg| arg == "capssetter" || arg.contains("pixel-aspect-ratio")));
+        let capssetter = args.iter().position(|arg| arg == "capssetter").expect("capssetter");
+        let decoder = args.iter().position(|arg| arg == "v4l2slh265dec").expect("decoder");
+        assert!(capssetter < decoder);
+        assert!(args.iter().any(|arg| arg.contains("pixel-aspect-ratio=(fraction)15/16")));
         assert!(args.iter().any(|arg| arg == "v4l2slh265dec"));
     }
 
@@ -180,15 +183,22 @@ fn normalize_codec(codec: &str) -> &str {
 }
 
 fn encoded_pipeline_args(norm_codec: &str) -> Vec<String> {
-    let (parser, decoder) = if norm_codec == "h264" {
-        ("h264parse", "v4l2slh264dec")
+    let (parser, bitstream_caps, decoder) = if norm_codec == "h264" {
+        ("h264parse", "video/x-h264", "v4l2slh264dec")
     } else {
-        ("h265parse", "v4l2slh265dec")
+        ("h265parse", "video/x-h265", "v4l2slh265dec")
     };
     vec![
         "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(),
         format!("blocksize={}", config::playback::RAW_PIPELINE_BLOCK_SIZE), "!".to_string(),
         parser.to_string(), format!("config-interval={}", config::playback::ENCODED_CONFIG_INTERVAL), "!".to_string(),
+        // The RK3399 VOP cannot scale a codec-aligned 1920x1088 surface to
+        // the complete 3840x2160 signal unless the decoder carries the HDMI
+        // device pixel aspect. Set it before decode so the DMA-BUF feature is
+        // retained all the way into kmssink.
+        "capssetter".to_string(),
+        format!("caps={bitstream_caps},pixel-aspect-ratio=(fraction)15/16"),
+        "replace=false".to_string(), "!".to_string(),
         decoder.to_string(), "!".to_string(),
     ]
 }

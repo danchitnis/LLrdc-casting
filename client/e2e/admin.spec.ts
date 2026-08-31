@@ -47,9 +47,19 @@ function deploymentSettings(settings: Settings): Settings {
 }
 
 async function getSnapshot(page: Page): Promise<Snapshot> {
-  const response = await page.request.get(`https://${boardIp}:9090/api/snapshot`);
-  expect(response.ok()).toBe(true);
-  return await response.json() as Snapshot;
+  const deadline = Date.now() + 30_000;
+  let lastError: unknown;
+  do {
+    try {
+      const response = await page.request.get(`https://${boardIp}:9090/api/snapshot`);
+      if (response.ok()) return await response.json() as Snapshot;
+      lastError = new Error(`Snapshot request returned HTTP ${response.status()}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await page.waitForTimeout(250);
+  } while (Date.now() < deadline);
+  throw lastError instanceof Error ? lastError : new Error('Snapshot request did not recover');
 }
 
 function persistedConfig(): string {
@@ -251,6 +261,9 @@ test.describe('receiver management portal', () => {
       await page.locator('h1').hover();
       await expect(page.locator('#metricTooltip')).toBeHidden();
       await expect(page.locator('#watchdog')).toContainText('Consecutive failures');
+      await expect(page.locator('#updateMetrics')).toContainText('IDLE');
+      await expect(page.locator('#checkUpdate')).toBeEnabled();
+      await expect(page.locator('#applyUpdate')).toBeDisabled();
       await expect(page.locator('#history').locator('xpath=ancestor::table')).toContainText('Payload bytes');
       await expect(page.locator('#events')).not.toBeEmpty();
       assertDiagnosticsClean(diagnostics);
@@ -354,8 +367,10 @@ test.describe('receiver management portal', () => {
     let initialConfig = '';
     try {
       await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });
+      await expect(page.locator('#overviewTab .card').filter({ has: page.locator('#updateMetrics') })).toHaveCount(0);
       await page.locator('#settingsTabButton').click();
       await expect(page.locator('#settingsTab')).toBeVisible();
+      await expect(page.locator('#settingsTab .card').filter({ has: page.locator('#updateMetrics') })).toContainText('Software update');
       await expect(page.locator('#settingsTab .card').last()).toContainText('Cloud discovery');
       await visualPause(page);
       initial = await getSnapshot(page);
@@ -439,7 +454,7 @@ test.describe('receiver management portal', () => {
     }
   });
 
-  test('shows repository-managed and editable runtime settings', async ({ page }, testInfo) => {
+  test('shows installation and editable runtime settings', async ({ page }, testInfo) => {
     const diagnostics = trackDiagnostics(page);
     try {
       await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });

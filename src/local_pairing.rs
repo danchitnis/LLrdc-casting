@@ -78,6 +78,15 @@ impl PairingState {
         String::new()
     }
 
+    fn ensure_fallback_code(&self) {
+        let needs_code = self.inner.lock().map(|data| {
+            data.snapshot.code.is_none() || data.expires_at.is_none_or(|expires_at| expires_at <= Instant::now())
+        }).unwrap_or(false);
+        if needs_code {
+            self.rotate_code();
+        }
+    }
+
     pub fn set_cloud_status(&self, status: impl Into<String>) {
         if let Ok(mut data) = self.inner.lock() {
             data.snapshot.cloud_status = status.into();
@@ -88,6 +97,19 @@ impl PairingState {
         if let Ok(mut data) = self.inner.lock() {
             data.snapshot.cloud_ip = ip;
         }
+    }
+
+    pub fn adopt_cloud_code(&self, code: &str, valid_for: Duration) -> Result<(), &'static str> {
+        let code = code.to_ascii_uppercase();
+        if !is_valid_pairing_code(&code) || valid_for.is_zero() {
+            return Err("invalid cloud pairing code");
+        }
+        let mut data = self.inner.lock().map_err(|_| "pairing unavailable")?;
+        data.snapshot.code = Some(code);
+        data.snapshot.local_status = if data.local_pairing_code_required { "READY" } else { "DISABLED" }.to_string();
+        data.expires_at = Some(Instant::now() + valid_for);
+        data.failed_attempts.clear();
+        Ok(())
     }
 
     pub fn snapshot(&self) -> PairingSnapshot {
@@ -154,8 +176,11 @@ fn is_valid_pairing_code(code: &str) -> bool {
 pub fn spawn_local_pairing(state: PairingState) {
     tokio::spawn(async move {
         loop {
-            state.rotate_code();
-            tokio::time::sleep(Duration::from_secs(pairing_code_ttl_seconds())).await;
+            // Cloud-issued codes share this state. Only create a local fallback
+            // when there is no current code, so the local timer never replaces
+            // a valid cloud code while the receiver is online.
+            state.ensure_fallback_code();
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 }
@@ -238,5 +263,15 @@ mod tests {
         let json = serde_json::to_string(&state.snapshot()).unwrap();
         assert!(!json.contains("AB12"));
         assert!(!json.contains("code"));
+    }
+
+    #[test]
+    fn cloud_code_replaces_local_fallback_without_disabling_local_pairing() {
+        let state = PairingState::with_fixed_code(None, true).unwrap();
+        let local = state.rotate_code();
+        state.adopt_cloud_code("z9x8", std::time::Duration::from_secs(60)).unwrap();
+        assert_ne!(local, "Z9X8");
+        assert!(state.validate_code("Z9X8", "peer").is_ok());
+        assert_eq!(state.snapshot().local_status, "READY");
     }
 }

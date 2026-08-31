@@ -135,7 +135,9 @@ let streamWorkerStopPromise: Promise<void> | null = null;
 let streamWorkerStopResolve: (() => void) | null = null;
 let outputGeometry: DisplayGeometry | null = null;
 let isStreaming = false;
+let isStarting = false;
 let isRemoteStreaming = false;
+let stopStreamingPromise: Promise<void> | null = null;
 let seqNum = 0;
 let controlWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let controlReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
@@ -702,11 +704,15 @@ export function initPairing(): void {
   }
 }
 
-export async function stopStreaming(): Promise<void> {
+async function stopStreamingOnce(): Promise<void> {
+  const wasLocalLifecycle = isStarting || isStreaming || mediaStream !== null
+    || activeVideoTrack !== null || streamWorker !== null || videoEncoder !== null;
   if (!isStreaming && !mediaStream && !transport) {
+    isStarting = false;
     setSettingsDisabled(false);
     return;
   }
+  isStarting = false;
   isStreaming = false;
   resetLatencyMetric();
   seqNum = 0;
@@ -788,6 +794,10 @@ export async function stopStreaming(): Promise<void> {
     uniStreamWriter = null;
   }
 
+  // A receiver STREAMING message can already be queued while Chrome fires the
+  // capture track's ended event. This tab still owns that teardown, so do not
+  // let the queued message leave it rendered as an in-use remote client.
+  if (wasLocalLifecycle) isRemoteStreaming = false;
   if (!isRemoteStreaming) {
     if (controlIsConnected()) {
       updateStatus('connected', 'CONNECTED');
@@ -809,24 +819,42 @@ export async function stopStreaming(): Promise<void> {
   log('[STOPPED] Casting session closed.');
 }
 
+export async function stopStreaming(): Promise<void> {
+  if (stopStreamingPromise) return stopStreamingPromise;
+  const operation = stopStreamingOnce();
+  stopStreamingPromise = operation;
+  try {
+    await operation;
+  } finally {
+    if (stopStreamingPromise === operation) stopStreamingPromise = null;
+  }
+}
+
 export async function toggleCasting(): Promise<void> {
-  if (isRemoteStreaming) return;
+  if (isRemoteStreaming || isStarting || stopStreamingPromise) return;
   if (isStreaming) {
     await stopStreaming();
     return;
   }
 
+  isStarting = true;
   isStreaming = true;
   seqNum = 0;
   nalCache = createNalCache();
   resetLatencyMetric(true);
 
   setSettingsDisabled(true);
+  const startingButton = document.getElementById('toggleBtn') as HTMLButtonElement | null;
+  const startingText = document.getElementById('toggleText');
+  if (startingButton && startingText) {
+    startingText.textContent = 'Starting…';
+    startingButton.className = 'btn-primary';
+    startingButton.disabled = true;
+  }
 
   if (!transport || !controlIsConnected()) {
-    isStreaming = false;
-    setSettingsDisabled(false);
     log('[PAIRING] Enter the receiver code before starting a cast.', true);
+    await stopStreaming();
     return;
   }
   const resSelect = document.getElementById('resolution') as HTMLSelectElement;
@@ -1156,6 +1184,7 @@ export async function toggleCasting(): Promise<void> {
         }, [processor.readable as unknown as Transferable, mediaWritable as unknown as Transferable]);
         trackProcessor = processor;
         frameCompositor = null;
+        isStarting = false;
         clearUserNotice();
         updateStatus('active', 'STREAMING');
         const toggleBtn = document.getElementById('toggleBtn');
@@ -1163,6 +1192,7 @@ export async function toggleCasting(): Promise<void> {
         if (toggleBtn && toggleText) {
           toggleText.textContent = 'Stop Casting';
           toggleBtn.className = 'btn-primary stop';
+          (toggleBtn as HTMLButtonElement).disabled = false;
         }
         log('[WEBCODECS] Dedicated worker owns capture, encoding, and media transport.');
         return;
@@ -1231,6 +1261,7 @@ export async function toggleCasting(): Promise<void> {
     });
 
     clearUserNotice();
+    isStarting = false;
     updateStatus('active', 'STREAMING');
 
     const toggleBtn = document.getElementById('toggleBtn');
@@ -1238,6 +1269,7 @@ export async function toggleCasting(): Promise<void> {
     if (toggleBtn && toggleText) {
       toggleText.textContent = 'Stop Casting';
       toggleBtn.className = 'btn-primary stop';
+      (toggleBtn as HTMLButtonElement).disabled = false;
     }
 
     const minFrameIntervalMs = 1000 / targetFps - ENCODER_GUARDRAILS.FRAME_TIMING_SLACK_MS;
@@ -1475,6 +1507,7 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
 
   if (msg.state === 'STREAMING') {
     if (isStreaming) {
+      isStarting = false;
       clearUserNotice();
       updateStatus('active', 'STREAMING');
       setSettingsDisabled(true);
@@ -1509,7 +1542,11 @@ export function handleServerStatusUpdate(msg: ServerStatusMessage): void {
   } else if (msg.state === 'IDLE') {
     isRemoteStreaming = false;
     resetLatencyMetric();
-    if (!isStreaming) {
+    if (isStarting) {
+      // The receiver is expected to remain idle while the user is choosing a
+      // screen. It becomes active only after capture and encoder setup finish.
+      return;
+    } else if (!isStreaming) {
       if (controlIsConnected()) {
         updateStatus('connected', 'CONNECTED');
       } else {

@@ -139,6 +139,24 @@ interface Snapshot {
   };
   settings: CloudSettingsSnapshot;
   watchdog: WatchdogSnapshot;
+  build: BuildSnapshot;
+  update: UpdateSnapshot;
+}
+
+interface BuildSnapshot {
+  version: string;
+  revision: string;
+  built_at: string;
+}
+
+interface UpdateSnapshot {
+  state: 'idle' | 'checking' | 'current' | 'available' | 'updating' | 'succeeded' | 'failed' | 'rolled_back';
+  current_digest: string | null;
+  available_digest: string | null;
+  current_version: string | null;
+  message: string | null;
+  updated_at_unix: number | null;
+  installed: boolean;
 }
 
 interface WatchdogSnapshot {
@@ -186,7 +204,7 @@ interface CloudSettingsSnapshot {
   cloud_configuration_ready: boolean;
   cloud_configuration_missing: string[];
   cloud_state: string;
-  pairing_code_source: 'fixed' | 'rotating';
+  pairing_code_source: 'fixed' | 'rotating' | 'cloud';
 }
 
 const CHART_WINDOW_SEC = 60;
@@ -237,6 +255,10 @@ const latencySeriesControls = element<HTMLDivElement>('latencySeriesControls');
 const watchdog = element<HTMLDivElement>('watchdog');
 const watchdogStatus = element<HTMLParagraphElement>('watchdogStatus');
 const restartReceiver = element<HTMLButtonElement>('restartReceiver');
+const checkUpdate = element<HTMLButtonElement>('checkUpdate');
+const applyUpdate = element<HTMLButtonElement>('applyUpdate');
+const updateMetrics = element<HTMLDivElement>('updateMetrics');
+const updateStatus = element<HTMLParagraphElement>('updateStatus');
 const operationalLogs = element<HTMLDivElement>('operationalLogs');
 const logSeverity = element<HTMLSelectElement>('logSeverity');
 const logCategory = element<HTMLSelectElement>('logCategory');
@@ -611,7 +633,8 @@ function render(snapshot: Snapshot): void {
     metric('Certificate directory', settings.cert_dir),
     metric('Pairing public key', settings.pairing_token_public_key_file),
   );
-  pairingSecuritySource.textContent = `Code source: ${settings.pairing_code_source === 'fixed' ? 'fixed deployment code' : 'rotating receiver code'}${settings.local_pairing_code_required ? '.' : '; code enforcement is disabled for direct LAN clients.'}`;
+  const codeSource = settings.pairing_code_source === 'fixed' ? 'fixed deployment code' : settings.pairing_code_source === 'cloud' ? 'Cloudflare-issued fleet code with local fallback' : 'rotating receiver code';
+  pairingSecuritySource.textContent = `Code source: ${codeSource}${settings.local_pairing_code_required ? '.' : '; code enforcement is disabled for direct LAN clients.'}`;
   if (pendingGeneration !== null && snapshot.watchdog.receiver_generation >= pendingGeneration && snapshot.watchdog.receiver_state === 'ready') {
     pendingGeneration = null;
     settingsDirty = false;
@@ -632,6 +655,19 @@ function render(snapshot: Snapshot): void {
     ['Last failure', snapshot.watchdog.last_failure || '--'],
   ]);
   restartReceiver.disabled = pendingGeneration !== null || portalDisconnected;
+  const updateBusy = snapshot.update.state === 'checking' || snapshot.update.state === 'updating';
+  checkUpdate.disabled = !snapshot.update.installed || updateBusy || portalDisconnected;
+  applyUpdate.disabled = !snapshot.update.installed || snapshot.update.state !== 'available' || active !== null || updateBusy || portalDisconnected;
+  replaceMetrics(updateMetrics, [
+    ['Release', snapshot.build.revision],
+    ['Current digest', snapshot.update.current_digest?.slice(0, 19) || '--'],
+    ['Available digest', snapshot.update.available_digest?.slice(0, 19) || '--'],
+    ['Last checked', snapshot.update.updated_at_unix ? new Date(snapshot.update.updated_at_unix * 1_000).toLocaleString() : '--'],
+    ['Update state', snapshot.update.installed ? snapshot.update.state.toUpperCase().replaceAll('_', ' ') : 'UPDATER UNAVAILABLE'],
+  ]);
+  updateStatus.textContent = active && snapshot.update.state === 'available'
+    ? 'Update available; stop casting before applying it.'
+    : (snapshot.update.message || (snapshot.update.installed ? 'Use Check for update to query Docker Hub.' : 'Run the device initializer to install the host updater.'));
   if (snapshot.watchdog.configuration_error) watchdogStatus.textContent = `Receiver blocked by configuration: ${snapshot.watchdog.configuration_error}`;
   state.textContent = snapshot.watchdog.receiver_state === 'ready' ? management.state : snapshot.watchdog.receiver_state.toUpperCase();
   state.style.color = management.state === 'STREAMING' && snapshot.watchdog.receiver_state === 'ready' ? '#35d49a' : '#90a4bd';
@@ -825,7 +861,7 @@ function selectTab(name: 'overview' | 'logs' | 'settings'): void {
 function isSnapshot(value: unknown): value is Snapshot {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<Snapshot>;
-  return Boolean(candidate.management && candidate.pairing && candidate.settings && Array.isArray(candidate.management.connections));
+  return Boolean(candidate.management && candidate.pairing && candidate.settings && candidate.watchdog && candidate.build && candidate.update && Array.isArray(candidate.management.connections));
 }
 
 function resetChart(): void {
@@ -864,6 +900,24 @@ async function restartReceiverNow(): Promise<void> {
   }
   pendingGeneration = payload.target_generation;
   watchdogStatus.textContent = `Receiver restarting; waiting for generation ${pendingGeneration}…`;
+}
+
+async function requestUpdate(path: 'check' | 'apply'): Promise<void> {
+  if (path === 'apply' && (!lastSnapshot || lastSnapshot.management.active_stream)) return;
+  if (path === 'apply' && !confirm('Install the available update? The management portal will reconnect after the container restarts.')) return;
+  checkUpdate.disabled = true;
+  applyUpdate.disabled = true;
+  updateStatus.textContent = path === 'check' ? 'Checking Docker Hub…' : 'Installing update; waiting for the device to restart…';
+  const response = await fetch(`/api/update/${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: path === 'apply' ? JSON.stringify({ confirm_update: true }) : '{}',
+  });
+  if (!response.ok) {
+    const payload: unknown = await response.json().catch(() => ({}));
+    const reason = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string' ? payload.error.replaceAll('_', ' ') : `HTTP ${response.status}`;
+    updateStatus.textContent = `Update request failed: ${reason}.`;
+    if (lastSnapshot) render(lastSnapshot);
+  }
 }
 
 function renderOperationalLogs(): void {
@@ -946,6 +1000,8 @@ latencySeriesControls.addEventListener('click', (event) => {
 });
 stopButton.addEventListener('click', () => void stopSharing());
 restartReceiver.addEventListener('click', () => void restartReceiverNow());
+checkUpdate.addEventListener('click', () => void requestUpdate('check'));
+applyUpdate.addEventListener('click', () => void requestUpdate('apply'));
 downloadLogs.addEventListener('click', () => void downloadDiagnosticZip());
 logSeverity.addEventListener('change', renderOperationalLogs);
 logCategory.addEventListener('change', renderOperationalLogs);

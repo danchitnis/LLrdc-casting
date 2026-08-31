@@ -117,8 +117,7 @@ The receiver sends this JSON body, with no client-controlled expiry fields:
   "receiver_id": "receiver-01",
   "ip_address": "192.168.1.42",
   "webtransport_port": 4433,
-  "cert_hash_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "pairing_code": "A78Q"
+  "cert_hash_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }
 ```
 
@@ -138,9 +137,10 @@ The signed bytes are exactly the UTF-8 bytes of:
 
 The HMAC key is the receiver-specific derived key described above. Timestamps
 are accepted within five minutes, and `(receiver_id, nonce)` is stored in D1 to
-reject replay. The Worker supplies a 120-second code expiry and a 90-second
-registration expiry. Registration rejects non-RFC1918 IPv4 addresses and code
-collisions; a collision returns `409` without replacing the other receiver.
+reject replay. The Worker allocates the fleet-unique pairing code and returns
+it with the authoritative code and registration expiries. Registration rejects
+non-RFC1918 IPv4 addresses, reuses an unexpired code for the same receiver, and
+retries random allocation when another receiver owns a candidate code.
 
 ## Pairing API
 

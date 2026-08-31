@@ -3,7 +3,6 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="llrdc-casting"
-ROLLBACK_RUNTIME_IMAGE="$IMAGE"
 SSH_OPTIONS=(
   -o BatchMode=yes
   -o ConnectTimeout=10
@@ -15,6 +14,8 @@ ARTIFACT_CONTAINER_ID=""
 DEVICE_CONFIG_DIR="/var/lib/llrdc-config"
 DEVICE_SECRETS_DIR="/var/lib/llrdc-secrets"
 DEVICE_MANAGEMENT_DIR="/var/lib/llrdc-management"
+DEVICE_UPDATE_DIR="/var/lib/llrdc-update"
+DEVICE_DEVELOPMENT_DIR="/var/tmp/llrdc-bin"
 
 die() {
   echo "[ERROR] $*" >&2
@@ -209,6 +210,8 @@ write_runtime_env() {
     printf 'RECEIVER_REGISTRATION_SECRET=%s\n' "$receiver_registration_secret"
     printf 'PAIRING_TOKEN_PUBLIC_KEY_FILE=%s\n' "$pairing_token_public_key_file"
     printf 'LLRDC_CODEC_DIAGNOSTICS=%s\n' "$codec_diagnostics"
+    printf 'LLRDC_UPDATE_REQUEST_DIR=/updates/requests\n'
+    printf 'LLRDC_UPDATE_STATUS_FILE=/updates/status/status.json\n'
   } >"$destination"
 }
 
@@ -235,25 +238,15 @@ start_remote_container() {
   local runtime_image="$1"
   remote_ssh "
     set -eu
-    env_file='$DEVICE_SECRETS_DIR/runtime.env'
-    if [ -s /var/tmp/llrdc-bin/runtime.env.new ]; then env_file=/var/tmp/llrdc-bin/runtime.env.new; fi
-    for existing in '$IMAGE' rock5c-v4l2-drm; do
-      if docker container inspect \"\$existing\" >/dev/null 2>&1; then
-        docker stop -t 2 \"\$existing\" >/dev/null 2>&1 || docker kill \"\$existing\" >/dev/null
-        docker rm -f \"\$existing\" >/dev/null
-      fi
-    done
-    docker run -d --name '$IMAGE' --restart unless-stopped --net host --privileged \
-      --env-file "\$env_file" \
-      -v /dev:/dev \
-      -v /var/lib/llrdc-certs:/certs \
-      -v /var/lib/llrdc-pairing:/pairing:ro \
-      -v '$DEVICE_SECRETS_DIR:/secrets:ro' \
-      -v '$DEVICE_CONFIG_DIR:/config:rw' \
-      -v '$DEVICE_MANAGEMENT_DIR:/management:rw' \
-      -v /var/tmp/llrdc-bin/llrdc-casting:/usr/local/bin/llrdc-casting:ro \
-      -v /var/tmp/llrdc-bin/llrdc-management:/usr/local/bin/llrdc-management:ro \
-      '$runtime_image' >/dev/null
+    test \"\$(systemctl is-enabled llrdc-casting.service)\" = enabled
+    docker image inspect '$runtime_image' >/dev/null
+    printf '%s\\n' '$runtime_image' >'$DEVICE_DEVELOPMENT_DIR/development.image.new'
+    mv -f '$DEVICE_DEVELOPMENT_DIR/development.image.new' '$DEVICE_DEVELOPMENT_DIR/development.image'
+    printf 'development\\n' >'$DEVICE_DEVELOPMENT_DIR/development.enabled.new'
+    mv -f '$DEVICE_DEVELOPMENT_DIR/development.enabled.new' '$DEVICE_DEVELOPMENT_DIR/development.enabled'
+    if docker container inspect '$IMAGE' >/dev/null 2>&1; then
+      docker stop -t 8 '$IMAGE' >/dev/null
+    fi
   "
 }
 
@@ -285,23 +278,13 @@ show_receiver_logs() {
 }
 
 rollback_remote_deployment() {
-  echo "[ROLLBACK] Restoring the previous receiver binary and runtime configuration..." >&2
-  if ! remote_ssh "
+  echo "[ROLLBACK] Restoring configuration and returning to the published release..." >&2
+  remote_ssh "
     set -eu
-    test -s /var/tmp/llrdc-bin/llrdc-casting.previous
-    test -s /var/tmp/llrdc-bin/llrdc-management.previous
-    cp -p /var/tmp/llrdc-bin/llrdc-casting.previous /var/tmp/llrdc-bin/llrdc-casting.rollback
-    mv -f /var/tmp/llrdc-bin/llrdc-casting.rollback /var/tmp/llrdc-bin/llrdc-casting
-    cp -p /var/tmp/llrdc-bin/llrdc-management.previous /var/tmp/llrdc-bin/llrdc-management.rollback
-    mv -f /var/tmp/llrdc-bin/llrdc-management.rollback /var/tmp/llrdc-bin/llrdc-management
     docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_CONFIG_DIR:/config' -v '$DEVICE_SECRETS_DIR:/secrets' '$IMAGE' -c 'set -eu; if [ -s /stage/runtime.env.previous ]; then cp -p /stage/runtime.env.previous /secrets/runtime.env.rollback; mv -f /secrets/runtime.env.rollback /secrets/runtime.env; chown root:root /secrets/runtime.env; chmod 0600 /secrets/runtime.env; fi; if [ -s /stage/config.yaml.previous ]; then cp -p /stage/config.yaml.previous /config/config.yaml.rollback; mv -f /config/config.yaml.rollback /config/config.yaml; chown root:root /config/config.yaml; chmod 0640 /config/config.yaml; fi'
-    rm -f /var/tmp/llrdc-bin/runtime.env.new
-  "; then
-    echo "[ROLLBACK] No valid previous deployment is available." >&2
-    return 1
-  fi
-
-  start_remote_container "$ROLLBACK_RUNTIME_IMAGE" || return 1
+    rm -f '$DEVICE_DEVELOPMENT_DIR/development.enabled' '$DEVICE_DEVELOPMENT_DIR/development.enabled.new' '$DEVICE_DEVELOPMENT_DIR/development.image.new'
+    if docker container inspect '$IMAGE' >/dev/null 2>&1; then docker stop -t 8 '$IMAGE' >/dev/null; fi
+  " || return 1
   wait_for_receiver
 }
 
@@ -461,6 +444,8 @@ case "$action" in
 
     [[ -n "$board_ip" ]] || die "A board address is required; use --board-ip=<address>."
     [[ "$board_ip" != -* && "$board_ip" != *[[:space:]]* ]] || die "Invalid board address."
+    remote_ssh "role=\$(cat /etc/llrdc/role 2>/dev/null || true); { test \"\$role\" = independent || test \"\$role\" = production; } && test \"\$(systemctl is-enabled llrdc-casting.service)\" = enabled && test \"\$(systemctl is-enabled llrdc-update.path)\" = enabled" >/dev/null 2>&1 \
+      || die "The target is not initialized with the independent device services. Run ./init_device.sh '$board_ip' once, then rerun this development push."
     [[ "$drm_connector_id" == "auto" || "$drm_connector_id" =~ ^[0-9]+$ ]] || die "DRM connector must be 'auto' or a numeric ID."
     [[ "$drm_plane_id" =~ ^[0-9]+$ ]] || die "DRM plane must be a numeric ID."
     case "$idle_dashboard" in
@@ -526,10 +511,11 @@ case "$action" in
     local_management_binary="${DEPLOY_TMP_DIR}/llrdc-management"
     local_runtime_env="${DEPLOY_TMP_DIR}/runtime.env"
     local_device_config="${DEPLOY_TMP_DIR}/config.yaml"
+    local_update_status="${DEPLOY_TMP_DIR}/update-status.json"
     write_runtime_env "$local_runtime_env"
     write_device_config "$local_device_config"
 
-    remote_ssh "mkdir -p /var/tmp/llrdc-bin && docker run --rm --entrypoint /bin/sh -v '$DEVICE_MANAGEMENT_DIR:/management' '$IMAGE' -c 'chmod 0700 /management' && rm -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/llrdc-management.new /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/config.yaml.new"
+    remote_ssh "mkdir -p /var/tmp/llrdc-bin && docker run --rm --entrypoint /bin/sh -v '$DEVICE_MANAGEMENT_DIR:/management' '$IMAGE' -c 'chmod 0700 /management' && rm -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/llrdc-management.new /var/tmp/llrdc-bin/runtime.env.new /var/tmp/llrdc-bin/config.yaml.new /var/tmp/llrdc-bin/update-status.json.new"
 
     # Hash Dockerfile to detect whether the complete runtime image must be transferred.
     dockerfile_hash="$(shasum -a 256 "${SCRIPT_DIR}/Dockerfile" | awk '{print $1}')"
@@ -542,10 +528,6 @@ case "$action" in
     build_date="$(date +%s)"
     if [[ "$dockerfile_hash" != "$remote_hash" ]]; then
       echo "[DEPLOY] Runtime dependencies changed; building and transferring the full ARM64 image..."
-      if remote_ssh "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
-        remote_ssh "docker tag '$IMAGE' '${IMAGE}:rollback'"
-        ROLLBACK_RUNTIME_IMAGE="${IMAGE}:rollback"
-      fi
       docker buildx build --build-arg BUILD_DATE="$build_date" --platform linux/arm64 -t "$IMAGE" --load .
       docker save "$IMAGE" | gzip -1 | remote_ssh "bash -o pipefail -c 'gunzip | docker load'"
       artifact_image="$IMAGE"
@@ -569,12 +551,31 @@ case "$action" in
 
     local_binary_hash="$(shasum -a 256 "$local_binary" | awk '{print $1}')"
     local_management_hash="$(shasum -a 256 "$local_management_binary" | awk '{print $1}')"
+    python3 - "$local_update_status" "$local_management_hash" <<'PY'
+import json
+import sys
+import time
+
+path, revision = sys.argv[1:]
+with open(path, 'w', encoding='utf-8') as stream:
+    json.dump({
+        'state': 'idle',
+        'current_digest': None,
+        'available_digest': None,
+        'current_version': f'development-{revision[:12]}',
+        'message': 'Temporary Mac development build is active. Check Docker Hub to return to the published release.',
+        'updated_at_unix': int(time.time()),
+        'managed': True,
+    }, stream)
+    stream.write('\n')
+PY
     binary_size="$(ls -lh "$local_binary" | awk '{print $5}')"
     echo "[TRANSFER] Uploading verified receiver binary (${binary_size})..."
     scp "${SSH_OPTIONS[@]}" "$local_binary" "${board_ip}:/var/tmp/llrdc-bin/llrdc-casting.new"
     scp "${SSH_OPTIONS[@]}" "$local_management_binary" "${board_ip}:/var/tmp/llrdc-bin/llrdc-management.new"
     scp "${SSH_OPTIONS[@]}" "$local_runtime_env" "${board_ip}:/var/tmp/llrdc-bin/runtime.env.new"
     scp "${SSH_OPTIONS[@]}" "$local_device_config" "${board_ip}:/var/tmp/llrdc-bin/config.yaml.new"
+    scp "${SSH_OPTIONS[@]}" "$local_update_status" "${board_ip}:/var/tmp/llrdc-bin/update-status.json.new"
     remote_binary_hash="$(remote_ssh "sha256sum /var/tmp/llrdc-bin/llrdc-casting.new | awk '{print \$1}'")"
     [[ "$remote_binary_hash" == "$local_binary_hash" ]] || die "Transferred binary checksum mismatch. The active receiver was not changed."
     remote_management_hash="$(remote_ssh "sha256sum /var/tmp/llrdc-bin/llrdc-management.new | awk '{print \$1}'")"
@@ -588,7 +589,7 @@ case "$action" in
       chmod 0755 /var/tmp/llrdc-bin/llrdc-management.new
       mv -f /var/tmp/llrdc-bin/llrdc-casting.new /var/tmp/llrdc-bin/llrdc-casting
       mv -f /var/tmp/llrdc-bin/llrdc-management.new /var/tmp/llrdc-bin/llrdc-management
-      docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_CONFIG_DIR:/config' -v '$DEVICE_SECRETS_DIR:/secrets' '$IMAGE' -c 'set -eu; if [ -s /secrets/runtime.env ]; then cp -p /secrets/runtime.env /stage/runtime.env.previous; elif [ -s /stage/runtime.env ]; then cp -p /stage/runtime.env /stage/runtime.env.previous; fi; if [ -s /config/config.yaml ]; then cp -p /config/config.yaml /stage/config.yaml.previous; fi; chmod 0600 /stage/runtime.env.new; chmod 0640 /stage/config.yaml.new; mv -f /stage/config.yaml.new /config/config.yaml; chown root:root /config/config.yaml; chmod 0640 /config/config.yaml'
+      docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_CONFIG_DIR:/config' -v '$DEVICE_SECRETS_DIR:/secrets' '$IMAGE' -c 'set -eu; if [ -s /secrets/runtime.env ]; then cp -p /secrets/runtime.env /stage/runtime.env.previous; elif [ -s /stage/runtime.env ]; then cp -p /stage/runtime.env /stage/runtime.env.previous; fi; if [ -s /config/config.yaml ]; then cp -p /config/config.yaml /stage/config.yaml.previous; fi; chmod 0600 /stage/runtime.env.new; mv -f /stage/runtime.env.new /secrets/runtime.env; chown root:root /secrets/runtime.env; chmod 0600 /secrets/runtime.env; chmod 0640 /stage/config.yaml.new; mv -f /stage/config.yaml.new /config/config.yaml; chown root:root /config/config.yaml; chmod 0640 /config/config.yaml'
     "
 
     if ! start_remote_container "$IMAGE"; then
@@ -607,7 +608,7 @@ case "$action" in
       die "Deployment failed readiness checks and rollback also failed."
     fi
 
-    remote_ssh "docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_SECRETS_DIR:/secrets' '$IMAGE' -c 'set -eu; mv -f /stage/runtime.env.new /secrets/runtime.env; chown root:root /secrets/runtime.env; chmod 0600 /secrets/runtime.env'"
+    remote_ssh "docker run --rm --entrypoint /bin/sh -v /var/tmp/llrdc-bin:/stage -v '$DEVICE_UPDATE_DIR/status:/status' '$IMAGE' -c 'set -eu; cp /stage/update-status.json.new /status/status.json.new; chmod 0644 /status/status.json.new; mv -f /status/status.json.new /status/status.json; rm -f /stage/update-status.json.new'"
 
     # Secrets and superseded configuration remain only in the durable,
     # root-owned locations after the new container is healthy.
@@ -629,6 +630,9 @@ case "$action" in
     [[ -n "$board_ip" ]] || die "A board address is required; use --board-ip=<address>."
     [[ "$board_ip" != -* && "$board_ip" != *[[:space:]]* ]] || die "Invalid board address."
     require_command ssh
+    if remote_ssh "test \"\$(systemctl is-enabled llrdc-casting.service 2>/dev/null)\" = enabled" >/dev/null 2>&1; then
+      die "The independent device supervisor would restart this container. To stop it, run 'sudo systemctl stop llrdc-casting.service' on $board_ip yourself."
+    fi
     remote_ssh "
       set -eu
       for existing in '$IMAGE' rock5c-v4l2-drm; do
