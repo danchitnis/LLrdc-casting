@@ -1,7 +1,7 @@
 # CAST Pairing Worker
 
 This package implements the optional Cloudflare discovery control plane from
-`CAST_PAIRING_PLAN.md`. It serves only a small fixed pairing bootstrap at
+the archived [pairing design](../../docs/archive/CAST_PAIRING_PLAN.md). It serves only a small fixed pairing bootstrap at
 `https://cast.llrdc.com`; the full casting page is fetched from the receiver
 over the authenticated LAN WebTransport session and replaces the bootstrap
 without changing the browser URL. It is not required for direct-IP LAN

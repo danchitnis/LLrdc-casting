@@ -1,4 +1,4 @@
-# Direct-IP LAN WebTransport Pairing Plan
+# Archived: Direct-IP LAN WebTransport Pairing Plan
 
 ## Goal
 

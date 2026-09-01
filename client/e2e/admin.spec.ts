@@ -5,6 +5,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { assertDiagnosticsClean, trackDiagnostics, writeDiagnostics } from './support';
 
 const boardIp = process.env.E2E_BOARD_IP;
+const managementIp = process.env.E2E_ADMIN_IP || boardIp;
 const visualDelayMs = Math.max(0, Number(process.env.E2E_VISUAL_DELAY_MS || 1_000));
 type Settings = Record<string, unknown>;
 
@@ -51,7 +52,7 @@ async function getSnapshot(page: Page): Promise<Snapshot> {
   let lastError: unknown;
   do {
     try {
-      const response = await page.request.get(`https://${boardIp}:9090/api/snapshot`);
+      const response = await page.request.get(`https://${managementIp}:9090/api/snapshot`);
       if (response.ok()) return await response.json() as Snapshot;
       lastError = new Error(`Snapshot request returned HTTP ${response.status()}`);
     } catch (error) {
@@ -165,10 +166,10 @@ test.describe('receiver management portal', () => {
   test('loads the typed Astro dashboard and receives a live snapshot', async ({ page }, testInfo) => {
     const diagnostics = trackDiagnostics(page);
     try {
-      const response = await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });
+      const response = await page.goto(`https://${managementIp}:9090/`, { waitUntil: 'domcontentloaded' });
       expect(response?.ok()).toBe(true);
-      await expect(page).toHaveTitle('LLRDC Management');
-      await expect(page.locator('h1')).toHaveText('LLRDC Receiver Management');
+      await expect(page).toHaveTitle('LLrdc Casting Management');
+      await expect(page.locator('h1')).toHaveText('LLrdc Casting Management');
       await expect(page.locator('#chart')).toHaveAttribute('aria-label', 'Measured encoded bitrate over time');
       await expect(page.locator('#latencyChart')).toHaveAttribute('aria-label', 'Estimated stream latency over time');
       await expect(page.locator('.chart-panel')).toHaveCount(2);
@@ -275,7 +276,7 @@ test.describe('receiver management portal', () => {
   test('keeps operational logs in a dedicated, scrollable, color-coded tab', async ({ page }, testInfo) => {
     const diagnostics = trackDiagnostics(page);
     try {
-      await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });
+      await page.goto(`https://${managementIp}:9090/`, { waitUntil: 'domcontentloaded' });
       await expect(page.locator('#overviewTab')).toBeVisible();
       await expect(page.locator('#logsTab')).toBeHidden();
       await expect(page.locator('#settingsTab')).toBeHidden();
@@ -315,7 +316,7 @@ test.describe('receiver management portal', () => {
   test('watchdog recovers crashes and hangs while the portal stays available', async ({ page }, testInfo) => {
     const diagnostics = trackDiagnostics(page);
     try {
-      await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });
+      await page.goto(`https://${managementIp}:9090/`, { waitUntil: 'domcontentloaded' });
       const initial = await getSnapshot(page);
       expect(initial.watchdog.receiver_state).toBe('ready');
       expect(initial.watchdog.receiver_pid).not.toBeNull();
@@ -366,7 +367,7 @@ test.describe('receiver management portal', () => {
     let initial: Snapshot | undefined;
     let initialConfig = '';
     try {
-      await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });
+      await page.goto(`https://${managementIp}:9090/`, { waitUntil: 'domcontentloaded' });
       await expect(page.locator('#overviewTab .card').filter({ has: page.locator('#updateMetrics') })).toHaveCount(0);
       await page.locator('#settingsTabButton').click();
       await expect(page.locator('#settingsTab')).toBeVisible();
@@ -435,7 +436,7 @@ test.describe('receiver management portal', () => {
       if (initial) {
         const original = editableSettings(initial.settings);
         await visualPause(page);
-        const response = await page.request.put(`https://${boardIp}:9090/api/settings`, {
+        const response = await page.request.put(`https://${managementIp}:9090/api/settings`, {
           headers: { 'Content-Type': 'application/json' },
           data: { settings: original, confirm_restart: true },
         });
@@ -457,7 +458,7 @@ test.describe('receiver management portal', () => {
   test('shows installation and editable runtime settings', async ({ page }, testInfo) => {
     const diagnostics = trackDiagnostics(page);
     try {
-      await page.goto(`https://${boardIp}:9090/`, { waitUntil: 'domcontentloaded' });
+      await page.goto(`https://${managementIp}:9090/`, { waitUntil: 'domcontentloaded' });
       await page.locator('#settingsTabButton').click();
       const current = await getSnapshot(page);
       await expect(page.locator('#settingPort')).toHaveValue(String(current.settings.port));

@@ -2,7 +2,9 @@
   "name": "llrdc-casting-webtransport-client",
   "version": "1.0.0",
   "type": "module",
-  "description": "Node.js H.264 MP4 video streamer for Rock 5C+",
+  "description": "Browser-based HEVC and H.264 client for LLrdc Casting RK3399 receivers",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/danchitnis/LLrdc-casting",
   "main": "client.mjs",
   "scripts": {
     "start": "node client.mjs",

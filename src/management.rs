@@ -434,12 +434,17 @@ impl ManagementState {
             if stream.estimated_latency.as_ref().is_some_and(|(_, previous)| seq <= previous.seq) { return false; }
             let previous = stream.estimated_latency.as_ref().map(|(_, sample)| sample.clone());
             let blend = |previous: f64, current: f64| previous + 0.25 * (current - previous);
-            let encode_ms = previous.as_ref().map_or(f64::from(encode_duration_ms), |sample| blend(sample.encode_ms, f64::from(encode_duration_ms)));
-            let sender_queue_ms = previous.as_ref().map_or(sender_raw_ms.max(0.0), |sample| blend(sample.sender_queue_ms, sender_raw_ms.max(0.0)));
-            let delivery_ms = previous.as_ref().map_or(delivery_raw_ms.max(0.0), |sample| blend(sample.delivery_ms, delivery_raw_ms.max(0.0)));
-            let receiver_queue_ms = previous.as_ref().map_or(receiver_queue_ms, |sample| blend(sample.receiver_queue_ms, receiver_queue_ms));
+            let raw_encode_ms = f64::from(encode_duration_ms);
+            let raw_sender_queue_ms = sender_raw_ms.max(0.0);
+            let raw_delivery_ms = delivery_raw_ms.max(0.0);
             let decode_display_ms = 1_000.0 / f64::from(display_fps);
-            let total_ms = encode_ms + sender_queue_ms + delivery_ms + receiver_queue_ms + decode_display_ms;
+            let raw_total_ms = raw_encode_ms + raw_sender_queue_ms + raw_delivery_ms + receiver_queue_ms + decode_display_ms;
+            if raw_total_ms > ESTIMATED_LATENCY_MAX_MS { return false; }
+            let encode_ms = previous.as_ref().map_or(raw_encode_ms, |sample| blend(sample.encode_ms, raw_encode_ms));
+            let sender_queue_ms = previous.as_ref().map_or(raw_sender_queue_ms, |sample| blend(sample.sender_queue_ms, raw_sender_queue_ms));
+            let delivery_ms = previous.as_ref().map_or(raw_delivery_ms, |sample| blend(sample.delivery_ms, raw_delivery_ms));
+            let receiver_queue_smoothed_ms = previous.as_ref().map_or(receiver_queue_ms, |sample| blend(sample.receiver_queue_ms, receiver_queue_ms));
+            let total_ms = encode_ms + sender_queue_ms + delivery_ms + receiver_queue_smoothed_ms + decode_display_ms;
             if total_ms > ESTIMATED_LATENCY_MAX_MS { return false; }
             let sample = EstimatedLatencySnapshot {
                 seq,
@@ -447,8 +452,8 @@ impl ManagementState {
                 encode_ms,
                 sender_queue_ms,
                 delivery_ms,
-                receiver_queue_ms,
-                transport_queue_ms: sender_queue_ms + delivery_ms + receiver_queue_ms,
+                receiver_queue_ms: receiver_queue_smoothed_ms,
+                transport_queue_ms: sender_queue_ms + delivery_ms + receiver_queue_smoothed_ms,
                 decode_display_ms,
                 access_unit_bytes: previous.as_ref().map_or(0, |sample| sample.access_unit_bytes),
                 media_write_blocked_ms: previous.as_ref().map_or(0.0, |sample| sample.media_write_blocked_ms),
@@ -460,8 +465,8 @@ impl ManagementState {
                 effective_fps: previous.as_ref().map_or(f64::from(stream.config.fps), |sample| sample.effective_fps),
             };
             stream.estimated_latency_samples.push_back(LatencyMetricSample {
-                elapsed_sec: stream.started_at.elapsed().as_secs_f64(), total_ms, encode_ms: sample.encode_ms,
-                sender_queue_ms, delivery_ms, receiver_queue_ms, decode_display_ms,
+                elapsed_sec: stream.started_at.elapsed().as_secs_f64(), total_ms: raw_total_ms, encode_ms: raw_encode_ms,
+                sender_queue_ms: raw_sender_queue_ms, delivery_ms: raw_delivery_ms, receiver_queue_ms, decode_display_ms,
             });
             while stream.estimated_latency_samples.len() > MAX_SAMPLES { stream.estimated_latency_samples.pop_front(); }
             stream.estimated_latency = Some((Instant::now(), sample));
@@ -778,6 +783,22 @@ mod tests {
         assert_eq!(sample.delivery_ms, 5.0);
         assert_eq!(sample.receiver_queue_ms, 3.0);
         assert_eq!(active.latency_samples.len(), 1);
+
+        state.record_frame(2, 1_000, 2.0);
+        assert!(state.record_receiver_estimated_latency(2, 2_000.0, 9.0, 2_020.0, 2_133.0, 7.0, 60));
+        let active = state.snapshot().active_stream.unwrap();
+        let current = active.estimated_latency.unwrap();
+        assert_eq!(current.encode_ms, 6.0);
+        assert_eq!(current.sender_queue_ms, 6.5);
+        assert_eq!(current.delivery_ms, 7.0);
+        assert_eq!(current.receiver_queue_ms, 4.0);
+        assert_eq!(active.latency_samples.len(), 2);
+        let retained = &active.latency_samples[1];
+        assert_eq!(retained.encode_ms, 9.0);
+        assert_eq!(retained.sender_queue_ms, 11.0);
+        assert_eq!(retained.delivery_ms, 13.0);
+        assert_eq!(retained.receiver_queue_ms, 7.0);
+        assert!((retained.total_ms - (9.0 + 11.0 + 13.0 + 7.0 + 1_000.0 / 60.0)).abs() < 1e-9);
     }
 
     #[test]

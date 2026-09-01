@@ -9,13 +9,13 @@ function alignUp(value: number, alignment: number): number {
 }
 
 export const VIDEO_SOURCE_OPTIONS = [
-  { value: 'screen', label: 'Screen Capture (getDisplayMedia)' },
-  { value: 'synthetic', label: 'Bouncing Orb / Test Pattern (Synthetic)' },
+  { value: 'screen', label: 'Screen, window, or tab' },
+  { value: 'synthetic', label: 'Built-in test pattern' },
 ] as const satisfies readonly { value: string; label: string }[];
 
 export const ASPECT_OPTIONS = [
-  { value: 'preserve', label: 'Preserve Laptop Aspect Ratio' },
-  { value: 'stretch', label: 'Stretch to HDMI Display' },
+  { value: 'preserve', label: 'Preserve source proportions' },
+  { value: 'stretch', label: 'Fill HDMI display' },
 ] as const satisfies readonly { value: string; label: string }[];
 
 export const RESOLUTION_PRESETS = {
@@ -35,9 +35,9 @@ export const RESOLUTION_OPTIONS = [
 export const FPS_OPTIONS = [STANDARD_FPS, HIGH_FPS] as const satisfies readonly number[];
 
 export const CODEC_OPTIONS = [
-  { value: 'H265', label: 'H.265 / HEVC' },
+  { value: 'H265', label: 'HEVC / H.265' },
   { value: 'H264', label: 'H.264' },
-  { value: 'H264_SW', label: 'H.264 (software)' },
+  { value: 'H264_SW', label: 'H.264 (prefer software)' },
 ] as const satisfies readonly { value: string; label: string }[];
 
 export const BITRATE_OPTIONS = [
@@ -49,9 +49,9 @@ export const BITRATE_OPTIONS = [
 ] as const satisfies readonly { value: string; label: string }[];
 
 export const LATENCY_OPTIONS = [
-  { value: 'ULL', label: 'Ultra-low latency' },
+  { value: 'ULL', label: 'Lowest latency' },
   { value: 'balanced', label: 'Balanced' },
-  { value: 'quality', label: 'Quality' },
+  { value: 'quality', label: 'Best quality' },
 ] as const satisfies readonly { value: string; label: string }[];
 
 export type VideoSource = typeof VIDEO_SOURCE_OPTIONS[number]['value'];

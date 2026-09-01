@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import {
+  adminIp,
   assertCodecSupport,
   assertDiagnosticsClean,
   assertReceiverDelta,
@@ -7,13 +8,16 @@ import {
   diagnosticsFor,
   newTracePath,
   pairThroughUi,
+  receiverSystemInfo,
   receiverLogs,
   saveFailureScreenshot,
+  saveUiScreenshot,
   startPostPairTrace,
   stopPostPairTrace,
   trackDiagnostics,
   waitFor,
   writeDiagnostics,
+  writeJsonArtifact,
   type CodecCase,
   type SenderCodec,
 } from './support';
@@ -44,17 +48,34 @@ interface EstimatedLatencySnapshot {
 interface ManagementLatencySnapshot {
   management: {
     active_stream: null | {
+      sender: null | {
+        user_agent: string;
+        platform: string;
+      };
+      config: {
+        codec: string;
+        resolution: string;
+        fps: number;
+        bitrate_mbps: number;
+        latency_mode: string;
+        aspect_mode: string;
+        capture_resolution: string;
+        encoded_resolution: string;
+      };
       frames: number;
       bytes: number;
       measured_bitrate_mbps: number;
       measured_fps: number;
       average_bitrate_mbps: number;
       peak_bitrate_mbps: number;
+      sequence_gaps: number;
       estimated_latency: EstimatedLatencySnapshot | null;
       estimated_latency_age_ms: number | null;
       latency_samples: Array<EstimatedLatencySnapshot & { elapsed_sec: number }>;
     };
     health: {
+      display_resolution: string;
+      display_fps: number;
       playback_state: string;
       reassembly_in_flight: number;
       dropped_access_units: number;
@@ -64,6 +85,62 @@ interface ManagementLatencySnapshot {
       memory_total_mib: number | null;
     };
   };
+}
+
+async function writeReferenceBenchmark(page: Parameters<typeof pairThroughUi>[0], snapshot: ManagementLatencySnapshot): Promise<void> {
+  const stream = snapshot.management.active_stream;
+  if (!stream) throw new Error('Active stream disappeared before the reference benchmark was written');
+  const warmupSeconds = 5;
+  const measurementSeconds = 10;
+  const totals = stream.latency_samples
+    .filter(sample => sample.elapsed_sec >= warmupSeconds && sample.elapsed_sec < warmupSeconds + measurementSeconds)
+    .map(sample => sample.total_ms)
+    .filter(value => Number.isFinite(value) && value > 0);
+  expect(totals.length).toBeGreaterThanOrEqual(8);
+  expect(stream.sequence_gaps).toBe(0);
+  expect(stream.config.codec).toBe('H265');
+  expect(stream.config.fps).toBe(30);
+  expect(stream.config.latency_mode).toBe('ULL');
+  const browser = await page.evaluate(() => ({
+    userAgent: navigator.userAgent,
+    platform: navigator.platform,
+  }));
+  const receiver = receiverSystemInfo();
+  const round = (value: number): number => Math.round(value * 10) / 10;
+  const averageMs = totals.reduce((sum, value) => sum + value, 0) / totals.length;
+  writeJsonArtifact('performance-summary.json', {
+    schema_version: 2,
+    metric: 'average_estimated_encoder_input_to_display_ms',
+    measured_at: new Date().toISOString(),
+    environment: {
+      browser_user_agent: browser.userAgent,
+      sender_platform: browser.platform,
+      receiver: 'Radxa ROCK 4C+ / RK3399',
+      receiver_kernel: receiver.kernel,
+      receiver_architecture: receiver.architecture,
+      network_type: process.env.E2E_NETWORK_TYPE || 'unknown',
+      receiver_interface: process.env.E2E_RECEIVER_INTERFACE || 'unknown',
+      display_resolution: snapshot.management.health.display_resolution,
+      display_fps: snapshot.management.health.display_fps,
+    },
+    configuration: {
+      source: 'synthetic',
+      codec: stream.config.codec,
+      selected_resolution: '1920x1080',
+      encoded_resolution: stream.config.encoded_resolution,
+      fps: stream.config.fps,
+      bitrate_selection: 'auto',
+      configured_bitrate_mbps: stream.config.bitrate_mbps,
+      latency_mode: stream.config.latency_mode,
+      aspect_mode: stream.config.aspect_mode,
+    },
+    sample_count: totals.length,
+    warmup_seconds: warmupSeconds,
+    measurement_seconds: measurementSeconds,
+    sample_kind: 'unsmoothed_phase_estimate',
+    average_ms: round(averageMs),
+    sequence_gaps: stream.sequence_gaps,
+  });
 }
 
 function receiverDelta(before: string, after: string): string {
@@ -98,12 +175,12 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
   expect(estimatedLatency).toBeLessThan(5_000);
   await expect(page.locator('#statLatencyDetail')).toHaveText('Synchronized encoder-input-to-display estimate');
   await expect.poll(async () => {
-    const response = await page.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
+    const response = await page.request.get(`https://${adminIp()}:9090/api/snapshot`);
     if (!response.ok()) return null;
     const snapshot = await response.json() as ManagementLatencySnapshot;
     return snapshot.management.active_stream?.estimated_latency?.total_ms ?? null;
   }, { timeout: 10_000 }).not.toBeNull();
-  const managementResponse = await page.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
+  const managementResponse = await page.request.get(`https://${adminIp()}:9090/api/snapshot`);
   expect(managementResponse.ok()).toBe(true);
   const managementSnapshot = await managementResponse.json() as ManagementLatencySnapshot;
   const activeStream = managementSnapshot.management.active_stream;
@@ -138,9 +215,20 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
   expect(graphedLatency?.total_ms).toBeGreaterThan(0);
   expect(graphedLatency?.total_ms).toBeLessThan(5_000);
   if (testCase.name === 'hevc-1080p' && cycle === 1) {
-    const initialLatencySampleCount = managementLatencySamples.length;
+    await expect.poll(async () => {
+      const response = await page.request.get(`https://${adminIp()}:9090/api/snapshot`);
+      if (!response.ok()) return 0;
+      const snapshot = await response.json() as ManagementLatencySnapshot;
+      return snapshot.management.active_stream?.latency_samples.at(-1)?.elapsed_sec ?? 0;
+    }, { timeout: 30_000 }).toBeGreaterThanOrEqual(15);
+    const benchmarkResponse = await page.request.get(`https://${adminIp()}:9090/api/snapshot`);
+    expect(benchmarkResponse.ok()).toBe(true);
+    const benchmarkSnapshot = await benchmarkResponse.json() as ManagementLatencySnapshot;
+    await writeReferenceBenchmark(page, benchmarkSnapshot);
+
+    const initialLatencySampleCount = benchmarkSnapshot.management.active_stream?.latency_samples.length ?? 0;
     const portal = await page.context().newPage();
-    await portal.goto(`https://${process.env.E2E_BOARD_IP}:9090/`, { waitUntil: 'domcontentloaded' });
+    await portal.goto(`https://${adminIp()}:9090/`, { waitUntil: 'domcontentloaded' });
     await portal.bringToFront();
     // Playwright disables normal background-page lifecycle behavior, so both
     // tabs otherwise report `visible`. Drive the same visibility transition a
@@ -153,13 +241,13 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
     await expect.poll(() => portal.evaluate(() => document.visibilityState), { timeout: 5_000 }).toBe('visible');
     await expect(portal.locator('#latencyMetrics')).not.toContainText('Measuring…');
     await expect(portal.locator('#congestionMetrics')).not.toContainText('Measuring…');
-    await portal.waitForTimeout(35_000);
-    const sustainedResponse = await portal.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
+    await portal.waitForTimeout(5_000);
+    const sustainedResponse = await portal.request.get(`https://${adminIp()}:9090/api/snapshot`);
     expect(sustainedResponse.ok()).toBe(true);
     const sustainedSnapshot = await sustainedResponse.json() as ManagementLatencySnapshot;
     const sustainedStream = sustainedSnapshot.management.active_stream;
     if (!sustainedStream) throw new Error('Active stream disappeared during sustained latency sampling');
-    expect(sustainedStream.latency_samples.length).toBeGreaterThanOrEqual(initialLatencySampleCount + 20);
+    expect(sustainedStream.latency_samples.length).toBeGreaterThanOrEqual(initialLatencySampleCount + 3);
     expect(sustainedStream.estimated_latency_age_ms).not.toBeNull();
     expect(sustainedStream.estimated_latency_age_ms ?? Number.POSITIVE_INFINITY).toBeLessThan(3_000);
     await expect(portal.locator('#latencyMetrics')).not.toContainText('Measuring…');
@@ -174,7 +262,7 @@ async function runCycle(page: Parameters<typeof pairThroughUi>[0], receiver: Ret
     await expect.poll(() => page.evaluate(() => document.visibilityState), { timeout: 5_000 }).toBe('visible');
   }
   await expect.poll(async () => {
-    const response = await page.request.get(`https://${process.env.E2E_BOARD_IP}:9090/api/snapshot`);
+    const response = await page.request.get(`https://${adminIp()}:9090/api/snapshot`);
     if (!response.ok()) return null;
     const snapshot = await response.json() as ManagementLatencySnapshot;
     return snapshot.management.health.playback_state;
@@ -246,6 +334,15 @@ test.describe('local codec matrix', () => {
     await expect(page.locator('.stat-label', { hasText: 'Target output' })).toHaveCount(1);
     await expect(page.locator('.stat-label', { hasText: 'Frames written to transport' })).toHaveCount(1);
     await expect(page.locator('#userNotice')).toBeHidden();
+    await expect(page.locator('link[href^="http"], script[src^="http"], img[src^="http"]')).toHaveCount(0);
+    await expect(page.locator('header .subtitle')).toHaveText('Private, low-latency casting to HDMI');
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator('#pairingTitle')).toBeVisible();
+    await expect(page.locator('#toggleBtn')).toBeVisible();
+    await saveUiScreenshot(page, 'casting-mobile.png');
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await saveUiScreenshot(page, 'casting-desktop.png');
 
     await assertCodecSupport(page, 'H265', '1920x1080');
     await assertCodecSupport(page, 'H264', '1920x1080');

@@ -11,10 +11,7 @@ import { PAIRING_CONFIG } from '../lib/config';
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="icon" href="data:," />
-  <title>LLrdc Casting | Ultra Low Latency Hardware Video Streamer</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <title>LLrdc Casting | Private, low-latency casting to HDMI</title>
   <style is:global>
     :root {
       --color-bg: #0b0f17;
@@ -27,8 +24,8 @@ import { PAIRING_CONFIG } from '../lib/config';
       --color-danger-hover: #dc2626;
       --color-text: #f1f5f9;
       --color-text-muted: #94a3b8;
-      --font-main: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      --font-mono: 'JetBrains Mono', monospace;
+      --font-main: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      --font-mono: ui-monospace, 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
     }
 
     * {
@@ -220,14 +217,14 @@ import { PAIRING_CONFIG } from '../lib/config';
 
   <section class="pairing-card" aria-labelledby="pairingTitle">
     <h2 id="pairingTitle">Connect to a receiver</h2>
-    <p id="pairingHelp">Enter the {PAIRING_CONFIG.CODE_LENGTH}-character code shown on the receiver's HDMI screen. Video stays on the local network.</p>
+    <p id="pairingHelp">Enter the {PAIRING_CONFIG.CODE_LENGTH}-character code shown on the HDMI display. The connection and video stay on your local network.</p>
     <form id="pairForm">
       <div class="pairing-row">
         <input id="pairCode" name="code" inputmode="text" pattern={PAIRING_CONFIG.CODE_PATTERN.source} maxlength={PAIRING_CONFIG.CODE_LENGTH} autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="A78Q" aria-label={`${PAIRING_CONFIG.CODE_LENGTH}-character receiver code`} required />
         <button id="pairBtn" type="submit">Connect</button>
       </div>
     </form>
-    <span id="pairStatus" role="status">Waiting for code</span>
+    <span id="pairStatus" role="status">Waiting for receiver code</span>
   </section>
 
   <SettingsCard />

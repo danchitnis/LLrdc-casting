@@ -37,6 +37,7 @@ function requiredEnv(name: string): string {
 }
 
 export const boardIp = (): string => requiredEnv('E2E_BOARD_IP');
+export const adminIp = (): string => process.env.E2E_ADMIN_IP || boardIp();
 export const pairingCode = (): string => requiredEnv('E2E_PAIRING_CODE');
 export const artifactDir = (): string => process.env.E2E_ARTIFACT_DIR || '../.artefact/manual';
 
@@ -81,8 +82,6 @@ export function attachDiagnostics(page: Page): BrowserDiagnostics {
       removeOptionalBeaconConsoleError();
       return;
     }
-    // The UI's decorative Google Fonts are intentionally non-blocking.
-    if (url.startsWith('https://fonts.googleapis.com/') || url.startsWith('https://fonts.gstatic.com/')) return;
     diagnostics.requestFailures.push(redact(`${request.method()} ${url}: ${request.failure()?.errorText || 'unknown failure'}`));
   });
   return diagnostics;
@@ -104,6 +103,34 @@ export function writeDiagnostics(diagnostics: BrowserDiagnostics, name: string):
   const dir = artifactDir();
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${name}.json`), JSON.stringify(diagnostics, null, 2));
+}
+
+export function writeJsonArtifact(name: string, value: unknown): void {
+  const dir = artifactDir();
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, name), `${JSON.stringify(value, null, 2)}\n`);
+}
+
+export function receiverSystemInfo(): { kernel: string; architecture: string } {
+  const output = execFileSync(
+    'ssh',
+    ['-o', 'BatchMode=yes', boardIp(), 'printf "%s\\n%s\\n" "$(uname -sr)" "$(uname -m)"'],
+    { encoding: 'utf8', timeout: 10_000 },
+  ).trim().split('\n');
+  return {
+    kernel: output[0] || 'unknown',
+    architecture: output[1] || 'unknown',
+  };
+}
+
+export async function saveUiScreenshot(page: Page, name: string): Promise<void> {
+  const dir = artifactDir();
+  mkdirSync(dir, { recursive: true });
+  await page.screenshot({
+    path: join(dir, name),
+    fullPage: true,
+    mask: [page.locator('#pairCode, #pair-code')],
+  });
 }
 
 export function assertDiagnosticsClean(diagnostics: BrowserDiagnostics): void {

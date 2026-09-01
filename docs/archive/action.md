@@ -1,4 +1,4 @@
-# Action Plan: Resolving Choppy Video Streaming & Latency Optimization in LLrdc-casting
+# Archived: Resolving Choppy Video Streaming and Latency
 
 This document outlines the step-by-step action plan to eliminate choppy video streaming, reduce end-to-end latency, and improve video presentation quality in `LLrdc-casting`, incorporating architectural insights and best practices from `LLrdc`.
 

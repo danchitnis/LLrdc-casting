@@ -1,140 +1,198 @@
-# Agent Setup Instructions: Radxa ROCK 4C+ (RK3399) V4L2 DRM Pipeline Initialization (Rust)
+# LLrdc Casting Setup and Operations
 
-This document outlines the step-by-step workflow for an **AI Agent** or automated system initializing and deploying the safe Rust WebTransport V4L2 DMA-BUF DRM Atomic pipeline on a fresh/blank Armbian installation upon acquiring SSH access.
+This guide installs and operates LLrdc Casting on the supported reference
+receiver: a Radxa ROCK 4C+ with RK3399, Debian/Armbian ARM64, and an HDMI
+display.
 
----
+## Before you begin
 
-## Agent Operational Rules
+The receiver needs:
 
-1. **Local Files First**: All project source files (`src/main.rs`, `Cargo.toml`, `Dockerfile`, `Makefile`, `server.sh`, `stream.sh`, `download_bunny.sh`, `prepare_stream.sh`) must be maintained locally in the host workstation Git repository.
-2. **Local Workstation Cross-Build**: Docker images should be built locally on the host workstation (`docker build --platform linux/arm64`) and transferred to the board via compressed stream (`docker save | gzip -1 | ssh ... docker load`) to prevent RAM exhaustion and thermal throttling on the Rock Pi board.
-3. **No Sudo Workarounds**: If `sudo` privileges are required on the remote target board, request them from the user rather than bypassing security mechanisms.
-4. **Container Isolation**: Compile and run all rendering applications inside a Docker container (`--net=host --privileged -v /dev:/dev`) to keep the host Armbian system clean.
-5. **No Git Commits Without Explicit User Permission**: Only stage/commit when explicitly requested by the user.
+- working HDMI output;
+- Ethernet or Wi-Fi connectivity;
+- SSH and `sudo` access during installation; and
+- Internet access for the initial image download.
 
----
+The casting computer needs Google Chrome and direct network reachability to the
+receiver. Wired Ethernet is recommended. Tailscale is not part of the media
+path, but the production installer requires it for the scoped management portal.
 
-## Agent Execution Workflow Once SSH Access is Established
+## Local-only installation
 
-### Step 1: Verify Remote Connectivity & System Architecture
-Run a quick connectivity check to identify kernel version and CPU architecture:
+For one receiver that does not need `cast.llrdc.com`, run the public bootstrap
+directly on the board:
 
-```bash
-ssh <BOARD_IP> "uname -a"
-```
-*Expected Output*: Linux kernel `6.x` on `aarch64`.
-
----
-
-### Step 2: Install & Prepare Docker Engine on Target Board
-Ensure `docker.io` and `docker-cli` are installed, the Docker service is active, and the SSH user belongs to the `docker` group.
-
-Check Docker installation status:
-```bash
-ssh <BOARD_IP> "docker info"
+```sh
+curl -fsSL https://raw.githubusercontent.com/danchitnis/LLrdc-casting/main/bootstrap_device.sh -o /tmp/bootstrap_device.sh
+bash /tmp/bootstrap_device.sh
 ```
 
-If Docker or `docker-cli` is missing or user permissions are required, ask the user for `sudo` execution:
-```bash
-ssh -t <USER>@<BOARD_IP> "sudo apt update && sudo apt install -y docker.io docker-cli && sudo systemctl enable --now docker && sudo usermod -aG docker \$USER"
+The script installs Docker when needed, installs the production systemd
+services, pulls `danchitnis/llrdc-casting:latest`, and starts with cloud
+discovery disabled. The receiver remains able to cast locally without Internet
+access after installation.
+
+Confirm the services and receiver health:
+
+```sh
+systemctl status llrdc-casting.service llrdc-update.path
+curl --insecure https://127.0.0.1:9090/health
 ```
 
----
+## Guided installation from a Mac
 
-### Step 3: Inspect Display Subsystem, V4L2 Hardware Decoders & DRM Modes (`modetest`)
-Inspect available DRM graphics cards, V4L2 hardware video nodes (`rkvdec`), and display connectors:
+For an independently managed receiver joined to Tailscale, run from this
+repository:
 
-```bash
-# 1. Query DRM card devices and driver paths
-ssh <BOARD_IP> "ls -l /dev/dri/card* /dev/dri/render*"
-
-# 2. Query active connectors, EDIDs, and supported screen modes (e.g., 1080p, 2K)
-ssh <BOARD_IP> "docker run --rm --privileged -v /dev:/dev llrdc-casting modetest -M rockchip -c"
-
-# 3. List V4L2 hardware video nodes
-ssh <BOARD_IP> "ls -l /dev/video*"
+```sh
+./init_device.sh <tailscale-host-or-ip>
 ```
 
-*Target Drivers & Output*:
-- DRM display card: `/dev/dri/card0` (Driver: `rockchip`)
-- Active HDMI Connector ID: `54` (`HDMI-A-1`; current mode `3840x2160 @ 60Hz`)
-- RK3399 Hardware Video Decoder Node: `/dev/video2` (`rkvdec`, V4L2 stateless)
+The initializer validates the ROCK 4C+, asks for its unique name and optional
+cloud discovery, installs the shared device services and helper tools, and
+checks stable health. It requests the device owner's `sudo` password directly
+when system services must be changed; do not store that password in project
+configuration.
 
----
+To add cloud discovery later without replacing local settings, certificates,
+or pairing state:
 
-### Step 4: Launch LLrdc Casting Server
-To build the Docker image locally and transfer it to the board in background mode:
-
-```bash
-./server.sh --start
+```sh
+./init_device.sh --add-cloud <tailscale-host-or-ip>
 ```
 
-To run all Rust unit tests locally without deploying:
+See [Independent ROCK 4C+ Fleet](FLEET.md) for updates, development overrides,
+and release-image behavior.
 
-```bash
-./server.sh --test
+## Cast to the receiver
+
+1. Read the receiver's private LAN address and rotating four-character code
+   from the HDMI waiting screen.
+2. Open `https://<receiver-lan-ip>:8080/` in Chrome.
+3. Accept the warning for the receiver's self-signed local certificate.
+4. Enter the code, choose the output settings, and select **Start Casting**.
+5. Select the screen, window, or tab in Chrome's permission prompt.
+
+The certificate is regenerated within the WebTransport validity limit and its
+SHA-256 fingerprint is used to authenticate the direct connection. Video,
+control, and telemetry remain between the browser and receiver.
+
+When HDMI access is unavailable, a repository-based operator can retrieve the
+current local code without logging it:
+
+```sh
+pairing_code="$(./server.sh --get-pairing-code --board-ip=<receiver-address>)"
 ```
 
-Deployment runs these tests before compiling the release binary.
+Keep the value only in memory for the immediate pairing action.
 
-The deployment wrapper supports flags for all server settings, including
-`--board-ip`, `--drm-connector-id`, `--drm-plane-id`, `--dashboard-mode`,
-`--idle-timeout-sec`, `--pairing-code-ttl-sec`, `--http-port`,
-`--webtransport-port`, `--board-port`, `--udp-buffer-size-mb`, `--cert-dir`,
-`--cloud`, `--pairing-code-required`, `--pairing-worker-url`, `--receiver-id`,
-`--receiver-registration-secret`, and `--pairing-token-public-key-file`.
-Run `./server.sh --help` for the complete syntax.
+## Optional public pairing page
 
-After deployment, the Tailscale-only management portal exposes a Settings tab
-for receiver runtime values, a LAN pairing-code requirement toggle, and a Cloud discovery toggle. Changes are written
-to the durable device configuration and survive reboots, but a subsequent
-`./server.sh --start` resolves the repository configuration and deployment
-flags again, replacing portal edits. Cloudflare identity and secrets remain
-deployment-controlled and are never returned by the portal.
+`https://cast.llrdc.com` is an optional discovery service. The receiver
+registers its private endpoint and short-lived pairing metadata; the browser
+uses that response to connect directly over the LAN. Cloudflare does not carry
+the casting UI after handoff, media, control traffic, or telemetry.
 
-Retrieve the active local pairing code over SSH without Cloudflare:
+From a development checkout, configure the service interactively with:
 
-```bash
-pairing_code="$(./server.sh --get-pairing-code)"
+```sh
+./setup_cloudflare.sh
 ```
 
-For deliberate local stress testing, a fixed code can be selected for one
-deployment:
+Useful read-only checks are:
 
-```bash
-./server.sh --start --cloud=false --pairing-code=0000
+```sh
+./setup_cloudflare.sh --status
+./setup_cloudflare.sh --verify
+./setup_cloudflare.sh --status --json
 ```
 
-Random rotating codes remain the default.
+The command is resumable and keeps private state in the ignored
+`.cloudflare/` directory. Credential rotation is deliberate and uses
+`./setup_cloudflare.sh --rotate-credentials`. See the
+[pairing service guide](cloudflare/worker/README.md) for infrastructure details.
 
-To stop the server container on the board:
+## Management portal
 
-```bash
-./server.sh --stop
-```
-
----
-
-### Step 5: Execute Video Streamer Test Client
-
-Run the HEVC smoke test at 1080p:
-
-```bash
-./test.sh --1080p --fps 60 --duration 20
-```
-
----
-
-### Step 6: Verify Pipeline Execution Logs
-Verify that the output logs report success across all server stages:
+Independent receivers expose the portal only on the configured Tailscale
+address:
 
 ```text
-[STEP 1] Opening DRM device & autodetecting display mode...
-[DRM SUCCESS] Opened display card: /dev/dri/card0
-[DRM] Selected highest capacity HDMI mode: 3840x2160 @ 60Hz
-[DRM AUTODETECT SUCCESS] Screen Resolution: 3840x2160 @ 60Hz
-
-[IDLE DASHBOARD] HDMI IP screen active; waiting for HEVC stream.
-[READY] waiting for H.265 UDP access units on port 4434
-[PLAYBACK READY] HEVC -> v4l2slh265dec -> HDMI connector 54, plane 33
+https://<tailscale-receiver-ip>:9090/
 ```
+
+It provides:
+
+- live stream throughput and synchronized latency diagnostics;
+- connected clients and process-lifetime sharing history;
+- watchdog state, health, restart, and recovery information;
+- filtered operational events and a redacted diagnostic ZIP;
+- receiver settings that persist across reboots; and
+- manual, health-checked updates with automatic rollback.
+
+The portal has no separate application password because it must bind to the
+configured Tailscale interface and never falls back to a wildcard address.
+Cloud credentials and private keys are not returned by its APIs.
+
+Applying settings restarts only the supervised casting receiver. The manager,
+portal, and WebSocket stay available. A later `server.sh --start` development
+deployment resolves `config.yaml` and command-line flags again and replaces
+portal-edited values.
+
+## Device helper tools
+
+The guided initializer installs the maintenance utilities listed in
+`device/helper-tools.manifest` under `/usr/local/lib/llrdc-tools/` and creates
+command links in `/usr/local/bin/`. A development deployment with
+`./server.sh --start` does not install this helper bundle.
+
+Installed tools include:
+
+- `fan_control.py`, `setup_pwm_fan.sh`, and `test_fan_curve.sh` for the ROCK 4C+
+  PWM fan and thermal policy;
+- `net_monitor.py`, `scan_wifi.sh`, and `connect_wifi.sh` for network setup and
+  diagnostics;
+- `activate_eduroam.sh` for Eduroam activation; and
+- `setup_mgmt_port.sh` for the optional USB management Ethernet port.
+
+Fan configuration is deliberately opt-in. To install the kernel-managed curve
+and reboot:
+
+```sh
+sudo setup_pwm_fan.sh setup
+sudo reboot
+```
+
+After the board returns:
+
+```sh
+fan_control.py status
+setup_pwm_fan.sh status
+```
+
+Manual fan-speed overrides are temporary diagnostics. The kernel thermal
+governor remains authoritative during normal operation.
+
+## Updates and recovery
+
+In the management portal, select **Check for update** and then **Update now**.
+Updates are disabled during an active cast. The updater verifies ARM64,
+restarts the container, waits for stable health, and restores the previous
+image on failure. There is no automatic update schedule.
+
+For a receiver that fails before Linux starts when HDMI is attached, follow
+[ROCK 4C+ HDMI Boot Fix](UBOOT_HDMI_BOOT_FIX.md). For stream geometry and
+latency interpretation, see the [resolution model](ASPECT_RATIO_AND_RESOLUTION_SPEC.md)
+and [latency guide](LATENCY_AND_CONGESTION.md).
+
+## Security notes
+
+- Keep local pairing enabled unless every client on the reachable network is
+  trusted.
+- Do not publish receiver private addresses, pairing codes, tokens, or
+  diagnostic archives.
+- The receiver listeners accept traffic on available receiver interfaces; the
+  HDMI screen deliberately displays only usable private physical-network
+  addresses.
+- The durable journal is root-owned, redacted, and rotated. Normal logs exclude
+  packet payloads, codec headers, and per-frame diagnostics.

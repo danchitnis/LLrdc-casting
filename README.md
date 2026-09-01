@@ -1,332 +1,130 @@
 # LLrdc Casting
 
-LLrdc Casting turns a compatible ARM board into a low-latency casting
-receiver. Share a screen, window, or browser tab from Chrome and show it on a
-connected HDMI display without sending the content through a cloud service.
+LLrdc Casting is an open-source, low-latency way to cast a browser screen,
+window, or tab directly to an HDMI display through a Radxa ROCK 4C+ receiver.
+The sender needs no native application or browser extension, and video stays on
+the local network.
+
+```text
+Browser capture + WebCodecs
+            │
+            │ authenticated WebTransport over the LAN
+            ▼
+ROCK 4C+ / RK3399 ── V4L2 hardware decode ── DRM/KMS ── HDMI
+
+Optional: browser ── pairing code only ── Cloudflare discovery
+          (Cloudflare never carries video, control, or telemetry)
+```
+
+## Why LLrdc Casting is different
+
+LLrdc Casting joins browser-native capture and encoding to the RK3399's stateless video
+decoder and direct display pipeline. Frames do not pass through a hosted relay,
+a receiver desktop, or a software video player. Bounded queues, raw-input frame
+dropping, synchronized latency telemetry, and adaptive bitrate keep the stream
+responsive when the sender, network, or receiver comes under pressure.
 
 ## Features
 
-- **Browser-to-display casting:** Start casting directly from Chrome without a
-  separate capture application or desktop client.
-- **Very low latency:** Designed for presentations, demonstrations, remote
-  control, interactive content, and other activities where immediate feedback
-  matters.
-- **Local and private:** Screen content stays on the local network between the
-  sender computer and the receiver.
-- **Display-aware output:** The receiver reports the connected display and lets
-  you preserve the source aspect ratio or fill the display.
-- **Flexible quality:** Choose 720p, 1080p, 1440p, or 4K UHD, with 30 or 60 FPS
-  and selectable quality and latency preferences.
-- **Hardware-assisted playback:** The receiver is designed to use the board's
-  video capabilities so the sharing computer does not have to do all the
-  playback work.
-- **Idle status screen:** See the receiver's network and display status while
-  no content is being shared.
+- Cast a screen, window, or browser tab without installing a sender app.
+- Send authenticated HEVC/H.265 or H.264 directly over LAN WebTransport.
+- Decode in RK3399 hardware and present directly through DRM/KMS to HDMI.
+- Select 720p, 1080p, 1440p, or 4K UHD and 30 or 60 FPS where supported.
+- Preserve the source proportions or fill the connected display.
+- See live output, encoder, frame, and estimated latency information.
+- Pair locally with a rotating four-character code, even without Internet.
+- Optionally discover a receiver through `cast.llrdc.com` without relaying media.
+- Operate independent receivers with health monitoring, logs, updates, and
+  rollback from a Tailscale-scoped management portal.
 
-The latency estimator, queue limits, raw-frame dropping policy, and adaptive
-bitrate controller are documented in
-[Latency Measurement and Congestion Control](LATENCY_AND_CONGESTION.md).
+## Reference performance
 
-## Requirements
+The reference benchmark reports synchronized encoder-input-to-display latency
+for HEVC 1080p30 in ultra-low-latency mode on a ROCK 4C+ over wired LAN. It
+waits five seconds for startup, then averages every unsmoothed sample from the
+next ten seconds. The 2026-09-01 reference run averaged **68.2 ms** from 10
+synchronized samples, with no access-unit sequence gaps.
 
-### Receiver board
+This is an instrumented pipeline estimate, not an external glass-to-glass or
+camera-to-photon measurement. See [Performance](PERFORMANCE.md) for the exact
+method, environment, results, and limitations.
 
-- A Radxa ROCK 4C+ / RK3399 or compatible ARM64 board with an HDMI output
-- Linux or Armbian installed and reachable over SSH
-- Docker installed and running
-- An HDMI display connected to the board
+## Requirements and compatibility
 
-### Sender computer
+### Receiver
 
-- Docker, SSH, and `scp` for deployment
-- Access to this project directory
-- Google Chrome for casting
-- A network connection to the receiver
+- Radxa ROCK 4C+ with RK3399, an HDMI display, and Debian/Armbian ARM64
+- Docker, network access, and an active Tailscale connection during production
+  installation
+- Wired Ethernet recommended for the reference low-latency experience
 
-The sender computer and receiver must be able to communicate over the local
-network.
+The implementation depends on the Rockchip V4L2 stateless decoder and DRM/KMS
+display stack. Other ARM64 boards are not currently a supported promise.
 
-The HTTP, WebTransport, and direct UDP receiver listeners bind to `0.0.0.0`,
-so they accept connections through any address available on the receiver. The
-idle IP screen intentionally displays only usable private IPv4 addresses on
-physical Ethernet or Wi-Fi interfaces; loopback, Docker, Tailscale, link-local,
-and other virtual addresses are filtered out. Cloud registration prefers
-Ethernet and falls back to Wi-Fi when Ethernet is unavailable.
+### Sender
 
-## Set Up the Board
+- A computer that can reach the receiver on the same LAN
+- Google Chrome with WebCodecs and WebTransport support
 
-For a fleet of independent ROCK 4C+ receivers, use the guided Mac initializer
-and Docker Hub update workflow in [FLEET.md](FLEET.md). Every initialized board
-has the same updater. `server.sh` can temporarily place a Mac development build
-on the selected board without removing its independent update capability.
+Chrome is the primary validated browser. Installed Safari is regression-tested
+with HEVC and H.264 at 1080p30. H.264 output is limited to 1080p by the RK3399
+decoder guardrails; HEVC provides the higher-resolution modes. Available
+hardware encoding still depends on the sender browser and GPU.
 
-Run release checks with `./test_release.sh`, then use
-`./publish_docker_image.sh`. Uncommitted developer changes are supported and
-receive a content-fingerprinted immutable tag. The separate publisher asks the
-developer for a simple yes/no confirmation that tests passed and does not use
-`sudo`; privileged device initialization is run interactively by the device
-owner.
+## Install a local receiver
 
-These steps are required once for a new board.
+For a local-only receiver, run the public bootstrap on the ROCK 4C+:
 
-1. Connect the board to the network and HDMI display. Note its IP address.
-2. Confirm SSH access and Docker:
-
-   ```bash
-   ssh <user>@<receiver-ip> "uname -m && docker info"
-   ```
-
-   The board should report an ARM64 architecture and Docker should return its
-   system information.
-
-3. If Docker is not installed, install it on the board:
-
-   ```bash
-   ssh -t <user>@<receiver-ip> "sudo apt update && sudo apt install -y docker.io docker-cli && sudo systemctl enable --now docker"
-   ```
-
-   Log in again after installation if your user was added to the `docker`
-   group, then verify with `docker info`.
-
-4. On the sender computer, set the receiver address in `config.yaml`:
-
-   ```yaml
-   board:
-     ip: "<receiver-ip>"
-   ```
-
-   You can instead provide `--board-ip=<receiver-ip>` when starting the
-   server.
-
-## Build and Start the Server
-
-Run this from the project directory on the sender computer:
-
-```bash
-./server.sh --start
+```sh
+curl -fsSL https://raw.githubusercontent.com/danchitnis/LLrdc-casting/main/bootstrap_device.sh -o /tmp/bootstrap_device.sh
+bash /tmp/bootstrap_device.sh
 ```
 
-Run all Rust unit tests locally without connecting to or changing the receiver:
+The bootstrap installs the public ARM64 image and Tailscale-scoped management
+services with cloud discovery disabled. Tailscale is not in the casting media
+path. For guided Mac initialization and multi-device updates, follow
+[Fleet setup](FLEET.md).
 
-```bash
-./server.sh --test
-```
+## Start casting
 
-## Browser Hardware Regression Suites
+1. Open `https://<receiver-lan-ip>:8080/` in Chrome.
+2. Accept the local certificate warning. The receiver uses a short-lived,
+   self-signed certificate whose SHA-256 fingerprint authenticates WebTransport.
+3. Enter the rotating code shown on the HDMI waiting screen.
+4. Choose the output settings and select **Start Casting**.
+5. Pick a screen, window, or tab in the browser permission prompt.
 
-Install the client test dependencies once, including Playwright's test runner:
+Select **Stop Casting** to return the receiver to its waiting screen.
 
-```bash
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix client ci
-```
+The optional `https://cast.llrdc.com` entry point replaces steps 1–3 with a
+public pairing page. It returns a private LAN endpoint and short-lived
+authorization token, then the browser connects directly to the receiver.
 
-The local codec suite deploys with Cloudflare discovery disabled and pairs
-directly with the receiver. Chrome is the default (and only) browser for the
-plain command; use the explicit Safari form after Chrome when you want the
-installed Safari WebDriver pass. Safari never uses Playwright WebKit and reuses
-the existing cloud-disabled deployment without redeploying:
+## Important operational notes
 
-```bash
-./test_browser.sh codec          # branded Chrome (default)
-./test_browser.sh codec chrome   # same as above
-./test_browser.sh codec safari   # installed Safari, H.265 + H.264 at 1080p
-```
+- Direct casting and local pairing work without Cloudflare or Internet access.
+- The sender must still be able to reach the receiver's private address.
+- Pairing codes rotate and are rate-limited. Disabling the local code allows
+  any network-reachable client to connect and should be a deliberate choice.
+- The management portal is available at
+  `https://<tailscale-receiver-ip>:9090/`; it does not bind to every interface.
+- Management settings persist across reboots. A later development deployment
+  with `server.sh --start` replaces them with repository configuration.
+- Updates are manual, blocked during active casting, and roll back if the new
+  receiver does not become healthy.
 
-The cloud suite is intentionally separate. It deploys with discovery enabled,
-waits for receiver registration, obtains an unexpired code from D1, pairs
-through `cast.llrdc.com`, and runs one HEVC handoff cycle:
+## Documentation
 
-```bash
-./test_browser.sh cloud
-```
-
-Run both suites in sequence with `./test_browser.sh all`. A board address can
-be supplied explicitly with `--board-ip=<address>`; otherwise the `board.ip`
-value in `config.yaml` is used. The suites require SSH/Docker access to the
-RK3399, a working HDMI mode, installed branded Chrome with the required codec
-support. The Safari form additionally requires Safari **Develop → Allow Remote
-Automation** enabled. The cloud suite additionally requires authenticated
-Wrangler/D1 access. Failure artifacts are written below the repository-level
-`.artefact/` directory and are ignored by git. Each invocation cleans that
-directory first; browser-specific codec runs write their own timestamped run
-directory, and `all` keeps Chrome codec and cloud results separate.
-
-The deployment build runs the same tests before compiling and transferring the
-release binary. A test failure stops the deployment before the receiver is
-stopped or replaced.
-
-The command builds the receiver software on the sender computer, transfers
-what is needed to the board, and starts the receiver. The HDMI display should
-show the LLrdc waiting screen when the receiver is ready.
-
-All server deployment settings can be provided as flags. See the complete
-list with:
-
-```bash
-./server.sh --help
-```
-
-For example:
-
-```bash
-./server.sh --start \
-  --board-ip=<receiver-ip> \
-  --http-port=8080 \
-  --webtransport-port=4433 \
-  --board-port=4434 \
-  --cloud=false
-```
-
-The receiver also exposes a Tailscale-only management portal. It binds to
-`server.admin_bind_address` (or `--admin-bind-address`) and defaults to port
-`9090`; it never falls back to a wildcard address. Open:
-
-```text
-https://<tailscale-receiver-ip>:9090/
-```
-
-The casting and management interfaces are strict-TypeScript Astro sources.
-The container contains two Rust executables: `llrdc-management` is PID 1 and
-owns the portal, configuration, certificates, durable journal, and watchdog;
-it supervises `llrdc-casting` as the media receiver child. The container build
-produces each interface as an independent, self-contained HTML file.
-
-The portal shows live measured stream traffic, connected devices, process-life
-sharing history, receiver health, and structured events. **Stop sharing** sends
-an isolated admin command through the application boundary and restores the
-idle dashboard. Its Settings tab edits receiver runtime values, atomically
-persists them on the device, and restarts only the receiver; the portal and its
-WebSocket remain available and follow the target receiver generation. The
-Watchdog card reports crashes, heartbeat loss, backoff, and recovery. The
-Operational logs card provides incident filtering and a redacted diagnostic ZIP.
-Cloudflare identity and secrets remain deployment-controlled and
-are never returned by the portal. Each later `server.sh --start` resolves the
-local `config.yaml` and deployment flags again, replacing portal edits. The
-portal has no separate password because access is limited to the configured
-Tailscale interface.
-
-The resolved receiver document is stored on the board at
-`/var/lib/llrdc-config/config.yaml`; Cloudflare registration secrets are stored
-separately with root-only permissions. The root-only operational journal is
-stored under `/var/lib/llrdc-management`, rotates at four 8 MiB segments, and
-records lifecycle, connection, security, cloud, stream-summary, latency, and
-failure causes. Normal production logs intentionally exclude packet data,
-SPS/PPS/VPS/NAL summaries, and per-frame messages; the hardware codec harness
-enables those diagnostics only for its test artifacts.
-
-Manager liveness is available at `GET /health/manager`; `GET /health` succeeds
-only when both manager and receiver are ready. A confirmed receiver restart is
-available at `POST /api/watchdog/restart`, and diagnostic events/ZIPs are
-available through the same-origin `/api/logs` endpoints.
-
-To use an address without editing `config.yaml`:
-
-```bash
-./server.sh --start --board-ip=<receiver-ip>
-```
-
-To stop the receiver:
-
-```bash
-./server.sh --stop --board-ip=<receiver-ip>
-```
-
-## Start Casting
-
-To configure the optional `cast.llrdc.com` discovery service interactively
-after logging in with Wrangler:
-
-```bash
-./setup_cloudflare.sh
-```
-
-The script creates the D1 database, applies migrations, generates and uploads
-the required credentials, deploys the Worker/UI, and restarts the receiver.
-It is safe to rerun; generated private state stays in `.cloudflare/`. The
-workflow records non-secret checkpoints in `.cloudflare/setup-state.json`,
-rechecks remote state before changing anything, and can resume after an
-interrupted command.
-SSH access to the receiver must already be configured and working. The script
-does not install SSH or change receiver SSH settings. If needed, it uses your
-existing `sudo` access only to install the public pairing key.
-
-The setup UI adapts to the terminal: interactive terminals get color,
-width-aware status lines, and transient progress indicators; redirected or
-`NO_COLOR` output is plain and append-only. Useful maintenance commands are:
-
-```bash
-./setup_cloudflare.sh --status
-./setup_cloudflare.sh --verify
-./setup_cloudflare.sh --status --json
-./setup_cloudflare.sh --rotate-credentials
-```
-
-`--rotate-credentials` keeps the previous local files until the replacement
-workflow completes; if a later phase fails, rerun setup to reconcile the
-remote and local fingerprints. A failed run reports its phase and recovery
-action instead of claiming completion. The final infrastructure checks do not
-consume a live pairing code; run `./test_browser.sh cloud` for the optional
-full browser-to-LAN HEVC regression.
-
-1. For offline/LAN-only casting, open the receiver's current IP in Chrome:
-
-   ```text
-   https://<receiver-ip>:8080/
-   ```
-
-2. Accept the receiver's local certificate warning, as in the previous workflow.
-3. Retrieve the live pairing code over SSH when HDMI access is unavailable:
-
-   ```bash
-   pairing_code="$(./server.sh --get-pairing-code)"
-   ```
-
-   Enter that value in the browser. This works without Cloudflare. The HDMI
-   idle screen is the manual fallback.
-4. Select the source and picture settings you want to use.
-5. Select **Start Casting**.
-6. Choose the screen, window, or browser tab to share, then approve the
-   browser permission prompt.
-7. Confirm that the shared content appears on the HDMI display.
-
-This direct-IP workflow works without Internet access or Cloudflare. The
-optional `https://cast.llrdc.com` workflow serves a minimal pairing page. It
-uses the Worker only for pairing discovery, then loads the full casting UI from
-the receiver over the authenticated LAN WebTransport connection; WebTransport
-video and control traffic still goes directly over the LAN. Enable discovery
-for a deployment with `./server.sh --start --cloud=true`. The Worker
-credentials described in
-[`cloudflare/worker/README.md`](cloudflare/worker/README.md) are required only
-when that optional workflow is wanted.
-
-For deliberate local stress testing, use a fixed code for one deployment:
-
-```bash
-./server.sh --start --cloud=false --pairing-code=0000
-```
-
-Random rotating pairing codes remain the default. The management portal can
-disable the code requirement for direct LAN clients; this intentionally allows
-any network-reachable client to connect. Fixed-code mode is rejected
-when Cloudflare discovery is enabled and should not be persisted in configuration.
-
-Select **Stop Casting** when finished. The receiver returns to its
-waiting screen after the stream becomes inactive.
-
-## Available Controls
-
-Before starting a stream, you can choose:
-
-- Screen capture or the built-in test pattern
-- Output resolution from 720p through 4K UHD
-- Preserved aspect ratio or stretched output
-- 30 or 60 frames per second
-- Video quality and bandwidth preference
-- Ultra-low-latency, balanced, or quality-focused encoding
-
-Settings are locked while casting is active. Stop casting before changing
-them.
+- [Setup and operations](SETUP.md)
+- [Performance and benchmark method](PERFORMANCE.md)
+- [Development and testing](DEVELOPMENT.md)
+- [Independent receiver fleets](FLEET.md)
+- [Latency and congestion control](LATENCY_AND_CONGESTION.md)
+- [Aspect ratio and resolution model](ASPECT_RATIO_AND_RESOLUTION_SPEC.md)
+- [ROCK 4C+ HDMI boot troubleshooting](UBOOT_HDMI_BOOT_FIX.md)
+- [Optional Cloudflare pairing service](cloudflare/worker/README.md)
+- [Archived implementation plans](docs/archive/)
 
 ## License
 
-This project is distributed under the terms in [LICENSE](LICENSE).
+LLrdc Casting is licensed under the [Apache License 2.0](LICENSE).

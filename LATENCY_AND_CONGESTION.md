@@ -71,10 +71,12 @@ GStreamer, then acknowledges another completed timed access unit after at least
 one second has elapsed. The sender reports no more than one latency sample per
 second.
 
-Each phase is smoothed with an exponentially weighted moving average using an
-alpha of `0.25`. The total shown in the portal is the sum of the smoothed
-phases. The portal plots only real samples; it retains the last value and marks
-its age when sampling is interrupted instead of generating synthetic points.
+The current value shown in the casting UI and portal is smoothed with an
+exponentially weighted moving average using an alpha of `0.25`. The retained
+chart and benchmark samples are unsmoothed phase estimates, so startup can be
+excluded without its smoothing history leaking into the measurement window.
+The portal retains the last current value and marks its age when sampling is
+interrupted instead of generating synthetic points.
 
 ## Sender queue limits
 

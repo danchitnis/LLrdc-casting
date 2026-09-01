@@ -1,4 +1,4 @@
-# Zero-copy playback overlay plan
+# Archived: Zero-copy Playback Overlay Plan
 
 ## Goal
 

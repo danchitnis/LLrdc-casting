@@ -62,6 +62,31 @@ if [[ -z "$board_ip" && -f "$SCRIPT_DIR/config.yaml" ]]; then
   ' "$SCRIPT_DIR/config.yaml")"
 fi
 [[ -n "$board_ip" ]] || { echo "A board address is required; use --board-ip=<address>." >&2; exit 2; }
+admin_ip="$board_ip"
+
+network_type="unknown"
+receiver_interface="unknown"
+if [[ "$board_ip" =~ ^10\.[0-9]+\.[0-9]+\.[0-9]+$ \
+   || "$board_ip" =~ ^192\.168\.[0-9]+\.[0-9]+$ \
+   || "$board_ip" =~ ^172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+$ ]]; then
+  receiver_interface="$(ssh -o BatchMode=yes "$board_ip" "ip -o -4 addr show | awk -v address='$board_ip' '{ split(\$4, parts, \"/\"); if (parts[1] == address) { print \$2; exit } }'" 2>/dev/null || true)"
+  case "$receiver_interface" in
+    eth*|end*|enp*|eno*|ens*|enx*) network_type="wired_lan" ;;
+    wlan*|wlp*|wl*) network_type="wifi_lan" ;;
+    *) network_type="private_lan" ;;
+  esac
+elif [[ "$board_ip" =~ ^100\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  network_type="tailscale"
+  receiver_interface="tailscale"
+fi
+
+resolve_admin_ip() {
+  local configured
+  configured="$(ssh -o BatchMode=yes "$board_ip" "docker exec llrdc-casting awk '/^[[:space:]]*admin_bind_address:/ { gsub(/[\"[:space:]]/, \"\", \$2); print \$2; exit }' /config/config.yaml" 2>/dev/null || true)"
+  if [[ -n "$configured" && "$configured" != -* && "$configured" != *[[:space:]]* ]]; then
+    admin_ip="$configured"
+  fi
+}
 
 if [[ "$MODE" != "codec" || "$codec_browser" == "chrome" ]] && [[ ! -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]] && ! command -v google-chrome >/dev/null 2>&1; then
   echo "Installed branded Google Chrome is required; bundled Playwright Chromium is intentionally not used." >&2
@@ -141,7 +166,7 @@ restore_management_config() {
      docker stop -t 8 llrdc-casting >/dev/null
      rm -f /var/tmp/llrdc-management-config.restore /var/tmp/llrdc-management-runtime.restore /var/tmp/llrdc-management-history.restore.tar"
   for _ in {1..60}; do
-    if curl -fsSk --connect-timeout 2 --max-time 3 "https://${board_ip}:9090/health" >/dev/null 2>&1; then
+    if curl -fsSk --connect-timeout 2 --max-time 3 "https://${admin_ip}:9090/health" >/dev/null 2>&1; then
       expected_hash="$(shasum -a 256 "$management_backup" | awk '{print $1}')"
       restored_hash="$(ssh -o BatchMode=yes "$board_ip" 'docker exec llrdc-casting sha256sum /config/config.yaml' | awk '{print $1}')"
       if [[ "$expected_hash" != "$restored_hash" ]]; then
@@ -201,12 +226,14 @@ if [[ "$MODE" == "management" ]]; then
     echo "[E2E] Controlled management deployment failed; see $artifact_dir/deploy.log" >&2
     exit 1
   fi
+  resolve_admin_ip
   if ! ssh -o BatchMode=yes "$board_ip" "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' llrdc-casting" 2>/dev/null | grep -Fxq 'PAIRING_CODE_FIXED=AB12'; then
     echo "[E2E] Management suite did not deploy the controlled fixed-code environment; see $artifact_dir/deploy.log" >&2
     exit 1
   fi
   export E2E_MODE=management
   export E2E_BOARD_IP="$board_ip"
+  export E2E_ADMIN_IP="$admin_ip"
   export E2E_ARTIFACT_DIR="$artifact_dir"
   export E2E_MANAGEMENT_FIXED_CODE=AB12
   export E2E_MANAGEMENT_INITIAL_CONFIG="$management_backup"
@@ -243,6 +270,7 @@ else
   printf '%s\n' '[E2E] Reused the existing cloud-disabled receiver; no deployment was performed.' > "$artifact_dir/deploy.log"
   echo "[E2E] Verifying the existing receiver configuration..."
 fi
+resolve_admin_ip
 expected_cloud_env="CLOUD_DISCOVERY_ENABLED=$([[ "$cloud_flag" == true ]] && echo 1 || echo 0)"
 if ! ssh -o BatchMode=yes "$board_ip" "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' llrdc-casting" 2>/dev/null \
   | grep -Fxq "$expected_cloud_env"; then
@@ -319,7 +347,10 @@ fi
 echo "[E2E] Pairing code acquired privately. Starting the $codec_browser browser suite."
 export E2E_MODE="$MODE"
 export E2E_BOARD_IP="$board_ip"
+export E2E_ADMIN_IP="$admin_ip"
 export E2E_PAIRING_CODE="$pairing_code"
+export E2E_NETWORK_TYPE="$network_type"
+export E2E_RECEIVER_INTERFACE="$receiver_interface"
 
 if [[ "$MODE" == "codec" ]]; then
   if [[ "$codec_browser" == "chrome" ]]; then

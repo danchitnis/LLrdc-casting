@@ -2,6 +2,9 @@
 name = "llrdc-casting"
 version = "0.1.0"
 edition = "2021"
+description = "Low-latency browser-to-HDMI casting receiver for Rockchip RK3399"
+license = "Apache-2.0"
+repository = "https://github.com/danchitnis/LLrdc-casting"
 
 [dependencies]
 bytemuck = "1.25"

@@ -18,21 +18,21 @@ import {
         <circle cx="12" cy="12" r="3"></circle>
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
       </svg>
-      <h2>Stream Settings</h2>
+      <h2>Cast settings</h2>
     </div>
     <div id="settingsLockNotice" class="lock-notice" style="display: none;">
       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
         <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
       </svg>
-      <span>Settings Locked During Streaming</span>
+      <span>Settings locked while casting</span>
     </div>
   </div>
 
   <div class="settings-grid">
     <div class="form-group">
       <label for="videoSource">
-        <span>Video Source</span>
+        <span>Source</span>
       </label>
       <div class="select-wrapper">
         <select id="videoSource">
@@ -48,7 +48,7 @@ import {
 
     <div class="form-group">
       <label for="resolution">
-        <span>Encoder Resolution</span>
+        <span>Output resolution</span>
       </label>
       <div class="select-wrapper">
         <select id="resolution">
@@ -64,7 +64,7 @@ import {
 
     <div class="form-group">
       <label for="aspectMode">
-        <span>Aspect Ratio</span>
+        <span>Display fit</span>
       </label>
       <div class="select-wrapper">
         <select id="aspectMode">
@@ -80,7 +80,7 @@ import {
 
     <div class="form-group">
       <label for="fps">
-        <span>Target Frame Rate</span>
+        <span>Frame rate</span>
       </label>
       <div class="select-wrapper">
         <select id="fps">
@@ -96,7 +96,7 @@ import {
 
     <div class="form-group">
       <label for="codec">
-        <span>Video Codec</span>
+        <span>Codec</span>
       </label>
       <div class="select-wrapper">
         <select id="codec">
@@ -112,7 +112,7 @@ import {
 
     <div class="form-group">
       <label for="bitrate">
-        <span>Bandwidth / Quality</span>
+        <span>Bitrate</span>
       </label>
       <div class="select-wrapper">
         <select id="bitrate">
@@ -128,7 +128,7 @@ import {
 
     <div class="form-group">
       <label for="latencyMode">
-        <span>Encoding Priority</span>
+        <span>Latency / quality</span>
       </label>
       <div class="select-wrapper">
         <select id="latencyMode">

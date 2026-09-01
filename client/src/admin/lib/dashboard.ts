@@ -817,6 +817,7 @@ async function saveAllSettings(): Promise<void> {
   if (!lastSnapshot || !settingsDirty) return;
   if (!confirm(lastSnapshot.management.active_stream ? 'Applying settings restarts the receiver and stops the active share. Continue?' : 'Applying settings restarts the receiver. Continue?')) return;
   saveSettings.disabled = true; cloudEnabled.disabled = true; localPairingRequired.disabled = true;
+  Object.values(settingInputs).forEach((input) => { input.disabled = true; });
   settingsStatus.textContent = 'Saving settings; receiver restarting…';
   try {
     const response = await fetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: readEditableSettings(), confirm_restart: true }) });
@@ -830,7 +831,10 @@ async function saveAllSettings(): Promise<void> {
       pendingGeneration = payload && typeof payload === 'object' && 'target_generation' in payload && typeof payload.target_generation === 'number' ? payload.target_generation : lastSnapshot.watchdog.receiver_generation + 1;
       settingsStatus.textContent = `Receiver restarting; waiting for generation ${pendingGeneration}…`;
     } else {
-      settingsDirty = false; settingsStatus.textContent = 'Settings already active.';
+      settingsDirty = false;
+      cloudEnabled.disabled = false; localPairingRequired.disabled = false;
+      Object.values(settingInputs).forEach((input) => { input.disabled = false; });
+      settingsStatus.textContent = 'Settings already active.';
     }
   } catch (error) {
     saveSettings.disabled = false; cloudEnabled.disabled = false; localPairingRequired.disabled = false;

@@ -1,4 +1,4 @@
-# Independent ROCK 4C+ Fleet
+# Independent LLrdc Casting Receiver Fleet
 
 Every initialized receiver normally runs the public ARM64 image from
 `danchitnis/llrdc-casting:latest` and can boot, cast, and update without access
@@ -41,10 +41,12 @@ initialized board. That board remains independent and its update controls stay
 enabled. Applying a Docker Hub update removes the temporary override and
 returns the board to the published release image.
 
-## Fully local bootstrap
+## Cloudflare-free bootstrap
 
 For a device that will not use `cast.llrdc.com`, download and run the public
-bootstrap directly on the board:
+bootstrap directly on the board. The production installer still requires the
+board to be joined to Tailscale for its scoped management portal; casting media
+continues to use the local network.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/danchitnis/LLrdc-casting/main/bootstrap_device.sh -o /tmp/bootstrap_device.sh

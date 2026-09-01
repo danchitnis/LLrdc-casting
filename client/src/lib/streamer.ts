@@ -245,16 +245,16 @@ function handleLatencySample(message: ServerStatusMessage): void {
 function friendlyDiagnostic(message: string): string {
   const normalized = message.toLowerCase();
   if (normalized.includes('pairing') || normalized.includes('receiver code')) {
-    return 'Pairing failed. Check the receiver code and try again.';
+    return 'Could not connect to the receiver. Check the code and try again.';
   }
   if (normalized.includes('capture') || normalized.includes('display error') || normalized.includes('screen capture')) {
     return 'Screen sharing is unavailable or was stopped. Choose a screen and try again.';
   }
   if (normalized.includes('unsupported') || normalized.includes('resolution') || normalized.includes('guardrail')) {
-    return 'The selected output is not supported. Choose a lower resolution or another codec.';
+    return 'This output combination is not supported. Choose a lower resolution or another codec.';
   }
   if (normalized.includes('connection') || normalized.includes('webtransport') || normalized.includes('control')) {
-    return 'Connection to the receiver was lost. Reconnect and try again.';
+    return 'The receiver connection was lost. Reconnect and try again.';
   }
   if (normalized.includes('encoder') || normalized.includes('worker') || normalized.includes('track processor')) {
     return 'Casting encountered an encoding problem. Try again or choose H.264.';
